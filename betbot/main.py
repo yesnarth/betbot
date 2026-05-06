@@ -27,6 +27,7 @@ from betbot.analysis import (
     detect_value_bets, rank_value_bets, build_parlays,
     ValueBet, Parlay, kelly_stake,
 )
+from betbot.bankroll import bootstrap_initial_deposit
 from betbot.clv import snapshot_closing_odds
 from betbot.db import Database
 from betbot.enrichment import enrich_team_stats
@@ -362,6 +363,11 @@ def main() -> None:
     logger = setup_logging(settings.log_path)
     db = Database(settings.database_url)
     notifier = EmailNotifier(settings.gmail_user, settings.gmail_app_password, settings.gmail_recipient)
+
+    # First-run bootstrap: if the bankroll ledger is empty and BANKROLL > 0 in .env,
+    # create the inception deposit. Idempotent — only runs once per fresh DB.
+    if bootstrap_initial_deposit(settings.bankroll):
+        logger.info("Bankroll initialisé : dépôt initial de %.2f$", settings.bankroll)
 
     logger.info("BetBot CI démarré")
     logger.info("  Capital       : %.0f$", settings.bankroll)

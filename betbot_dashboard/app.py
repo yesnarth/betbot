@@ -107,7 +107,15 @@ agent_enabled = bool(health.get("agent_enabled"))
 with st.sidebar:
     st.header("État système")
     st.metric("Équipes en DB", health["teams_in_db"])
-    st.metric("Capital", f"{health['bankroll']:.0f} $")
+    # Real bankroll balance (NOT the static BANKROLL env var anymore)
+    balance = float(health.get("balance", 0))
+    available = float(health.get("available", 0))
+    initial = float(health.get("bankroll_initial", 0))
+    delta_str = f"{balance - initial:+.0f} $" if initial > 0 else None
+    st.metric("Solde courant", f"{balance:.0f} $", delta=delta_str)
+    if balance != available:
+        st.caption(f"Disponible : **{available:.0f} $** · "
+                   f"Engagé : {balance - available:.0f} $")
     st.write("Scans automatiques :", " · ".join(health["scan_hours"]))
 
     if agent_enabled:
@@ -147,12 +155,13 @@ with st.sidebar:
 # Tabs — order changed: matches first, manual scan, then AI agent
 # ---------------------------------------------------------------------------
 
-tab_scan, tab_local, tab_events, tab_pending, tab_roi, tab_agent = st.tabs([
+tab_scan, tab_local, tab_events, tab_pending, tab_roi, tab_capital, tab_agent = st.tabs([
     "🎯 Scan manuel",
     "🧠 Agent local",
     "📅 Matchs disponibles",
     "⏳ Paris en attente",
     "📊 Performance",
+    "💰 Capital",
     "🤖 Agent IA (Claude)",
 ])
 
@@ -405,6 +414,93 @@ with tab_roi:
                 "(automatique toutes les 10 min pour les matchs qui démarrent dans "
                 "moins de 30 min)."
             )
+
+
+# ---------------------------------------------------------------------------
+# Tab — Capital (real bankroll tracking)
+# ---------------------------------------------------------------------------
+
+with tab_capital:
+    st.subheader("💰 Gestion du capital")
+    st.caption(
+        "Toutes les mises consomment réellement le solde, tous les gains/pertes "
+        "le mettent à jour automatiquement. Source unique de vérité : la table "
+        "`bankroll_ledger` en DB."
+    )
+
+    try:
+        bk_state = api_get("/bankroll/state")
+    except Exception as exc:
+        st.error(f"Erreur : {exc}")
+        bk_state = None
+
+    if bk_state:
+        c = st.columns(4)
+        c[0].metric("Solde courant", f"{bk_state['balance']:.2f} $")
+        c[1].metric("Capital libre", f"{bk_state['available']:.2f} $")
+        c[2].metric("Engagé sur paris", f"{bk_state['committed']:.2f} $")
+        pnl = bk_state['pnl']
+        c[3].metric("P&L cumulé", f"{pnl:+.2f} $",
+                    delta=f"{pnl:+.2f} $" if pnl != 0 else None)
+
+        st.divider()
+        c2 = st.columns(4)
+        c2[0].metric("Dépôts cumulés", f"{bk_state['total_deposits']:.2f} $")
+        c2[1].metric("Retraits cumulés", f"{bk_state['total_withdrawals']:.2f} $")
+        c2[2].metric("Gains cumulés", f"{bk_state['total_won']:.2f} $")
+        c2[3].metric("Mises perdues", f"{bk_state['total_lost_stakes']:.2f} $")
+
+        # Evolution chart
+        try:
+            evo = api_get("/bankroll/evolution", days=60)
+            if evo:
+                df = pd.DataFrame(evo)
+                df["ts"] = pd.to_datetime(df["ts"])
+                df = df.set_index("ts")
+                st.markdown("### Évolution du solde (60 derniers jours)")
+                st.line_chart(df["balance"], height=260)
+            else:
+                st.info("Pas encore de mouvements à afficher dans la courbe.")
+        except Exception:
+            pass
+
+        # Deposit / withdraw
+        st.divider()
+        st.markdown("### Mouvements manuels")
+        c3 = st.columns([1, 1, 2])
+        with c3[0]:
+            dep_amt = st.number_input("Montant dépôt", min_value=1.0, value=50.0, step=10.0)
+            dep_note = st.text_input("Note dépôt", placeholder="ex : recharge mensuelle")
+            if st.button("➕ Déposer", width='stretch'):
+                try:
+                    api_post("/bankroll/deposit",
+                             json={"amount": dep_amt, "note": dep_note or None})
+                    st.success(f"+{dep_amt:.2f}$ déposés. Recharge la page.")
+                except Exception as exc:
+                    st.error(f"Erreur : {exc}")
+        with c3[1]:
+            wd_amt = st.number_input("Montant retrait", min_value=1.0, value=20.0, step=10.0)
+            wd_note = st.text_input("Note retrait", placeholder="ex : retrait gains")
+            if st.button("➖ Retirer", width='stretch'):
+                try:
+                    api_post("/bankroll/withdraw",
+                             json={"amount": wd_amt, "note": wd_note or None})
+                    st.success(f"-{wd_amt:.2f}$ retirés. Recharge la page.")
+                except Exception as exc:
+                    st.error(f"Erreur : {exc}")
+
+        # Recent ledger
+        st.markdown("### Journal récent")
+        try:
+            history = api_get("/bankroll/history", limit=50)
+            if history:
+                hdf = pd.DataFrame(history)
+                hdf["ts"] = pd.to_datetime(hdf["ts"]).dt.strftime("%Y-%m-%d %H:%M")
+                show = ["ts", "kind", "amount", "balance_after", "note"]
+                show = [c for c in show if c in hdf.columns]
+                st.dataframe(hdf[show], width='stretch', hide_index=True)
+        except Exception:
+            st.caption("(Pas encore d'entrées dans le journal.)")
 
 
 # ---------------------------------------------------------------------------

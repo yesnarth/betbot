@@ -194,8 +194,19 @@ class Database:
         lambda_home: float | None = None,
         lambda_away: float | None = None,
         model_type: str = "poisson",
+        enforce_funds: bool = True,
     ) -> bool:
-        """Save a prediction. Returns True if inserted, False if duplicate / error."""
+        """
+        Save a prediction AND immobilize its Kelly stake on the bankroll ledger.
+
+        Returns True if inserted, False if duplicate, or raises
+        InsufficientFundsError if the bankroll's available balance is below the
+        stake (set enforce_funds=False to bypass — useful for backtests).
+        """
+        from betbot.bankroll import (
+            InsufficientFundsError,
+            record_bet_placed,
+        )
         try:
             with session_scope() as s:
                 # Equivalent of INSERT OR IGNORE on (event_id, market, selection)
@@ -208,7 +219,7 @@ class Database:
                 ).first()
                 if exists:
                     return False
-                s.add(Prediction(
+                pred = Prediction(
                     created_at=_utcnow_iso(),
                     event_id=event_id,
                     sport_key=sport_key,
@@ -224,11 +235,29 @@ class Database:
                     lambda_home=lambda_home,
                     lambda_away=lambda_away,
                     model_type=model_type,
-                ))
-                return True
+                )
+                s.add(pred)
+                s.flush()  # populate pred.id
+                pred_id = pred.id
         except Exception as exc:
             logger.error("Erreur sauvegarde prédiction : %s", exc)
             return False
+
+        # Bankroll hook: immobilize the stake. Done OUTSIDE the prediction
+        # transaction so a bankroll failure rolls back only the ledger entry.
+        if kelly_stake > 0:
+            try:
+                record_bet_placed(pred_id, kelly_stake, enforce_funds=enforce_funds,
+                                  note=f"{home_team} vs {away_team} [{selection}]")
+            except InsufficientFundsError as exc:
+                logger.warning("Bankroll bloqué pour pred #%s : %s", pred_id, exc)
+                # Roll back the prediction we just saved — keep the DB consistent
+                with session_scope() as s2:
+                    p = s2.get(Prediction, pred_id)
+                    if p is not None:
+                        s2.delete(p)
+                raise
+        return True
 
     def get_pending_predictions(self) -> list[dict]:
         with session_scope() as s:
@@ -247,6 +276,18 @@ class Database:
         result: str,
         closing_odds: float | None = None,
     ) -> None:
+        """Mark a prediction's outcome AND trigger the matching bankroll movement.
+
+        - result="win"  → bet_won  (credit stake × odds)
+        - result="loss" → bet_lost (zero-amount audit entry, stake already debited)
+        - result="void" → bet_void (refund the original stake)
+        """
+        from betbot.bankroll import (
+            record_bet_lost,
+            record_bet_void,
+            record_bet_won,
+        )
+        # 1. Update the prediction row + capture stake/odds for the bankroll hook
         with session_scope() as s:
             row = s.execute(
                 select(Prediction).where(
@@ -257,9 +298,28 @@ class Database:
             ).scalar_one_or_none()
             if row is None:
                 return
+            # Idempotency: don't double-credit if we resolve the same row twice
+            already_resolved = row.result is not None
             row.result = result
             row.closing_odds = closing_odds
             row.resolved_at = _utcnow_iso()
+            pred_id = row.id
+            stake = row.kelly_stake
+            odds = row.best_odds
+
+        if already_resolved:
+            return
+
+        # 2. Bankroll movement (outside the prediction transaction)
+        try:
+            if result == "win":
+                record_bet_won(pred_id, stake, odds)
+            elif result == "loss":
+                record_bet_lost(pred_id)
+            elif result == "void":
+                record_bet_void(pred_id, stake)
+        except Exception as exc:
+            logger.error("Bankroll hook failed for pred #%s : %s", pred_id, exc)
 
     # ------------------------------------------------------------------
     # Stats / ROI

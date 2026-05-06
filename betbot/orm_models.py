@@ -107,3 +107,39 @@ class AgentRun(Base):
     cost_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="ok")  # ok | error | timeout
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class BankrollEntry(Base):
+    """
+    Single source of truth for bankroll evolution. Every cash movement —
+    deposits, withdrawals, bet placements, settlements — produces ONE row.
+    The current balance is the running sum of `amount` over all rows.
+
+    `kind` taxonomy (signed `amount` always tells the direction):
+      - "deposit"     :  +N    cash in
+      - "withdrawal"  :  -N    cash out
+      - "bet_placed"  :  -N    stake immobilized when a prediction is saved
+      - "bet_won"     :  +N    payout = stake × odds (full return, not net)
+      - "bet_lost"    :   0    stake already debited at placement (tracking only)
+      - "bet_void"    :  +N    refund of the original stake (push)
+      - "adjustment"  :  ±N    manual correction by the user (with note)
+
+    Storing `balance_after` is redundant with the running sum but lets us
+    detect ledger corruption (sum mismatch) and renders charts without an
+    O(n) scan per row.
+    """
+    __tablename__ = "bankroll_ledger"
+    __table_args__ = (
+        Index("ix_bankroll_ts", "ts"),
+        Index("ix_bankroll_kind", "kind"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    balance_after: Mapped[float] = mapped_column(Float, nullable=False)
+    prediction_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("predictions.id", ondelete="SET NULL"), nullable=True,
+    )
+    note: Mapped[Optional[str]] = mapped_column(String, nullable=True)

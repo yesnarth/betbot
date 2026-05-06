@@ -10,7 +10,9 @@ class HealthResponse(BaseModel):
     status: str
     teams_in_db: int
     scan_hours: list[str]
-    bankroll: float
+    bankroll_initial: float           # value of BANKROLL in .env — Kelly reference
+    balance: float                    # actual current bankroll balance
+    available: float                  # balance minus committed stakes
     agent_enabled: bool
 
 
@@ -124,6 +126,33 @@ class LocalAgentFilters(ManualScanFilters):
     fetch_weather: bool = Field(default=True, description="Fetch Open-Meteo forecast for the home stadium")
     min_final_edge: float = Field(default=0.02, ge=-0.10, le=0.50,
                                   description="Reject picks whose calibrated edge falls below this")
+
+
+class BankrollSnapshot(BaseModel):
+    balance: float
+    committed: float
+    available: float
+    total_deposits: float
+    total_withdrawals: float
+    total_won: float
+    total_lost_stakes: float
+    pnl: float
+    n_entries: int
+
+
+class BankrollMutation(BaseModel):
+    amount: float = Field(..., gt=0, description="Amount in account currency (always positive)")
+    note: str | None = None
+
+
+class BankrollLedgerRow(BaseModel):
+    id: int
+    ts: str
+    kind: str
+    amount: float
+    balance_after: float
+    prediction_id: int | None = None
+    note: str | None = None
 
 
 class LocalAgentResponse(BaseModel):

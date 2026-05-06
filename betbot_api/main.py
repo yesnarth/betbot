@@ -22,6 +22,9 @@ from betbot_api.auth import require_auth
 from betbot_api.schemas import (
     AgentFilters,
     AgentResponse,
+    BankrollLedgerRow,
+    BankrollMutation,
+    BankrollSnapshot,
     EventBrief,
     EventsResponse,
     HealthResponse,
@@ -64,13 +67,17 @@ app.add_middleware(
 
 @app.get("/health", response_model=HealthResponse)
 def health(db: Database = Depends(get_db)) -> HealthResponse:
+    from betbot.bankroll import get_state
     s = load_settings()
     n_teams = sum(len(db.get_all_team_stats_for_league(k)) for k in SPORT_KEYS)
+    bankroll_state = get_state()
     return HealthResponse(
         status="ok",
         teams_in_db=n_teams,
         scan_hours=s.scan_hours,
-        bankroll=s.bankroll,
+        bankroll_initial=s.bankroll,
+        balance=bankroll_state.balance,
+        available=bankroll_state.available,
         agent_enabled=bool(s.anthropic_api_key),
     )
 
@@ -465,3 +472,62 @@ async def agent_recommend(
 
     result = await run_agent(filters.model_dump(exclude_none=True), trigger="api")
     return AgentResponse(**result)
+
+
+# ---------------------------------------------------------------------------
+# Bankroll — real capital tracking (Phase 9)
+# ---------------------------------------------------------------------------
+
+@app.get("/bankroll/state", response_model=BankrollSnapshot)
+def bankroll_state(_: str = Depends(require_auth)) -> BankrollSnapshot:
+    """Current snapshot: balance, committed (immobilized on pending bets),
+    available (free cash), total deposits/withdrawals, P&L."""
+    from betbot.bankroll import get_state
+    s = get_state()
+    return BankrollSnapshot(**s.__dict__)
+
+
+@app.post("/bankroll/deposit", response_model=BankrollSnapshot)
+def bankroll_deposit(
+    body: BankrollMutation,
+    _: str = Depends(require_auth),
+) -> BankrollSnapshot:
+    """Add capital. The amount is always positive."""
+    from betbot.bankroll import deposit
+    s = deposit(body.amount, note=body.note)
+    return BankrollSnapshot(**s.__dict__)
+
+
+@app.post("/bankroll/withdraw", response_model=BankrollSnapshot)
+def bankroll_withdraw(
+    body: BankrollMutation,
+    _: str = Depends(require_auth),
+) -> BankrollSnapshot:
+    """Remove capital. Refuses if the available balance is insufficient."""
+    from betbot.bankroll import InsufficientFundsError, withdraw
+    try:
+        s = withdraw(body.amount, note=body.note)
+    except InsufficientFundsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return BankrollSnapshot(**s.__dict__)
+
+
+@app.get("/bankroll/history", response_model=list[BankrollLedgerRow])
+def bankroll_history(
+    limit: int = Query(default=200, ge=1, le=1000),
+    _: str = Depends(require_auth),
+) -> list[BankrollLedgerRow]:
+    """Recent ledger entries, newest first."""
+    from betbot.bankroll import get_history
+    return [BankrollLedgerRow(**row) for row in get_history(limit=limit)]
+
+
+@app.get("/bankroll/evolution")
+def bankroll_evolution(
+    days: int = Query(default=30, ge=1, le=365),
+    _: str = Depends(require_auth),
+) -> list[dict]:
+    """Time series for the dashboard chart: every ledger entry within the
+    period with its `balance_after` snapshot."""
+    from betbot.bankroll import get_evolution
+    return get_evolution(days=days)
