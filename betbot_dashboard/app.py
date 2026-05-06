@@ -155,7 +155,10 @@ with st.sidebar:
 # Tabs — order changed: matches first, manual scan, then AI agent
 # ---------------------------------------------------------------------------
 
-tab_scan, tab_local, tab_events, tab_pending, tab_roi, tab_capital, tab_agent = st.tabs([
+(
+    tab_scan, tab_local, tab_events, tab_pending,
+    tab_roi, tab_capital, tab_agent, tab_history, tab_sources,
+) = st.tabs([
     "🎯 Scan manuel",
     "🧠 Agent local",
     "📅 Matchs disponibles",
@@ -163,6 +166,8 @@ tab_scan, tab_local, tab_events, tab_pending, tab_roi, tab_capital, tab_agent = 
     "📊 Performance",
     "💰 Capital",
     "🤖 Agent IA (Claude)",
+    "📜 Historique agent",
+    "🔌 Sources",
 ])
 
 
@@ -564,3 +569,104 @@ with tab_agent:
                 if res.get("parlays"):
                     st.markdown("### Combinés")
                     render_parlays(res["parlays"])
+
+
+# ---------------------------------------------------------------------------
+# Tab — Agent runs history
+# ---------------------------------------------------------------------------
+
+with tab_history:
+    st.subheader("📜 Historique des invocations de l'agent IA")
+    st.caption(
+        "Chaque appel à l'agent (Claude ou local) crée une entrée auditée : "
+        "filtres utilisés, raisonnement complet, picks, durée, coût."
+    )
+    col_a, col_b = st.columns([1, 3])
+    with col_a:
+        trigger_filter = st.selectbox(
+            "Source",
+            options=[None, "api", "scheduled", "dashboard"],
+            format_func=lambda x: "Toutes" if x is None else x,
+        )
+        history_limit = st.slider("Limite", 10, 200, 50)
+
+    try:
+        params = {"limit": history_limit}
+        if trigger_filter:
+            params["trigger"] = trigger_filter
+        runs = api_get("/agent/runs", **params)
+    except Exception as exc:
+        st.error(f"Erreur : {exc}")
+        runs = []
+
+    if not runs:
+        st.info(
+            "Aucune exécution d'agent enregistrée. L'agent IA Claude crée "
+            "des entrées dès que tu cliques sur 'Demander une recommandation'. "
+            "L'agent local n'enregistre pas dans cette table (à ajouter)."
+        )
+    else:
+        df = pd.DataFrame(runs)
+        if "created_at" in df.columns:
+            df["created_at"] = pd.to_datetime(df["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
+        compact_cols = [c for c in [
+            "id", "created_at", "trigger", "model", "status",
+            "n_tool_calls", "duration_ms", "cost_usd",
+        ] if c in df.columns]
+        st.dataframe(df[compact_cols], width='stretch', hide_index=True)
+
+        # Drill-down
+        st.markdown("### Détail d'une exécution")
+        if "id" in df.columns:
+            run_id = st.selectbox("Sélectionne un ID",
+                                  options=df["id"].tolist())
+            if st.button("📖 Charger le raisonnement complet", width='stretch'):
+                try:
+                    detail = api_get(f"/agent/runs/{run_id}")
+                except Exception as exc:
+                    st.error(f"Erreur : {exc}")
+                    detail = None
+                if detail:
+                    cols = st.columns(4)
+                    cols[0].metric("Tool calls", detail.get("n_tool_calls", 0))
+                    cols[1].metric("Durée", f"{(detail.get('duration_ms') or 0)/1000:.1f}s")
+                    cols[2].metric("Coût USD", f"${detail.get('cost_usd') or 0:.4f}")
+                    cols[3].metric("Statut", detail.get("status", "?"))
+                    st.markdown("**Filtres utilisés :**")
+                    st.json(detail.get("filters") or {})
+                    st.markdown("**Raisonnement :**")
+                    reasoning = detail.get("reasoning") or "(vide)"
+                    st.text_area("trace", value=reasoning, height=300, disabled=True,
+                                 label_visibility="collapsed")
+                    if detail.get("picks"):
+                        st.markdown("**Picks recommandés :**")
+                        st.dataframe(pd.DataFrame(detail["picks"]),
+                                     width='stretch', hide_index=True)
+                    if detail.get("error"):
+                        st.error(detail["error"])
+
+
+# ---------------------------------------------------------------------------
+# Tab — Data sources health
+# ---------------------------------------------------------------------------
+
+with tab_sources:
+    st.subheader("🔌 État des sources externes")
+    st.caption(
+        "Probe en temps réel chaque source. Une source qui passe à `KO` "
+        "suggère un changement upstream (API down, scraper cassé, clé révoquée)."
+    )
+    if st.button("🔄 Tester maintenant", type="primary"):
+        try:
+            health = api_get("/health/sources")
+            for src in health.get("sources", []):
+                cols = st.columns([2, 1, 1])
+                status_icon = "✅" if src["ok"] else "🔴"
+                cols[0].markdown(f"{status_icon} **{src['name']}**")
+                cols[1].caption(f"{src.get('latency_ms', 0)} ms")
+                if not src["ok"] and src.get("reason"):
+                    cols[2].caption(f"_{src['reason'][:80]}_")
+        except Exception as exc:
+            st.error(f"Erreur : {exc}")
+    else:
+        st.info("Clique sur 'Tester maintenant' pour lancer une vérification live.")

@@ -140,6 +140,29 @@ def list_events(
 # Predictions tracking + ROI
 # ---------------------------------------------------------------------------
 
+@app.post("/predictions/{prediction_id}/confirm-placed")
+def confirm_placed(
+    prediction_id: int,
+    body: dict | None = None,
+    db: Database = Depends(get_db),
+    _: str = Depends(require_auth),
+) -> dict:
+    """Mark a recommended prediction as actually placed at a bookmaker.
+
+    Body (optional): {"bookmaker": "pinnacle", "unconfirm": false}.
+    The bot itself never places bets — this lets the user confirm what they
+    actually played, so ROI / CLV stats reflect reality, not just recommendations.
+    """
+    body = body or {}
+    bookmaker = body.get("bookmaker")
+    unconfirm = bool(body.get("unconfirm", False))
+    ok = db.confirm_prediction_placed(prediction_id, bookmaker, unconfirm=unconfirm)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Prediction {prediction_id} not found")
+    return {"prediction_id": prediction_id, "actually_placed": not unconfirm,
+            "bookmaker": bookmaker}
+
+
 @app.get("/predictions/pending", response_model=list[PredictionRow])
 def pending_predictions(
     db: Database = Depends(get_db),
@@ -601,11 +624,14 @@ def bankroll_withdraw(
 @app.get("/bankroll/history", response_model=list[BankrollLedgerRow])
 def bankroll_history(
     limit: int = Query(default=200, ge=1, le=1000),
+    bookmaker_key: str | None = Query(default=None,
+                                      description="Filter to one bookmaker account"),
     _: str = Depends(require_auth),
 ) -> list[BankrollLedgerRow]:
-    """Recent ledger entries, newest first."""
+    """Recent ledger entries, newest first. Optionally filtered by bookmaker."""
     from betbot.bankroll import get_history
-    return [BankrollLedgerRow(**row) for row in get_history(limit=limit)]
+    return [BankrollLedgerRow(**row)
+            for row in get_history(limit=limit, bookmaker_key=bookmaker_key)]
 
 
 @app.get("/bankroll/guards")
@@ -642,9 +668,10 @@ def bankroll_add_bookmaker(
 @app.get("/bankroll/evolution")
 def bankroll_evolution(
     days: int = Query(default=30, ge=1, le=365),
+    bookmaker_key: str | None = Query(default=None,
+                                      description="Filter to one bookmaker account"),
     _: str = Depends(require_auth),
 ) -> list[dict]:
-    """Time series for the dashboard chart: every ledger entry within the
-    period with its `balance_after` snapshot."""
+    """Time series for the dashboard chart, optionally filtered by bookmaker."""
     from betbot.bankroll import get_evolution
-    return get_evolution(days=days)
+    return get_evolution(days=days, bookmaker_key=bookmaker_key)

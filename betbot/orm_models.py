@@ -82,6 +82,13 @@ class Prediction(Base):
     result: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     closing_odds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     resolved_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Did the user actually place this bet at a bookmaker? Default False since
+    # the bot only RECOMMENDS — it does not place real bets. ROI / hit rate /
+    # CLV computations should ignore predictions where actually_placed=False
+    # so we don't claim performance on bets the user never took.
+    actually_placed: Mapped[bool] = mapped_column(default=False)
+    placed_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    placed_bookmaker: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
 
 class AgentRun(Base):

@@ -220,7 +220,8 @@ def detect_value_bets(
             # Cache probabilities by event_id (avoids 5x recomputation in relaxation loop)
             probs = probs_cache.get(event_id)
             if probs is None:
-                probs = _compute_probs(home, away, event, team_stats_cache, home_avg, away_avg)
+                probs = _compute_probs(home, away, event, team_stats_cache,
+                                       home_avg, away_avg, sport_key=sport_key)
                 if probs is not None:
                     probs_cache[event_id] = probs
             if probs is None:
@@ -298,6 +299,7 @@ def _compute_probs(
     team_stats_cache: dict,
     league_home_avg: float,
     league_away_avg: float,
+    sport_key: str | None = None,
 ) -> MatchProbs | None:
     """
     Compute match probabilities using Dixon-Coles-style independent Poisson.
@@ -324,7 +326,8 @@ def _compute_probs(
                 away_stats=away_stats,
                 league_home_avg=league_home_avg,
                 league_away_avg=league_away_avg,
-                weather_modifier=1.0,  # weather applied separately at scan-time when known
+                weather_modifier=1.0,
+                sport_key=sport_key,   # propagates to per-league Dixon-Coles τ
             )
             match_info = f"({home_matched} / {away_matched})" if (home_matched != home or away_matched != away) else ""
             logger.debug("%s %s vs %s %s: λH=%.2f λA=%.2f → H=%.1f%% D=%.1f%% A=%.1f%%",

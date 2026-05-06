@@ -366,12 +366,13 @@ def deactivate_bookmaker(key: str) -> bool:
 # Reads
 # ---------------------------------------------------------------------------
 
-def get_history(limit: int = 200) -> list[dict]:
-    """Recent ledger entries, newest first."""
+def get_history(limit: int = 200, bookmaker_key: str | None = None) -> list[dict]:
+    """Recent ledger entries, newest first. Optionally filtered by bookmaker."""
     with session_scope() as s:
-        rows = s.execute(
-            select(BankrollEntry).order_by(BankrollEntry.id.desc()).limit(limit)
-        ).scalars().all()
+        stmt = select(BankrollEntry).order_by(BankrollEntry.id.desc()).limit(limit)
+        if bookmaker_key is not None:
+            stmt = stmt.where(BankrollEntry.bookmaker_key == bookmaker_key)
+        rows = s.execute(stmt).scalars().all()
         return [
             {
                 "id": r.id,
@@ -380,23 +381,31 @@ def get_history(limit: int = 200) -> list[dict]:
                 "amount": r.amount,
                 "balance_after": r.balance_after,
                 "prediction_id": r.prediction_id,
+                "bookmaker_key": r.bookmaker_key,
                 "note": r.note,
             }
             for r in rows
         ]
 
 
-def get_evolution(days: int = 30) -> list[dict]:
+def get_evolution(days: int = 30, bookmaker_key: str | None = None) -> list[dict]:
     """Time series for the dashboard chart: every ledger row within the period
-    with its `balance_after` snapshot. Caller can plot ts → balance."""
+    with its `balance_after` snapshot. Optionally filtered by bookmaker."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     with session_scope() as s:
-        rows = s.execute(
-            select(BankrollEntry.ts, BankrollEntry.balance_after, BankrollEntry.kind)
+        stmt = (
+            select(BankrollEntry.ts, BankrollEntry.balance_after,
+                   BankrollEntry.kind, BankrollEntry.bookmaker_key)
             .where(BankrollEntry.ts >= cutoff)
             .order_by(BankrollEntry.id.asc())
-        ).all()
-        return [{"ts": r[0], "balance": r[1], "kind": r[2]} for r in rows]
+        )
+        if bookmaker_key is not None:
+            stmt = stmt.where(BankrollEntry.bookmaker_key == bookmaker_key)
+        rows = s.execute(stmt).all()
+        return [
+            {"ts": r[0], "balance": r[1], "kind": r[2], "bookmaker_key": r[3]}
+            for r in rows
+        ]
 
 
 # ---------------------------------------------------------------------------

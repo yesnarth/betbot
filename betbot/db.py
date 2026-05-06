@@ -358,29 +358,34 @@ class Database:
     # Stats / ROI
     # ------------------------------------------------------------------
 
-    def get_roi_stats(self, days: int = 30) -> dict:
+    def get_roi_stats(self, days: int = 30, only_placed: bool = True) -> dict:
         """
         Return ROI + CLV stats for the last N days.
 
-        CLV (Closing Line Value) is the gold standard skill metric: a
-        consistently positive average CLV is a stronger sign of edge than
-        short-term ROI, which is noise-dominated for small samples.
+        only_placed=True (default): include only predictions where
+        actually_placed=True. This is the honest metric — measuring performance
+        on bets the user actually took, not just recommendations.
+
+        Set only_placed=False for the legacy behavior (count every recommended bet).
+
+        CLV (Closing Line Value) is the gold standard skill metric.
         """
         from datetime import timedelta
         cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         with session_scope() as s:
-            preds = s.execute(
-                select(
-                    Prediction.result,
-                    Prediction.kelly_stake,
-                    Prediction.best_odds,
-                    Prediction.closing_odds,
-                    Prediction.value_edge,
-                ).where(
-                    Prediction.result.is_not(None),
-                    Prediction.created_at >= cutoff_iso,
-                )
-            ).all()
+            stmt = select(
+                Prediction.result,
+                Prediction.kelly_stake,
+                Prediction.best_odds,
+                Prediction.closing_odds,
+                Prediction.value_edge,
+            ).where(
+                Prediction.result.is_not(None),
+                Prediction.created_at >= cutoff_iso,
+            )
+            if only_placed:
+                stmt = stmt.where(Prediction.actually_placed.is_(True))
+            preds = s.execute(stmt).all()
 
         if not preds:
             return {
@@ -421,6 +426,31 @@ class Database:
     # ------------------------------------------------------------------
     # Agent runs (NEW — for AI-agent audit trail)
     # ------------------------------------------------------------------
+
+    def confirm_prediction_placed(
+        self,
+        prediction_id: int,
+        bookmaker: str | None = None,
+        unconfirm: bool = False,
+    ) -> bool:
+        """Mark a recommended prediction as actually placed at a bookmaker.
+
+        Set unconfirm=True to revert the placement marker (mistake fix).
+        Returns True on success, False if prediction not found.
+        """
+        with session_scope() as s:
+            row = s.get(Prediction, prediction_id)
+            if row is None:
+                return False
+            if unconfirm:
+                row.actually_placed = False
+                row.placed_at = None
+                row.placed_bookmaker = None
+            else:
+                row.actually_placed = True
+                row.placed_at = _utcnow_iso()
+                row.placed_bookmaker = bookmaker
+            return True
 
     def list_agent_runs(self, limit: int = 50, offset: int = 0,
                         trigger: str | None = None) -> list[dict]:

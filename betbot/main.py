@@ -33,6 +33,7 @@ from betbot.db import Database
 from betbot.enrichment import enrich_team_stats
 from betbot.notifier import EmailNotifier
 from betbot.resolver import resolve_pending
+from betbot.source_health import check_and_alert as source_health_check
 from betbot.worker_health import WorkerHealthState, start_health_server
 
 
@@ -462,6 +463,17 @@ def main() -> None:
         name="clv-snapshot",
         misfire_grace_time=120,
         coalesce=True,
+    )
+
+    # Source health check daily at 06:30 UTC — alerts via email + Telegram
+    # whenever a source transitions from OK to DOWN (e.g. Understat changes
+    # its HTML structure, Tavily key revoked, etc.)
+    scheduler.add_job(
+        _wrap("source_health", source_health_check),
+        trigger=CronTrigger(hour=6, minute=30),
+        id="source_health_daily",
+        name="source-health",
+        misfire_grace_time=3600,
     )
 
     # Résolution quotidienne des résultats à 04h00 (UTC matchs Europe largement terminés)
