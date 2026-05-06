@@ -1,0 +1,1 @@
+"""BetBot Streamlit dashboard package."""
