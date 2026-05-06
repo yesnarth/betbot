@@ -37,6 +37,7 @@ help:
 	@echo "    make docker-clean   Reclaim build cache + dangling images (safe)"
 	@echo "    make docker-nuke    Aggressive: also remove unused images (CONFIRM)"
 	@echo "    make rebuild        Rebuild images and immediately reclaim cache"
+	@echo "    make docker-compact-wsl  Reclaim WSL2 vhdx space (Windows, ~5min)"
 
 install:
 	pip install -r requirements.txt
@@ -109,6 +110,10 @@ docker-clean:
 	@docker builder prune -af
 	@docker image prune -f
 	@docker system df
+
+docker-compact-wsl:
+	@echo "Reclaim WSL2 vhdx space (Windows only — stops Docker briefly)..."
+	@pwsh -ExecutionPolicy Bypass -File scripts/compact_docker_wsl.ps1
 
 docker-nuke:
 	@echo "AGGRESSIVE cleanup — also removes images NOT currently used by a container."
