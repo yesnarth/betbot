@@ -7,9 +7,11 @@ probabilities well-calibrated?
 
 Three metrics, each measuring something different:
 
-  1. **Brier score** — mean squared error of predicted probability vs actual
-     outcome (0/1). Lower is better. A baseline that always predicts 1/3 each
-     gets ~0.222; a perfect model gets 0.
+  1. **Brier score** (multiclass) — sum of squared errors across the 3 outcomes.
+     Lower is better. Baselines:
+       - perfect model           = 0.0
+       - "always 1/3 each"       = 2/3 ≈ 0.667
+       - "always picks home win" = 1.34 (very bad)
   2. **Log-loss** (cross-entropy) — heavily penalizes confident wrong
      predictions. Better than Brier when over-confidence is dangerous.
   3. **Calibration buckets** — split predictions by probability decile and
@@ -236,7 +238,7 @@ def backtest_summary(result: BacktestResult) -> str:
     lines = [
         f"Backtest {result.sport_key}",
         f"  Matchs scorés     : {result.n_matches}",
-        f"  Brier score       : {result.brier_score:.4f}  (lower is better; 0.222 = baseline)",
+        f"  Brier score       : {result.brier_score:.4f}  (lower is better; ~0.667 = baseline 1/3, 0 = perfect)",
         f"  Log-loss          : {result.log_loss:.4f}    (lower is better)",
         f"  Notes             : {result.notes}",
         "",

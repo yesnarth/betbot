@@ -231,13 +231,20 @@ def detect_value_bets(
                 ("2", "Victoire extérieur", away, probs.away_win),
             ]
 
-            for code, label, outcome_name, model_prob in outcome_map:
-                if model_prob < min_model_prob:
+            for code, label, outcome_name, raw_model_prob in outcome_map:
+                if raw_model_prob < min_model_prob:
                     continue
 
                 best = extract_best_odds(event, outcome_name)
                 if best is None or best.price < min_book_odds:
                     continue
+
+                # Market shrinkage: pull the raw model prob toward the market
+                # implied prob when the disagreement is suspiciously large.
+                # This prevents fictitious mega-edges driven by qualitative
+                # info (injuries, suspensions) the model doesn't see.
+                from betbot.calibration import shrink_toward_market
+                model_prob = shrink_toward_market(raw_model_prob, best.price)
 
                 edge = round(model_prob * best.price - 1.0, 4)
                 if edge < min_value_edge:

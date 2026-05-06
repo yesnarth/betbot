@@ -47,6 +47,18 @@ def render_picks_table(picks: list[dict]) -> None:
     ] if c in df.columns]
     st.dataframe(df[cols], width='stretch', hide_index=True)
 
+    # Caveat on suspiciously large edges
+    if "value_edge" in df.columns:
+        big_edges = (df["value_edge"] > 0.20).sum()
+        if big_edges > 0:
+            st.warning(
+                f"⚠️ **{big_edges} pari(s) ont un edge > 20%.** Le marché des cotes est "
+                "généralement bien calibré ; un edge aussi élevé révèle souvent un "
+                "**défaut de modèle** (le modèle ne voit pas les blessures, suspensions, "
+                "rotations, motivation). Considère ces paris comme suspects et privilégie "
+                "ceux à edge **2-10%**, où la valeur est plus fiable."
+            )
+
 
 def render_parlays(parlays: list[dict]) -> None:
     if not parlays:
