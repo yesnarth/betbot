@@ -1,21 +1,66 @@
+# Anything we exclude from the build context shrinks `COPY . /app` and avoids
+# busting the cache for every unrelated file change. Be generous here — only
+# files actually needed at runtime should be sent to the daemon.
+
+# VCS
 .git
 .gitignore
+.gitattributes
+.github
+
+# Python build / cache artifacts
 .venv
 venv
+env
 __pycache__
+**/__pycache__
 *.pyc
 *.pyo
 *.pyd
+*.egg-info
+build
+dist
+
+# Test / coverage / type-check
 .pytest_cache
 .mypy_cache
+.ruff_cache
 .coverage
 htmlcov
+coverage.xml
+
+# Editor / IDE
 .idea
 .vscode
+
+# Local databases / logs / secrets
 *.db
+*.db-journal
 *.log
 .env
+.env.local
+
+# Docker assets — never copy themselves into the image
 docker-compose*.yml
+docker-compose.override.*
 Dockerfile*
+.dockerignore
+Caddyfile
+
+# Docs / scripts not needed at runtime
 README*.md
-alembic/versions/__pycache__
+CHANGELOG.md
+LICENSE
+Makefile
+scripts/
+
+# Backups directory (host-mounted, no need inside the image)
+backups/
+
+# Notebooks / large analytics outputs
+*.ipynb
+*.csv
+*.parquet
+
+# Streamlit cache
+.streamlit

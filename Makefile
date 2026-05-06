@@ -2,7 +2,8 @@
 # Works with both `make` (Unix) and `make` shipped with Git Bash on Windows.
 
 .PHONY: help install test up down logs migrate enrich resolve scan dry-run \
-        backtest dashboard prod-up prod-down clean fresh
+        backtest dashboard prod-up prod-down clean fresh \
+        docker-stats docker-clean docker-nuke rebuild
 
 help:
 	@echo "BetBot — Make targets"
@@ -28,8 +29,14 @@ help:
 	@echo "    make prod-down      Stop prod stack"
 	@echo ""
 	@echo "  Clean:"
-	@echo "    make clean          Remove caches + logs"
+	@echo "    make clean          Remove Python caches + logs"
 	@echo "    make fresh          DELETE all data and rebuild from scratch"
+	@echo ""
+	@echo "  Docker disk hygiene:"
+	@echo "    make docker-stats   Show Docker disk usage breakdown"
+	@echo "    make docker-clean   Reclaim build cache + dangling images (safe)"
+	@echo "    make docker-nuke    Aggressive: also remove unused images (CONFIRM)"
+	@echo "    make rebuild        Rebuild images and immediately reclaim cache"
 
 install:
 	pip install -r requirements.txt
@@ -89,3 +96,35 @@ clean:
 fresh:
 	docker compose down -v
 	@echo "All volumes wiped. Re-run: make up"
+
+# ----------------------------------------------------------------------------
+# Docker disk hygiene
+# ----------------------------------------------------------------------------
+
+docker-stats:
+	@docker system df
+
+docker-clean:
+	@echo "Reclaiming Docker build cache + dangling layers..."
+	@docker builder prune -af
+	@docker image prune -f
+	@docker system df
+
+docker-nuke:
+	@echo "AGGRESSIVE cleanup — also removes images NOT currently used by a container."
+	@echo "This will NOT touch your running services (db, redis, betbot, lean-server, etc.)"
+	@docker builder prune -af
+	@docker image prune -af
+	@docker container prune -f
+	@docker volume prune -f
+	@docker system df
+
+# Rebuild without cache then reclaim the temp build cache in one shot.
+# Use this instead of `docker compose build --no-cache` when you really need
+# a fresh build but don't want 10 GB of build cache to linger.
+rebuild:
+	@echo "Rebuilding image (no cache)..."
+	@docker compose build --no-cache
+	@echo "Reclaiming the build cache that just got created..."
+	@docker builder prune -af
+	@echo "Done. Run: make up"

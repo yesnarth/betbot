@@ -69,6 +69,18 @@ Caddy automatically:
 | Stop stack | `make down` |
 | Wipe everything | `make fresh` |
 
+### Docker disk hygiene
+
+Each `--no-cache` rebuild leaves behind ~1-2 GB of build cache. Without
+periodic cleanup, this can grow past 10 GB.
+
+| Command | What it does |
+|---|---|
+| `make docker-stats` | Show what Docker is consuming |
+| `make docker-clean` | Reclaim build cache + dangling layers (safe — keeps your other projects' images) |
+| `make rebuild` | `--no-cache` build then immediately wipe the cache (avoids the bloat) |
+| `make docker-nuke` | Aggressive: also drop images not currently used by any container |
+
 ## Architecture
 
 ### Prediction model (blended)
