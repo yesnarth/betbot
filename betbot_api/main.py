@@ -495,6 +495,8 @@ def recommend_agent_local(
         min_final_edge=filters.min_final_edge,
         bankroll=s.bankroll,
         kelly_fraction=s.kelly_fraction,
+        trigger="dashboard",
+        filters=filters.model_dump(),
     )
 
     # 5. Build parlays from accepted picks only — reconstruct ValueBet objects

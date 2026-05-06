@@ -455,19 +455,29 @@ with tab_capital:
         c2[2].metric("Gains cumulés", f"{bk_state['total_won']:.2f} $")
         c2[3].metric("Mises perdues", f"{bk_state['total_lost_stakes']:.2f} $")
 
-        # Evolution chart
+        # Evolution chart — guard against empty / single-point datasets to
+        # avoid Vega-Lite "Infinite extent" warnings flooding the console.
         try:
             evo = api_get("/bankroll/evolution", days=60)
-            if evo:
-                df = pd.DataFrame(evo)
-                df["ts"] = pd.to_datetime(df["ts"])
-                df = df.set_index("ts")
-                st.markdown("### Évolution du solde (60 derniers jours)")
-                st.line_chart(df["balance"], height=260)
+        except Exception as exc:
+            evo = None
+            st.caption(f"_Courbe d'évolution indisponible : {exc}_")
+        st.markdown("### Évolution du solde (60 derniers jours)")
+        if not evo:
+            st.info("Aucun mouvement sur la période — la courbe apparaîtra dès le premier dépôt/pari.")
+        elif len(evo) < 2:
+            st.info(
+                f"Un seul point de données ({len(evo)}). La courbe s'affichera "
+                "dès le 2e mouvement de bankroll."
+            )
+        else:
+            df = pd.DataFrame(evo)
+            df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+            df = df.dropna(subset=["ts"]).set_index("ts").sort_index()
+            if df.empty:
+                st.info("Données présentes mais timestamps illisibles.")
             else:
-                st.info("Pas encore de mouvements à afficher dans la courbe.")
-        except Exception:
-            pass
+                st.line_chart(df["balance"], height=260)
 
         # Deposit / withdraw
         st.divider()
@@ -601,9 +611,9 @@ with tab_history:
 
     if not runs:
         st.info(
-            "Aucune exécution d'agent enregistrée. L'agent IA Claude crée "
-            "des entrées dès que tu cliques sur 'Demander une recommandation'. "
-            "L'agent local n'enregistre pas dans cette table (à ajouter)."
+            "Aucune exécution d'agent enregistrée pour l'instant. Chaque "
+            "appel à l'agent local OU Claude (via les onglets dédiés) "
+            "crée une entrée auditée ici."
         )
     else:
         df = pd.DataFrame(runs)

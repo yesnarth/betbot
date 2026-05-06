@@ -1,0 +1,86 @@
+{
+  "tabs": {
+    "scan": {
+      "label": "\ud83c\udfaf Scan manuel",
+      "ok": true,
+      "issues": [],
+      "body_excerpt": "\u00c9tat syst\u00e8me\n\n\u00c9quipes en DB\n\n132\n\nSolde courant\n\n100 $\n\n+0 $\n\nScans automatiques : 09:00 \u00b7 15:00 \u00b7 20:00\n\nAgent IA non configur\u00e9 \u2014 utilise le Scan manuel ci-contre.\n\nFiltres de scan\n\nS'appliquent au Scan manuel ET \u00e0 l'agent IA.\n\nLigue\n\nToutes\n\nSeulement les matchs d'aujourd'hui\n\nEdge minimum (%)\n\n4.00\n\n-10.00\n\n20.00\n\nProbabilit\u00e9 mod\u00e8le minimale\n\n0.40\n\n0.10\n\n0.90\n\nCote minimum\n\n1.50\n\n1.00\n\n5.00\n\nNombre de jambes par combin\u00e9\n\n3\n\n1\n\n6\n\nNombre de combin\u00e9s \u00e0 g\u00e9n\u00e9rer\n\n3\n\n1\n\n10\n\n\ud83d\udd04 R\u00e9soudre les paris termin\u00e9s\n\nDeploy\n\u26bd BetBot Dashboard\n\n\ud83c\udfaf Scan manuel\n\n\ud83e\udde0 Agent local\n\n\ud83d\udcc5 Matchs disponibles\n\n\u23f3 Paris en attente\n\n\ud83d\udcca Performance\n\n\ud83d\udcb0 Capital\n\n\ud83e\udd16 Agent IA (Claude)\n\n\ud83d\udcdc Historique agent\n\n\ud83d\udd0c Sources\n\nScan manuel \u2014 mod\u00e8le Dixon-Coles + xG + ELO\n\nAucune IA. Reproductible. Gratuit (au-del\u00e0 du quota Odds API). C'est exactement le calcul que fait le worker au quotidien \u00e0 09h, 15h, 20h.\n\n\u25b6\ufe0f Lancer le scan",
+      "new_console": [],
+      "new_network_errors": []
+    },
+    "local": {
+      "label": "\ud83e\udde0 Agent local",
+      "ok": true,
+      "issues": [],
+      "body_excerpt": "\u00c9tat syst\u00e8me\n\n\u00c9quipes en DB\n\n132\n\nSolde courant\n\n100 $\n\n+0 $\n\nScans automatiques : 09:00 \u00b7 15:00 \u00b7 20:00\n\nAgent IA non configur\u00e9 \u2014 utilise le Scan manuel ci-contre.\n\nFiltres de scan\n\nS'appliquent au Scan manuel ET \u00e0 l'agent IA.\n\nLigue\n\nToutes\n\nSeulement les matchs d'aujourd'hui\n\nEdge minimum (%)\n\n4.00\n\n-10.00\n\n20.00\n\nProbabilit\u00e9 mod\u00e8le minimale\n\n0.40\n\n0.10\n\n0.90\n\nCote minimum\n\n1.50\n\n1.00\n\n5.00\n\nNombre de jambes par combin\u00e9\n\n3\n\n1\n\n6\n\nNombre de combin\u00e9s \u00e0 g\u00e9n\u00e9rer\n\n3\n\n1\n\n10\n\n\ud83d\udd04 R\u00e9soudre les paris termin\u00e9s\n\nDeploy\n\u26bd BetBot Dashboard\n\n\ud83c\udfaf Scan manuel\n\n\ud83e\udde0 Agent local\n\n\ud83d\udcc5 Matchs disponibles\n\n\u23f3 Paris en attente\n\n\ud83d\udcca Performance\n\n\ud83d\udcb0 Capital\n\n\ud83e\udd16 Agent IA (Claude)\n\n\ud83d\udcdc Historique agent\n\n\ud83d\udd0c Sources\n\nAgent local \u2014 r\u00e8gles m\u00e9tier explicites\n\nPrend les picks du scan, croise avec les news Tavily + blessures + m\u00e9t\u00e9o + ELO, applique des r\u00e8gles explicites pour calibrer les edges fictifs. Z\u00e9ro co\u00fbt au-del\u00e0 des quotas Tavily/Odds API. Reproductible et auditable.\n\nConsulter Tavily (news live)\n\nConsulter Open-Meteo (m\u00e9t\u00e9o stade)\n\nEdge minimum APR\u00c8S calibration (%)\n\n2.00\n\n-5.00\n\n15.00\n\n\ud83e\udde0 Lancer l'agent local",
+      "new_console": [],
+      "new_network_errors": []
+    },
+    "events": {
+      "label": "\ud83d\udcc5 Matchs disponibles",
+      "ok": true,
+      "issues": [],
+      "body_excerpt": "\u00c9tat syst\u00e8me\n\n\u00c9quipes en DB\n\n132\n\nSolde courant\n\n100 $\n\n+0 $\n\nScans automatiques : 09:00 \u00b7 15:00 \u00b7 20:00\n\nAgent IA non configur\u00e9 \u2014 utilise le Scan manuel ci-contre.\n\nFiltres de scan\n\nS'appliquent au Scan manuel ET \u00e0 l'agent IA.\n\nLigue\n\nToutes\n\nSeulement les matchs d'aujourd'hui\n\nEdge minimum (%)\n\n4.00\n\n-10.00\n\n20.00\n\nProbabilit\u00e9 mod\u00e8le minimale\n\n0.40\n\n0.10\n\n0.90\n\nCote minimum\n\n1.50\n\n1.00\n\n5.00\n\nNombre de jambes par combin\u00e9\n\n3\n\n1\n\n6\n\nNombre de combin\u00e9s \u00e0 g\u00e9n\u00e9rer\n\n3\n\n1\n\n10\n\n\ud83d\udd04 R\u00e9soudre les paris termin\u00e9s\n\nDeploy\n\u26bd BetBot Dashboard\n\n\ud83c\udfaf Scan manuel\n\n\ud83e\udde0 Agent local\n\n\ud83d\udcc5 Matchs disponibles\n\n\u23f3 Paris en attente\n\n\ud83d\udcca Performance\n\n\ud83d\udcb0 Capital\n\n\ud83e\udd16 Agent IA (Claude)\n\n\ud83d\udcdc Historique agent\n\n\ud83d\udd0c Sources\n\nMatchs disponibles\n\nListe brute des matchs visibles c\u00f4t\u00e9 Odds API, sans filtre de mod\u00e8le.\n\n\ud83d\udd0d Charger les matchs",
+      "new_console": [],
+      "new_network_errors": []
+    },
+    "pending": {
+      "label": "\u23f3 Paris en attente",
+      "ok": true,
+      "issues": [],
+      "body_excerpt": "\u00c9tat syst\u00e8me\n\n\u00c9quipes en DB\n\n132\n\nSolde courant\n\n100 $\n\n+0 $\n\nScans automatiques : 09:00 \u00b7 15:00 \u00b7 20:00\n\nAgent IA non configur\u00e9 \u2014 utilise le Scan manuel ci-contre.\n\nFiltres de scan\n\nS'appliquent au Scan manuel ET \u00e0 l'agent IA.\n\nLigue\n\nToutes\n\nSeulement les matchs d'aujourd'hui\n\nEdge minimum (%)\n\n4.00\n\n-10.00\n\n20.00\n\nProbabilit\u00e9 mod\u00e8le minimale\n\n0.40\n\n0.10\n\n0.90\n\nCote minimum\n\n1.50\n\n1.00\n\n5.00\n\nNombre de jambes par combin\u00e9\n\n3\n\n1\n\n6\n\nNombre de combin\u00e9s \u00e0 g\u00e9n\u00e9rer\n\n3\n\n1\n\n10\n\n\ud83d\udd04 R\u00e9soudre les paris termin\u00e9s\n\nDeploy\n\u26bd BetBot Dashboard\n\n\ud83c\udfaf Scan manuel\n\n\ud83e\udde0 Agent local\n\n\ud83d\udcc5 Matchs disponibles\n\n\u23f3 Paris en attente\n\n\ud83d\udcca Performance\n\n\ud83d\udcb0 Capital\n\n\ud83e\udd16 Agent IA (Claude)\n\n\ud83d\udcdc Historique agent\n\n\ud83d\udd0c Sources\n\nParis en attente de r\u00e9sultat\n\nAucun pari en attente. Les paris arrivent ici quand : (1) un scan (manuel ou auto via le worker) sauvegarde des picks, ou (2) tu valides l'output de l'agent IA.",
+      "new_console": [],
+      "new_network_errors": []
+    },
+    "roi": {
+      "label": "\ud83d\udcca Performance",
+      "ok": true,
+      "issues": [],
+      "body_excerpt": "\u00c9tat syst\u00e8me\n\n\u00c9quipes en DB\n\n132\n\nSolde courant\n\n100 $\n\n+0 $\n\nScans automatiques : 09:00 \u00b7 15:00 \u00b7 20:00\n\nAgent IA non configur\u00e9 \u2014 utilise le Scan manuel ci-contre.\n\nFiltres de scan\n\nS'appliquent au Scan manuel ET \u00e0 l'agent IA.\n\nLigue\n\nToutes\n\nSeulement les matchs d'aujourd'hui\n\nEdge minimum (%)\n\n4.00\n\n-10.00\n\n20.00\n\nProbabilit\u00e9 mod\u00e8le minimale\n\n0.40\n\n0.10\n\n0.90\n\nCote minimum\n\n1.50\n\n1.00\n\n5.00\n\nNombre de jambes par combin\u00e9\n\n3\n\n1\n\n6\n\nNombre de combin\u00e9s \u00e0 g\u00e9n\u00e9rer\n\n3\n\n1\n\n10\n\n\ud83d\udd04 R\u00e9soudre les paris termin\u00e9s\n\nDeploy\n\u26bd BetBot Dashboard\n\n\ud83c\udfaf Scan manuel\n\n\ud83e\udde0 Agent local\n\n\ud83d\udcc5 Matchs disponibles\n\n\u23f3 Paris en attente\n\n\ud83d\udcca Performance\n\n\ud83d\udcb0 Capital\n\n\ud83e\udd16 Agent IA (Claude)\n\n\ud83d\udcdc Historique agent\n\n\ud83d\udd0c Sources\n\nPerformance globale\n\nP\u00e9riode (jours)\n\n30\n\nAucun pari r\u00e9solu sur les 30 derniers jours. Les m\u00e9triques de ROI / hit rate / CLV s'afficheront automatiquement d\u00e8s que les premiers paris auront \u00e9t\u00e9 r\u00e9solus (le worker le fait \u00e0 04h chaque jour, ou clique R\u00e9soudre les paris termin\u00e9s dans la sidebar).",
+      "new_console": [],
+      "new_network_errors": []
+    },
+    "capital": {
+      "label": "\ud83d\udcb0 Capital",
+      "ok": true,
+      "issues": [],
+      "body_excerpt": "\u00c9tat syst\u00e8me\n\n\u00c9quipes en DB\n\n132\n\nSolde courant\n\n100 $\n\n+0 $\n\nScans automatiques : 09:00 \u00b7 15:00 \u00b7 20:00\n\nAgent IA non configur\u00e9 \u2014 utilise le Scan manuel ci-contre.\n\nFiltres de scan\n\nS'appliquent au Scan manuel ET \u00e0 l'agent IA.\n\nLigue\n\nToutes\n\nSeulement les matchs d'aujourd'hui\n\nEdge minimum (%)\n\n4.00\n\n-10.00\n\n20.00\n\nProbabilit\u00e9 mod\u00e8le minimale\n\n0.40\n\n0.10\n\n0.90\n\nCote minimum\n\n1.50\n\n1.00\n\n5.00\n\nNombre de jambes par combin\u00e9\n\n3\n\n1\n\n6\n\nNombre de combin\u00e9s \u00e0 g\u00e9n\u00e9rer\n\n3\n\n1\n\n10\n\n\ud83d\udd04 R\u00e9soudre les paris termin\u00e9s\n\nDeploy\n\u26bd BetBot Dashboard\n\n\ud83c\udfaf Scan manuel\n\n\ud83e\udde0 Agent local\n\n\ud83d\udcc5 Matchs disponibles\n\n\u23f3 Paris en attente\n\n\ud83d\udcca Performance\n\n\ud83d\udcb0 Capital\n\n\ud83e\udd16 Agent IA (Claude)\n\n\ud83d\udcdc Historique agent\n\n\ud83d\udd0c Sources\n\n\ud83d\udcb0 Gestion du capital\n\nToutes les mises consomment r\u00e9ellement le solde, tous les gains/pertes le mettent \u00e0 jour automatiquement. Source unique de v\u00e9rit\u00e9 : la table bankroll_ledger en DB.\n\nSolde courant\n\n100.00 $\n\nCapital libre\n\n100.00 $\n\nEngag\u00e9 sur paris\n\n0.00 $\n\nP&L cumul\u00e9\n\n+0.00 $\n\nD\u00e9p\u00f4ts cumul\u00e9s\n\n100.00 $\n\nRetraits cumul\u00e9s\n\n0.00 $\n\nGains cumul\u00e9s\n\n0.00 $\n\nMises perdues\n\n0.00 $\n\n\u00c9volution du solde (60 derniers jours)\n\nUn seul point de donn\u00e9es (1). La courbe s'affichera d\u00e8s le 2e mouvement de bankroll.\n\nMouvements manuels\n\nMontant d\u00e9p\u00f4t\n\nNote d\u00e9p\u00f4t\n\n\u2795 D\u00e9poser\n\nMontant retrait\n\nNote retrait\n\n\u2796 Retirer\n\nJournal r\u00e9cent",
+      "new_console": [],
+      "new_network_errors": []
+    },
+    "agent": {
+      "label": "\ud83e\udd16 Agent IA (Claude)",
+      "ok": true,
+      "issues": [],
+      "body_excerpt": "\u00c9tat syst\u00e8me\n\n\u00c9quipes en DB\n\n132\n\nSolde courant\n\n100 $\n\n+0 $\n\nScans automatiques : 09:00 \u00b7 15:00 \u00b7 20:00\n\nAgent IA non configur\u00e9 \u2014 utilise le Scan manuel ci-contre.\n\nFiltres de scan\n\nS'appliquent au Scan manuel ET \u00e0 l'agent IA.\n\nLigue\n\nToutes\n\nSeulement les matchs d'aujourd'hui\n\nEdge minimum (%)\n\n4.00\n\n-10.00\n\n20.00\n\nProbabilit\u00e9 mod\u00e8le minimale\n\n0.40\n\n0.10\n\n0.90\n\nCote minimum\n\n1.50\n\n1.00\n\n5.00\n\nNombre de jambes par combin\u00e9\n\n3\n\n1\n\n6\n\nNombre de combin\u00e9s \u00e0 g\u00e9n\u00e9rer\n\n3\n\n1\n\n10\n\n\ud83d\udd04 R\u00e9soudre les paris termin\u00e9s\n\nDeploy\n\u26bd BetBot Dashboard\n\n\ud83c\udfaf Scan manuel\n\n\ud83e\udde0 Agent local\n\n\ud83d\udcc5 Matchs disponibles\n\n\u23f3 Paris en attente\n\n\ud83d\udcca Performance\n\n\ud83d\udcb0 Capital\n\n\ud83e\udd16 Agent IA (Claude)\n\n\ud83d\udcdc Historique agent\n\n\ud83d\udd0c Sources\n\nAgent IA \u2014 Claude Sonnet 4.6\n\nL'agent appelle les M\u00caMES outils que le scan manuel + en plus : recherche de news live (Tavily), blessures (API-Football), m\u00e9t\u00e9o (Open-Meteo). Il raisonne en plusieurs \u00e9tapes et justifie chaque pick.\n\nAgent d\u00e9sactiv\u00e9. Pour l'activer :\n\nCr\u00e9e une cl\u00e9 sur https://console.anthropic.com (5$ de cr\u00e9dit gratuits)\nAjoute ANTHROPIC_API_KEY=sk-ant-... dans .env\nRed\u00e9marre l'API : docker compose restart api\n\nEn attendant, utilise l'onglet \ud83c\udfaf Scan manuel \u2014 il fait le m\u00eame calcul de probabilit\u00e9s, sans le co\u00fbt et sans le raisonnement narratif.",
+      "new_console": [],
+      "new_network_errors": []
+    },
+    "history": {
+      "label": "\ud83d\udcdc Historique agent",
+      "ok": true,
+      "issues": [],
+      "body_excerpt": "\u00c9tat syst\u00e8me\n\n\u00c9quipes en DB\n\n132\n\nSolde courant\n\n100 $\n\n+0 $\n\nScans automatiques : 09:00 \u00b7 15:00 \u00b7 20:00\n\nAgent IA non configur\u00e9 \u2014 utilise le Scan manuel ci-contre.\n\nFiltres de scan\n\nS'appliquent au Scan manuel ET \u00e0 l'agent IA.\n\nLigue\n\nToutes\n\nSeulement les matchs d'aujourd'hui\n\nEdge minimum (%)\n\n4.00\n\n-10.00\n\n20.00\n\nProbabilit\u00e9 mod\u00e8le minimale\n\n0.40\n\n0.10\n\n0.90\n\nCote minimum\n\n1.50\n\n1.00\n\n5.00\n\nNombre de jambes par combin\u00e9\n\n3\n\n1\n\n6\n\nNombre de combin\u00e9s \u00e0 g\u00e9n\u00e9rer\n\n3\n\n1\n\n10\n\n\ud83d\udd04 R\u00e9soudre les paris termin\u00e9s\n\nDeploy\n\u26bd BetBot Dashboard\n\n\ud83c\udfaf Scan manuel\n\n\ud83e\udde0 Agent local\n\n\ud83d\udcc5 Matchs disponibles\n\n\u23f3 Paris en attente\n\n\ud83d\udcca Performance\n\n\ud83d\udcb0 Capital\n\n\ud83e\udd16 Agent IA (Claude)\n\n\ud83d\udcdc Historique agent\n\n\ud83d\udd0c Sources\n\n\ud83d\udcdc Historique des invocations de l'agent IA\n\nChaque appel \u00e0 l'agent (Claude ou local) cr\u00e9e une entr\u00e9e audit\u00e9e : filtres utilis\u00e9s, raisonnement complet, picks, dur\u00e9e, co\u00fbt.\n\nSource\n\nToutes\n\nLimite\n\n50\n\n10\n\n200\n\nD\u00e9tail d'une ex\u00e9cution\n\nS\u00e9lectionne un ID\n\n5\n\n\ud83d\udcd6 Charger le raisonnement complet",
+      "new_console": [],
+      "new_network_errors": []
+    },
+    "sources": {
+      "label": "\ud83d\udd0c Sources",
+      "ok": true,
+      "issues": [],
+      "body_excerpt": "\u00c9tat syst\u00e8me\n\n\u00c9quipes en DB\n\n132\n\nSolde courant\n\n100 $\n\n+0 $\n\nScans automatiques : 09:00 \u00b7 15:00 \u00b7 20:00\n\nAgent IA non configur\u00e9 \u2014 utilise le Scan manuel ci-contre.\n\nFiltres de scan\n\nS'appliquent au Scan manuel ET \u00e0 l'agent IA.\n\nLigue\n\nToutes\n\nSeulement les matchs d'aujourd'hui\n\nEdge minimum (%)\n\n4.00\n\n-10.00\n\n20.00\n\nProbabilit\u00e9 mod\u00e8le minimale\n\n0.40\n\n0.10\n\n0.90\n\nCote minimum\n\n1.50\n\n1.00\n\n5.00\n\nNombre de jambes par combin\u00e9\n\n3\n\n1\n\n6\n\nNombre de combin\u00e9s \u00e0 g\u00e9n\u00e9rer\n\n3\n\n1\n\n10\n\n\ud83d\udd04 R\u00e9soudre les paris termin\u00e9s\n\nDeploy\n\u26bd BetBot Dashboard\n\n\ud83c\udfaf Scan manuel\n\n\ud83e\udde0 Agent local\n\n\ud83d\udcc5 Matchs disponibles\n\n\u23f3 Paris en attente\n\n\ud83d\udcca Performance\n\n\ud83d\udcb0 Capital\n\n\ud83e\udd16 Agent IA (Claude)\n\n\ud83d\udcdc Historique agent\n\n\ud83d\udd0c Sources\n\n\ud83d\udd0c \u00c9tat des sources externes\n\nProbe en temps r\u00e9el chaque source. Une source qui passe \u00e0 KO sugg\u00e8re un changement upstream (API down, scraper cass\u00e9, cl\u00e9 r\u00e9voqu\u00e9e).\n\n\ud83d\udd04 Tester maintenant\n\nClique sur 'Tester maintenant' pour lancer une v\u00e9rification live.",
+      "new_console": [],
+      "new_network_errors": []
+    }
+  },
+  "global": {
+    "started_at": 1778100287.1256454,
+    "sidebar_excerpt": "\u00c9tat syst\u00e8me\n\n\u00c9quipes en DB\n\n132\n\nSolde courant\n\n100 $\n\n+0 $\n\nScans automatiques : 09:00 \u00b7 15:00 \u00b7 20:00\n\nAgent IA non configur\u00e9 \u2014 utilise le Scan manuel ci-contre.\n\nFiltres de scan\n\nS'appliquent au Scan manuel ET \u00e0 l'agent IA.\n\nLigue\n\nToutes\n\nSeulement les matchs d'aujourd'hui\n\nEdge minimum (%)\n\n4.00\n\n-10.00\n\n20.00\n\nProbabilit\u00e9 mod\u00e8le minimale\n\n0.40\n\n0.10\n\n0.90\n\nCote minimum\n\n1.50\n\n1.00\n\n5.00\n\nNombre de jambes par combin\u00e9\n\n3\n\n1\n\n6\n\nNombre de combin\u00e9s \u00e0 g\u00e9n\u00e9rer\n\n3\n\n1\n\n10\n\n\ud83d\udd04 R\u00e9soudre les paris termin\u00e9s",
+    "resolve_button_clicked": true,
+    "total_console_errors": 0,
+    "total_network_errors": 0,
+    "console_errors": [],
+    "network_errors": [],
+    "finished_at": 1778100323.3305192
+  }
+}

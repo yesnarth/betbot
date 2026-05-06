@@ -308,6 +308,9 @@ def evaluate_picks(
     min_final_edge: float = 0.02,
     bankroll: float = 100.0,
     kelly_fraction: float = 0.25,
+    persist_run: bool = True,
+    trigger: str = "local_agent",
+    filters: dict | None = None,
 ) -> dict:
     """
     Run every pick through the rule chain and return calibrated picks.
@@ -452,7 +455,7 @@ def evaluate_picks(
         for r in results if r.status == "rejected"
     ]
 
-    return {
+    out = {
         "picks": accepted,
         "rejected": rejected,
         "n_evaluated": len(results),
@@ -462,3 +465,33 @@ def evaluate_picks(
         "n_weather_calls": n_weather_calls,
         "tavily_available": tavily_works,
     }
+
+    # Persist this invocation in the agent_runs table so the dashboard's
+    # "📜 Historique agent" tab can show it. This was a documented gap before.
+    if persist_run and len(results) > 0:
+        try:
+            from betbot.config import load_settings
+            from betbot.db import Database
+            s = load_settings()
+            db = Database(s.database_url)
+            reasoning = "\n\n".join(
+                f"#{i+1} {r.pick.get('home_team','?')} vs {r.pick.get('away_team','?')} "
+                f"[{r.status}] edge {r.final_edge*100:+.1f}%\n  - "
+                + "\n  - ".join(r.rationale)
+                for i, r in enumerate(results)
+            )[:8000]
+            db.save_agent_run(
+                trigger=trigger,
+                filters=filters or {},
+                model="local_agent (deterministic rules)",
+                reasoning=reasoning,
+                picks=accepted,
+                n_tool_calls=n_news_calls + n_weather_calls,
+                duration_ms=None,
+                cost_usd=0.0,
+                status="ok",
+            )
+        except Exception as exc:
+            logger.warning("Could not persist local_agent run to agent_runs: %s", exc)
+
+    return out
