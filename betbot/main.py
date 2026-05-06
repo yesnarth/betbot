@@ -33,6 +33,7 @@ from betbot.db import Database
 from betbot.enrichment import enrich_team_stats
 from betbot.notifier import EmailNotifier
 from betbot.resolver import resolve_pending
+from betbot.worker_health import WorkerHealthState, start_health_server
 
 
 # ---------------------------------------------------------------------------
@@ -41,26 +42,12 @@ from betbot.resolver import resolve_pending
 
 def setup_logging(log_path: str) -> logging.Logger:
     """
-    Logger setup. Always logs to stderr (12-factor: containers capture stdout/stderr).
-    File handler is added only when log_path is non-empty AND writable — otherwise
-    we silently skip it. Set LOG_PATH="" in the environment to force stderr-only.
+    Logger setup — delegates to betbot.logging_setup which honors LOG_FORMAT
+    (json|text) and LOG_LEVEL via environment variables. JSON in containers,
+    plain text in local dev.
     """
-    logger = logging.getLogger("betbot")
-    logger.setLevel(logging.INFO)
-    fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(name)s — %(message)s")
-
-    ch = logging.StreamHandler()
-    ch.setFormatter(fmt)
-    logger.addHandler(ch)
-
-    if log_path:
-        try:
-            fh = RotatingFileHandler(log_path, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
-            fh.setFormatter(fmt)
-            logger.addHandler(fh)
-        except (PermissionError, OSError) as exc:
-            logger.warning("Skipping file log %s : %s (stderr-only)", log_path, exc)
-    return logger
+    from betbot.logging_setup import configure
+    return configure(log_path)
 
 
 # ---------------------------------------------------------------------------
@@ -400,11 +387,33 @@ def main() -> None:
                        dry_run=args.dry_run, scan_label="Manuel")
         return
 
-    # Mode daemon : mise à jour stats au démarrage puis scheduling APScheduler
+    # Mode daemon : démarre l'HTTP health server, fait un update_stats au boot,
+    # puis lance APScheduler. Toutes les jobs notifient le state pour healthchecks.
+    start_health_server(port=8001)
+    health = WorkerHealthState.get()
+
     update_team_stats(settings, db, logger)
+    health.record_job_fired("update_team_stats:boot")
     run_daily_scan(settings, db, notifier, logger, scan_label="Démarrage")
+    health.record_job_fired("scan:boot")
 
     scheduler = BlockingScheduler(timezone="Europe/Paris")
+    health.scheduler = scheduler
+
+    def _wrap(name: str, fn, *args, **kwargs):
+        """Wrap a scheduled callable so success/failure is recorded in health."""
+        def _runner():
+            err = None
+            try:
+                fn(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                err = str(exc)[:200]
+                logger.exception("Job '%s' failed", name)
+                raise
+            finally:
+                health.record_job_fired(name, error=err)
+        _runner.__name__ = f"wrapped_{name}"
+        return _runner
 
     labels = {
         settings.scan_hours[0]: "Matin",
@@ -416,44 +425,39 @@ def main() -> None:
         h, m = hour.split(":")
         label = labels.get(hour, hour)
         scheduler.add_job(
-            run_daily_scan,
+            _wrap(f"scan:{label}", run_daily_scan,
+                  settings, db, notifier, logger, False, label),
             trigger=CronTrigger(hour=int(h), minute=int(m)),
-            args=[settings, db, notifier, logger, False, label],
             id=f"scan_{hour}",
             name=f"scan-{label}",
-            misfire_grace_time=600,  # tolerate up to 10 min late firing (sleep / network)
-            coalesce=True,           # if we missed multiple firings, run only once
+            misfire_grace_time=600,
+            coalesce=True,
         )
         logger.info("Scan planifié à %s (%s) — Europe/Paris", hour, label)
 
     # Mise à jour stats chaque lundi matin
     scheduler.add_job(
-        update_team_stats,
+        _wrap("update_team_stats", update_team_stats, settings, db, logger),
         trigger=CronTrigger(day_of_week="mon", hour=6, minute=0),
-        args=[settings, db, logger],
         id="update_stats_weekly",
         name="update-stats",
         misfire_grace_time=3600,
     )
 
-    # Enrichissement ELO + xG le mardi matin (juste après update_team_stats)
+    # Enrichissement ELO + xG le mardi matin
     scheduler.add_job(
-        enrich_team_stats,
+        _wrap("enrich", enrich_team_stats, db),
         trigger=CronTrigger(day_of_week="tue", hour=6, minute=0),
-        args=[db],
         id="enrich_weekly",
         name="enrich",
         misfire_grace_time=3600,
     )
 
-    # CLV snapshot toutes les 10 min : capture les closing odds des matchs
-    # qui démarrent dans <30 min. Coût quota Odds API : 7 ligues × ~10 min = 1 req/min/ligue
-    # mais la fonction ne fetch QUE les ligues qui ont des paris pending → ~0 quota la plupart du temps.
+    # CLV snapshot toutes les 10 min
     odds_client_for_clv = OddsAPIClient(settings.odds_api_key)
     scheduler.add_job(
-        snapshot_closing_odds,
+        _wrap("clv_snapshot", snapshot_closing_odds, odds_client_for_clv),
         trigger=CronTrigger(minute="*/10"),
-        args=[odds_client_for_clv],
         id="clv_snapshot",
         name="clv-snapshot",
         misfire_grace_time=120,
@@ -463,9 +467,8 @@ def main() -> None:
     # Résolution quotidienne des résultats à 04h00 (UTC matchs Europe largement terminés)
     odds_client_for_resolver = OddsAPIClient(settings.odds_api_key)
     scheduler.add_job(
-        resolve_pending,
+        _wrap("resolve", resolve_pending, db, odds_client_for_resolver),
         trigger=CronTrigger(hour=4, minute=0),
-        args=[db, odds_client_for_resolver],
         id="resolve_daily",
         name="resolve",
         misfire_grace_time=3600,

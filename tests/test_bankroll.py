@@ -32,11 +32,13 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(autouse=True)
 def _reset_ledger():
-    """Wipe the ledger before each test for isolation. Skipped when no DB."""
+    """Wipe the ledger AND test-only predictions before each test. Skipped when no DB."""
     from betbot.database import session_scope
-    from betbot.orm_models import BankrollEntry
+    from betbot.orm_models import BankrollEntry, Prediction
     with session_scope() as s:
+        # Order matters: ledger first (FK references predictions)
         s.query(BankrollEntry).delete()
+        s.query(Prediction).delete()
     yield
 
 
@@ -89,9 +91,9 @@ def test_bet_placed_immobilizes_capital():
         pid = p.id
     record_bet_placed(pid, 10.0)
     s = get_state()
-    assert s.balance == 90.0      # stake debited
-    assert s.committed == 10.0    # stake committed (pred unresolved)
-    assert s.available == 80.0    # available = balance - committed
+    assert s.balance == 90.0      # stake already debited from cash
+    assert s.committed == 10.0    # tracked separately for reporting
+    assert s.available == 90.0    # available == balance (no double-count)
 
 
 def test_bet_won_credits_full_payout():

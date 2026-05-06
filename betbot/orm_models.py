@@ -109,6 +109,24 @@ class AgentRun(Base):
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
+class Bookmaker(Base):
+    """
+    A betting account at a specific bookmaker. Each row tracks one user-owned
+    account so the bot can split capital allocation realistically — having
+    50€ at Bet365 and 30€ at Pinnacle is NOT the same as 80€ in one place.
+
+    `key` is a stable slug used in cross-references (e.g. "pinnacle", "bet365");
+    `display_name` is the human-readable label.
+    """
+    __tablename__ = "bookmakers"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)
+    active: Mapped[bool] = mapped_column(default=True)
+    note: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
 class BankrollEntry(Base):
     """
     Single source of truth for bankroll evolution. Every cash movement —
@@ -141,5 +159,11 @@ class BankrollEntry(Base):
     balance_after: Mapped[float] = mapped_column(Float, nullable=False)
     prediction_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("predictions.id", ondelete="SET NULL"), nullable=True,
+    )
+    # Per-bookmaker partitioning of the bankroll. Nullable so legacy rows
+    # (before Phase A5) keep loading; new rows always specify the account.
+    bookmaker_key: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("bookmakers.key", ondelete="SET NULL"),
+        nullable=True, index=True,
     )
     note: Mapped[Optional[str]] = mapped_column(String, nullable=True)

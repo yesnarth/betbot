@@ -171,10 +171,37 @@ def compute_league_averages(parsed_matches: list[dict]) -> tuple[float, float]:
     return home, away
 
 
-def poisson_match_probs(lambda_home: float, lambda_away: float) -> MatchProbs:
+def _dixon_coles_tau(i: int, j: int, lambda_home: float, lambda_away: float,
+                     rho: float = -0.10) -> float:
     """
-    Build the score probability matrix and derive outcome probabilities
-    using independent Poisson distributions for each team.
+    Dixon-Coles bivariate adjustment for low-scoring matches.
+
+    Independent Poisson under-estimates 0-0 / 1-1 and over-estimates 1-0 / 0-1
+    because real football has positive correlation between teams' scoring rates.
+    The τ multiplier corrects exactly the four most-affected scores; ρ ∈ [-0.20, 0]
+    is the empirical "draw inflation" parameter (Dixon-Coles 1997, Goddard 2005).
+
+    Returns 1.0 for any score outside {(0,0), (0,1), (1,0), (1,1)}.
+    """
+    if i == 0 and j == 0:
+        return 1.0 - lambda_home * lambda_away * rho
+    if i == 0 and j == 1:
+        return 1.0 + lambda_home * rho
+    if i == 1 and j == 0:
+        return 1.0 + lambda_away * rho
+    if i == 1 and j == 1:
+        return 1.0 - rho
+    return 1.0
+
+
+def poisson_match_probs(lambda_home: float, lambda_away: float,
+                        dixon_coles_rho: float = -0.10) -> MatchProbs:
+    """
+    Build the score probability matrix and derive outcome probabilities.
+
+    Uses independent Poisson with the Dixon-Coles bivariate τ correction on
+    the 4 low-scoring cells (0-0, 0-1, 1-0, 1-1). Set `dixon_coles_rho=0` to
+    disable the correction — useful for unit tests of the raw Poisson.
     """
     grid = range(MAX_GOALS + 1)
     home_pmf = [scipy_poisson.pmf(i, lambda_home) for i in grid]
@@ -188,6 +215,8 @@ def poisson_match_probs(lambda_home: float, lambda_away: float) -> MatchProbs:
     for i in grid:
         for j in grid:
             p = home_pmf[i] * away_pmf[j]
+            if dixon_coles_rho != 0.0:
+                p *= _dixon_coles_tau(i, j, lambda_home, lambda_away, dixon_coles_rho)
             if i > j:
                 prob_home += p
             elif i == j:

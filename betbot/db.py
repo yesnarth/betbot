@@ -197,19 +197,35 @@ class Database:
         enforce_funds: bool = True,
     ) -> bool:
         """
-        Save a prediction AND immobilize its Kelly stake on the bankroll ledger.
+        Save a prediction AND immobilize its Kelly stake atomically.
 
-        Returns True if inserted, False if duplicate, or raises
+        Both the Prediction row and the bankroll_ledger row are inserted in a
+        SINGLE transaction. Either both succeed, or neither — no fantôme rows.
+
+        Returns True if inserted, False if duplicate. Raises
         InsufficientFundsError if the bankroll's available balance is below the
-        stake (set enforce_funds=False to bypass — useful for backtests).
+        stake (set enforce_funds=False to bypass, useful for backtests).
         """
         from betbot.bankroll import (
             InsufficientFundsError,
-            record_bet_placed,
+            _acquire_ledger_lock,
+            _append,
+            _state_inside_lock,
         )
+        from betbot.guards import GuardViolation, check_can_place_bet
+
+        # Pre-flight responsible-betting guards (stop-loss, daily cap, exposure)
+        if kelly_stake > 0 and enforce_funds:
+            try:
+                check_can_place_bet(kelly_stake)
+            except GuardViolation as exc:
+                logger.warning("Guard blocked prediction (%s vs %s) : %s",
+                               home_team, away_team, exc)
+                raise
+
         try:
             with session_scope() as s:
-                # Equivalent of INSERT OR IGNORE on (event_id, market, selection)
+                # 1. Idempotency check on (event_id, market, selection)
                 exists = s.execute(
                     select(Prediction.id).where(
                         Prediction.event_id == event_id,
@@ -219,6 +235,19 @@ class Database:
                 ).first()
                 if exists:
                     return False
+
+                # 2. Acquire ledger lock — no concurrent placement can race past here
+                if kelly_stake > 0:
+                    _acquire_ledger_lock(s)
+                    if enforce_funds:
+                        balance, _ = _state_inside_lock(s)
+                        if kelly_stake > balance:
+                            raise InsufficientFundsError(
+                                f"Cannot place bet of {kelly_stake:.2f} — "
+                                f"only {balance:.2f} on hand"
+                            )
+
+                # 3. Insert the prediction
                 pred = Prediction(
                     created_at=_utcnow_iso(),
                     event_id=event_id,
@@ -238,26 +267,20 @@ class Database:
                 )
                 s.add(pred)
                 s.flush()  # populate pred.id
-                pred_id = pred.id
+
+                # 4. Insert the matching ledger row in the SAME transaction
+                if kelly_stake > 0:
+                    _append(
+                        s, "bet_placed", -kelly_stake,
+                        prediction_id=pred.id,
+                        note=f"{home_team} vs {away_team} [{selection}]",
+                    )
+                return True
+        except InsufficientFundsError:
+            raise  # bubble up; session_scope already rolled back
         except Exception as exc:
             logger.error("Erreur sauvegarde prédiction : %s", exc)
             return False
-
-        # Bankroll hook: immobilize the stake. Done OUTSIDE the prediction
-        # transaction so a bankroll failure rolls back only the ledger entry.
-        if kelly_stake > 0:
-            try:
-                record_bet_placed(pred_id, kelly_stake, enforce_funds=enforce_funds,
-                                  note=f"{home_team} vs {away_team} [{selection}]")
-            except InsufficientFundsError as exc:
-                logger.warning("Bankroll bloqué pour pred #%s : %s", pred_id, exc)
-                # Roll back the prediction we just saved — keep the DB consistent
-                with session_scope() as s2:
-                    p = s2.get(Prediction, pred_id)
-                    if p is not None:
-                        s2.delete(p)
-                raise
-        return True
 
     def get_pending_predictions(self) -> list[dict]:
         with session_scope() as s:

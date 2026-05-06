@@ -11,8 +11,13 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+import os
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from betbot.api import OddsAPIClient, SPORT_KEYS
 from betbot.config import load_settings
@@ -48,13 +53,24 @@ def get_db() -> Database:
 app = FastAPI(
     title="BetBot API",
     description="REST API for BetBot — drives the AI agent and exposes predictions/ROI.",
-    version="0.4.0",
+    version="1.0.0",
 )
 
-# Permissive CORS for the local dashboard. Tighten before exposing publicly.
+# Rate limiting (per remote IP). Tighter limits on expensive endpoints below.
+limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CORS — strict in prod (BETBOT_DOMAIN), permissive only in local dev.
+_cors_origins: list[str] = []
+_prod_domain = os.getenv("BETBOT_DOMAIN", "").strip()
+if _prod_domain:
+    _cors_origins = [f"https://{_prod_domain}", f"http://{_prod_domain}"]
+else:
+    _cors_origins = ["http://localhost:8501", "http://127.0.0.1:8501"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8501", "http://127.0.0.1:8501"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
@@ -181,7 +197,9 @@ def backtest(
 # ---------------------------------------------------------------------------
 
 @app.post("/recommend/manual", response_model=ManualScanResponse)
+@limiter.limit("10/minute")  # protects the Odds API quota
 def recommend_manual(
+    request: Request,
     filters: ManualScanFilters,
     _: str = Depends(require_auth),
 ) -> ManualScanResponse:
@@ -294,7 +312,9 @@ def recommend_manual(
 
 
 @app.post("/recommend/agent-local", response_model=LocalAgentResponse)
+@limiter.limit("10/minute")  # protects Odds API + Tavily quotas
 def recommend_agent_local(
+    request: Request,
     filters: LocalAgentFilters,
     _: str = Depends(require_auth),
 ) -> LocalAgentResponse:
@@ -448,7 +468,9 @@ def recommend_agent_local(
 
 
 @app.post("/agent/recommend", response_model=AgentResponse)
+@limiter.limit("3/minute")  # Anthropic API costs $$ — never let a client spam this
 async def agent_recommend(
+    request: Request,
     filters: AgentFilters,
     _: str = Depends(require_auth),
 ) -> AgentResponse:
@@ -520,6 +542,37 @@ def bankroll_history(
     """Recent ledger entries, newest first."""
     from betbot.bankroll import get_history
     return [BankrollLedgerRow(**row) for row in get_history(limit=limit)]
+
+
+@app.get("/bankroll/guards")
+def bankroll_guards(_: str = Depends(require_auth)) -> dict:
+    """Current guard state: stop-loss status, exposure, daily caps used/remaining."""
+    from betbot.guards import get_guard_status
+    return get_guard_status()
+
+
+@app.get("/bankroll/bookmakers")
+def bankroll_bookmakers(
+    active_only: bool = Query(default=False),
+    _: str = Depends(require_auth),
+) -> list[dict]:
+    """List all bookmaker accounts with their per-account balance."""
+    from betbot.bankroll import list_bookmakers
+    return list_bookmakers(active_only=active_only)
+
+
+@app.post("/bankroll/bookmakers")
+def bankroll_add_bookmaker(
+    body: dict,
+    _: str = Depends(require_auth),
+) -> dict:
+    """Register a new bookmaker account. Body: {key, display_name, note?}."""
+    from betbot.bankroll import add_bookmaker
+    return add_bookmaker(
+        key=body.get("key", "").strip(),
+        display_name=body.get("display_name", "").strip(),
+        note=body.get("note"),
+    )
 
 
 @app.get("/bankroll/evolution")
