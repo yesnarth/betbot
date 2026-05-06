@@ -382,12 +382,14 @@ def recommend_agent_local(
 
     raw_picks = [bet_to_dict(b) for b in ranked]
 
-    # 4. Run through the rule chain
+    # 4. Run through the rule chain (Kelly stakes are recomputed inside)
     eval_result = evaluate_picks(
         raw_picks,
         fetch_news=filters.fetch_news,
         fetch_weather=filters.fetch_weather,
         min_final_edge=filters.min_final_edge,
+        bankroll=s.bankroll,
+        kelly_fraction=s.kelly_fraction,
     )
 
     # 5. Build parlays from accepted picks only — reconstruct ValueBet objects

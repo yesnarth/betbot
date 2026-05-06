@@ -68,9 +68,21 @@ class PickEvaluation:
 # ---------------------------------------------------------------------------
 
 _INJURY_KEYWORDS = re.compile(
-    r"\b(injur|out\b|ruled out|unavailable|hamstring|knee|ankle|"
-    r"miss(es|ing)?|suspend|banned|red card|absent|sidelined|"
-    r"long-term)\b",
+    # Tight patterns only — generic words like "miss", "out", "exile" produced
+    # too many false positives (e.g. "Mainoo stars after exile" was flagged as
+    # injury). Each pattern below must denote an ACTUAL absence, not just any
+    # negative-sounding word.
+    r"\b("
+    r"injury|injured|injuries|"
+    r"ruled out|out for (the )?(season|match|game|months?|weeks?|days?)|"
+    r"miss(es|ed|ing) the (match|game|fixture|tie|cup|tournament)|"
+    r"will miss|set to miss|expected to miss|"
+    r"hamstring|knee surgery|ankle (injury|surgery|sprain)|"
+    r"suspend(ed|s|ing)?|banned|red[- ]card|"
+    r"sidelined|absent for|"
+    r"long[- ]term (injury|absen)|"
+    r"could miss|might miss"
+    r")\b",
     re.IGNORECASE,
 )
 _COACH_DRAMA = re.compile(
@@ -99,20 +111,70 @@ def _opposing_team(pick: dict) -> str | None:
     return None
 
 
-def _news_mentions_injury(news_hits: list[dict]) -> tuple[bool, str | None]:
-    """Returns (matched, snippet) — whether any hit mentions a relevant absence."""
+def _bare_name(team_name: str) -> str:
+    """Strip common football suffixes for tolerant matching."""
+    bare = team_name
+    for suffix in (" FC", " CF", " AC", " SC", " AFC"):
+        if bare.endswith(suffix):
+            bare = bare[: -len(suffix)]
+            break
+    return bare.lower().strip()
+
+
+def _team_mentioned(team_name: str, text: str) -> bool:
+    """Return True only when the team name appears as a contiguous chunk."""
+    if not team_name:
+        return False
+    return _bare_name(team_name) in text.lower()
+
+
+def _team_is_subject_of_hit(team_name: str, hit: dict) -> bool:
+    """
+    Stricter than _team_mentioned: requires the team to be in the TITLE.
+
+    Real-world bug we're fixing: Tavily searched on "Mallorca" returns an
+    article titled "Real Madrid Defender Mendy Could Miss Up to Five Months".
+    The article snippet may say "before Real Madrid faces Mallorca next week",
+    so "Mallorca" appears in the snippet — but the article SUBJECT is Madrid,
+    not Mallorca. To avoid attributing the injury to Mallorca, we require the
+    team name to appear in the TITLE specifically.
+    """
+    if not team_name:
+        return False
+    bare = _bare_name(team_name)
+    title = (hit.get("title") or "").lower()
+    return bare in title
+
+
+def _filter_relevant_hits(team_name: str, news_hits: list[dict]) -> list[dict]:
+    """Keep only hits whose TITLE mentions the team."""
+    return [h for h in news_hits if _team_is_subject_of_hit(team_name, h)]
+
+
+def _news_mentions_injury(news_hits: list[dict], team_name: str) -> tuple[bool, str | None]:
+    """Returns (matched, title). The hit's TITLE must mention the team AND
+    a real injury/suspension keyword must appear somewhere in title or snippet."""
+    if not team_name:
+        return False, None
     for h in news_hits:
+        if not _team_is_subject_of_hit(team_name, h):
+            continue
         text = f"{h.get('title', '')} {h.get('snippet', '')}"
         if _INJURY_KEYWORDS.search(text):
-            return True, h.get("title", "")[:120]
+            return True, h.get("title", "")[:140]
     return False, None
 
 
-def _news_mentions_coach_drama(news_hits: list[dict]) -> tuple[bool, str | None]:
+def _news_mentions_coach_drama(news_hits: list[dict], team_name: str) -> tuple[bool, str | None]:
+    """Same strict rule as injuries: the team must be the subject of the hit."""
+    if not team_name:
+        return False, None
     for h in news_hits:
+        if not _team_is_subject_of_hit(team_name, h):
+            continue
         text = f"{h.get('title', '')} {h.get('snippet', '')}"
         if _COACH_DRAMA.search(text):
-            return True, h.get("title", "")[:120]
+            return True, h.get("title", "")[:140]
     return False, None
 
 
@@ -123,6 +185,8 @@ def _news_mentions_coach_drama(news_hits: list[dict]) -> tuple[bool, str | None]
 def _rule_huge_edge_needs_confirmation(
     ev: PickEvaluation,
     raw_edge: float,
+    picked_team: str | None,
+    opposing_team: str | None,
     news_picked_team: list[dict],
     news_opposing_team: list[dict],
 ) -> None:
@@ -132,50 +196,50 @@ def _rule_huge_edge_needs_confirmation(
     """
     if raw_edge <= 0.35:
         return
-    has_supporting_news = any(
-        _INJURY_KEYWORDS.search(f"{h.get('title','')} {h.get('snippet','')}")
-        for h in news_opposing_team
-    )
-    if not has_supporting_news:
+    # Only count supporting news that ACTUALLY mentions the opposing team
+    has_supporting, _ = _news_mentions_injury(news_opposing_team, opposing_team or "")
+    if not has_supporting:
         ev.final_prob *= RULE_HUGE_EDGE_NO_CONFIRMATION
         ev.rationale.append(
-            f"⚠ Edge brut {raw_edge*100:+.0f}% sans news favorable — "
+            f"⚠ Edge brut {raw_edge*100:+.0f}% sans news favorable confirmée — "
             f"probabilité réduite de {(1-RULE_HUGE_EDGE_NO_CONFIRMATION)*100:.0f}%."
         )
 
 
 def _rule_injury_news(
     ev: PickEvaluation,
+    picked_team: str | None,
+    opposing_team: str | None,
     news_picked_team: list[dict],
     news_opposing_team: list[dict],
 ) -> None:
     """Adjust probability based on injury/suspension news on each side."""
-    picked_injured, picked_snippet = _news_mentions_injury(news_picked_team)
+    picked_injured, picked_snippet = _news_mentions_injury(news_picked_team, picked_team or "")
     if picked_injured:
         ev.final_prob *= RULE_INJURY_FAVORITE
         ev.rationale.append(
-            f"⚠ Blessure/suspension dans l'équipe ciblée — "
-            f"prob réduite : {picked_snippet}"
+            f"⚠ Blessure/suspension chez {picked_team} — prob réduite : {picked_snippet}"
         )
 
-    opp_injured, opp_snippet = _news_mentions_injury(news_opposing_team)
+    opp_injured, opp_snippet = _news_mentions_injury(news_opposing_team, opposing_team or "")
     if opp_injured:
         ev.final_prob *= RULE_INJURY_OPPONENT
         ev.rationale.append(
-            f"✓ Blessure/suspension chez l'adversaire — léger boost : {opp_snippet}"
+            f"✓ Blessure/suspension chez l'adversaire {opposing_team} — léger boost : {opp_snippet}"
         )
 
 
 def _rule_coach_drama(
     ev: PickEvaluation,
+    picked_team: str | None,
     news_picked_team: list[dict],
 ) -> None:
     """Coach sackings or locker-room crises kill predictability — flag, don't reject."""
-    drama, snippet = _news_mentions_coach_drama(news_picked_team)
+    drama, snippet = _news_mentions_coach_drama(news_picked_team, picked_team or "")
     if drama:
         ev.final_prob *= 0.80
         ev.rationale.append(
-            f"⚠ Crise de coach / vestiaire détectée — fortement réduit : {snippet}"
+            f"⚠ Crise de coach / vestiaire chez {picked_team} : {snippet}"
         )
 
 
@@ -242,6 +306,8 @@ def evaluate_picks(
     fetch_news: bool = True,
     fetch_weather: bool = True,
     min_final_edge: float = 0.02,
+    bankroll: float = 100.0,
+    kelly_fraction: float = 0.25,
 ) -> dict:
     """
     Run every pick through the rule chain and return calibrated picks.
@@ -288,16 +354,20 @@ def evaluate_picks(
         elo_home = club_elo.get_team_elo(pick.get("home_team", "")) if elo_snapshot else None
         elo_away = club_elo.get_team_elo(pick.get("away_team", "")) if elo_snapshot else None
 
-        # Tavily news (paid quota; only fetch when needed)
+        # Tavily news (paid quota; only fetch when needed). We FILTER hits
+        # to keep only those that actually mention the team — Tavily often
+        # returns generic football news when the team has no English coverage.
         news_picked: list[dict] = []
         news_opposing: list[dict] = []
         if fetch_news and tavily_works and (raw_edge > 0.10):
             try:
                 if picked_team:
-                    news_picked = search_team_news(picked_team, days_back=3, max_results=4)
+                    raw_hits = search_team_news(picked_team, days_back=3, max_results=5)
+                    news_picked = _filter_relevant_hits(picked_team, raw_hits)
                     n_news_calls += 1
                 if opposing:
-                    news_opposing = search_team_news(opposing, days_back=3, max_results=4)
+                    raw_hits = search_team_news(opposing, days_back=3, max_results=5)
+                    news_opposing = _filter_relevant_hits(opposing, raw_hits)
                     n_news_calls += 1
             except TavilyNotConfigured:
                 tavily_works = False
@@ -322,15 +392,26 @@ def evaluate_picks(
 
         # ---- Apply the rule chain ----
         _rule_overconfidence(ev, raw_prob)
-        _rule_injury_news(ev, news_picked, news_opposing)
-        _rule_coach_drama(ev, news_picked)
+        _rule_injury_news(ev, picked_team, opposing, news_picked, news_opposing)
+        _rule_coach_drama(ev, picked_team, news_picked)
         _rule_bad_weather(ev, weather)
         _rule_elo_contradiction(ev, elo_home, elo_away)
-        _rule_huge_edge_needs_confirmation(ev, raw_edge, news_picked, news_opposing)
+        _rule_huge_edge_needs_confirmation(
+            ev, raw_edge, picked_team, opposing, news_picked, news_opposing,
+        )
 
-        # Recompute the edge from the calibrated probability
+        # Recompute the edge AND the Kelly stake from the calibrated probability.
+        # Kelly is sensitive to small probability changes, so failing to recompute
+        # would leave a stake size that doesn't match the calibrated prob.
         ev.final_prob = max(0.0, min(ev.final_prob, 1.0))
         ev.final_edge = round(ev.final_prob * pick["best_odds"] - 1.0, 4)
+        from betbot.analysis import kelly_stake
+        ev.pick = {
+            **pick,
+            "kelly_stake": kelly_stake(
+                ev.final_prob, pick["best_odds"], bankroll, kelly_fraction
+            ),
+        }
 
         # Decide status
         if ev.final_edge < min_final_edge:
