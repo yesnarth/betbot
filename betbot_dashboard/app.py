@@ -147,12 +147,13 @@ with st.sidebar:
 # Tabs — order changed: matches first, manual scan, then AI agent
 # ---------------------------------------------------------------------------
 
-tab_scan, tab_events, tab_pending, tab_roi, tab_agent = st.tabs([
+tab_scan, tab_local, tab_events, tab_pending, tab_roi, tab_agent = st.tabs([
     "🎯 Scan manuel",
+    "🧠 Agent local",
     "📅 Matchs disponibles",
     "⏳ Paris en attente",
     "📊 Performance",
-    "🤖 Agent IA",
+    "🤖 Agent IA (Claude)",
 ])
 
 
@@ -210,7 +211,108 @@ with tab_scan:
 
 
 # ---------------------------------------------------------------------------
-# Tab 2 — Available events
+# Tab 2 — Local deterministic agent (no AI cost, uses Tavily + ELO + weather)
+# ---------------------------------------------------------------------------
+
+with tab_local:
+    st.subheader("Agent local — règles métier explicites")
+    st.caption(
+        "Prend les picks du scan, croise avec les news Tavily + blessures + météo + ELO, "
+        "applique des règles explicites pour calibrer les edges fictifs. "
+        "**Zéro coût** au-delà des quotas Tavily/Odds API. Reproductible et auditable."
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        agent_use_news = st.checkbox(
+            "Consulter Tavily (news live)", value=True,
+            help="Demande aux nouvelles du jour si une équipe a une blessure/suspension/coach viré.",
+        )
+    with col2:
+        agent_use_weather = st.checkbox(
+            "Consulter Open-Meteo (météo stade)", value=True,
+            help="Pluie forte ou vent fort réduisent les paris Over.",
+        )
+
+    min_final = st.slider(
+        "Edge minimum APRÈS calibration (%)",
+        -5.0, 15.0, 2.0, 0.5,
+        help="Seuil de rejet final. Les picks dont l'edge tombe sous ce seuil après calibration sont écartés.",
+    )
+
+    if st.button("🧠 Lancer l'agent local", type="primary", width='stretch'):
+        payload = {
+            "sport_key": None if sport == "Toutes" else sport,
+            "today_only": today_only,
+            "min_edge": round(min_edge_pct / 100, 4),
+            "min_prob": min_prob,
+            "min_odds": min_odds,
+            "n_legs": n_legs,
+            "n_combos": n_combos,
+            "fetch_news": agent_use_news,
+            "fetch_weather": agent_use_weather,
+            "min_final_edge": round(min_final / 100, 4),
+        }
+        with st.spinner("Scan + appels Tavily/météo/ELO + règles…"):
+            try:
+                res = api_post("/recommend/agent-local", json=payload)
+            except Exception as exc:
+                st.error(f"Erreur : {exc}")
+                res = None
+
+        if res:
+            cols = st.columns(4)
+            cols[0].metric("Picks bruts", res["n_picks_in"])
+            cols[1].metric("Acceptés", res["n_accepted"])
+            cols[2].metric("Rejetés", res["n_rejected"])
+            cols[3].metric("Combinés", res["n_parlays"])
+
+            sub = st.columns(3)
+            sub[0].metric("Appels Tavily", res["n_news_calls"])
+            sub[1].metric("Appels météo", res["n_weather_calls"])
+            sub[2].metric("Tavily actif", "✓" if res["tavily_available"] else "non configuré")
+
+            if not res["tavily_available"]:
+                st.info(
+                    "Tavily désactivé : pas de prise en compte des news live. "
+                    "Active-le en mettant `TAVILY_API_KEY` dans `.env`."
+                )
+
+            if res["picks"]:
+                st.markdown("### ✅ Paris validés")
+                for i, p in enumerate(res["picks"], 1):
+                    label = (
+                        f"#{i} · {p['home_team']} vs {p['away_team']} — "
+                        f"{p['selection_label']} @ {p['best_odds']:.2f} · "
+                        f"prob {p['model_prob']*100:.1f}% · edge {p['value_edge']*100:+.1f}%"
+                    )
+                    if p["status"] == "flagged":
+                        label = f"🟡 {label}"
+                    with st.expander(label):
+                        st.caption(f"Statut : **{p['status']}** · Mise Kelly : {p.get('kelly_stake', 0)}$")
+                        for r in p.get("rationale", []):
+                            st.write(f"- {r}")
+            else:
+                st.warning("Aucun pari n'a survécu aux règles de l'agent local.")
+
+            if res["rejected"]:
+                with st.expander(f"❌ {res['n_rejected']} paris rejetés (cliquer pour voir)"):
+                    for p in res["rejected"]:
+                        st.markdown(
+                            f"**{p['home_team']} vs {p['away_team']}** — "
+                            f"{p['selection_label']} · edge final {p['value_edge']*100:+.1f}%"
+                        )
+                        for r in p.get("rationale", []):
+                            st.write(f"- {r}")
+                        st.divider()
+
+            if res["parlays"]:
+                st.markdown("### Combinés (paris validés uniquement)")
+                render_parlays(res["parlays"])
+
+
+# ---------------------------------------------------------------------------
+# Tab 3 — Available events
 # ---------------------------------------------------------------------------
 
 with tab_events:

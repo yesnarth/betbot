@@ -25,6 +25,8 @@ from betbot_api.schemas import (
     EventBrief,
     EventsResponse,
     HealthResponse,
+    LocalAgentFilters,
+    LocalAgentResponse,
     ManualScanFilters,
     ManualScanResponse,
     PredictionRow,
@@ -281,6 +283,158 @@ def recommend_manual(
             "n_combos": filters.n_combos,
         },
         n_events_scanned=n_events,
+    )
+
+
+@app.post("/recommend/agent-local", response_model=LocalAgentResponse)
+def recommend_agent_local(
+    filters: LocalAgentFilters,
+    _: str = Depends(require_auth),
+) -> LocalAgentResponse:
+    """
+    Local deterministic agent — no AI, no recurring cost.
+
+    Pipeline:
+      1. Run the same blended Poisson model as /recommend/manual to get raw picks
+      2. For each pick, run a chain of explicit business rules:
+           - injury news on either team (Tavily)
+           - coach sacking / locker-room drama (Tavily)
+           - bad weather on Over picks (Open-Meteo)
+           - ELO contradiction (Club Elo)
+           - over-confidence cap (model_prob > 85% → penalty)
+           - huge edge without supporting news (>35% edge → strong penalty)
+      3. Recompute the edge from the calibrated probability
+      4. Reject picks whose final edge falls below min_final_edge
+      5. Build parlays only from accepted picks
+
+    Cheaper and more transparent than the Claude agent. Each rule is explicit
+    Python code with a clear name in the rationale.
+    """
+    from betbot.analysis import build_parlays, ValueBet
+    from betbot.local_agent import evaluate_picks
+    from betbot.main import _filter_upcoming_today, _load_team_stats_from_db
+
+    s = load_settings()
+    odds_client = OddsAPIClient(s.odds_api_key)
+
+    edge = filters.min_edge if filters.min_edge is not None else s.min_value_edge
+    prob = filters.min_prob if filters.min_prob is not None else s.min_model_prob
+    odds = filters.min_odds if filters.min_odds is not None else s.min_book_odds
+
+    # 1. Fetch events
+    if filters.sport_key:
+        all_events = {filters.sport_key: odds_client.get_events_with_odds(filters.sport_key)}
+    else:
+        all_events = odds_client.fetch_all_sports()
+
+    events_by_sport: dict[str, list[dict]] = {}
+    commence_by_id: dict[str, str] = {}
+    for sk, ev in all_events.items():
+        kept = _filter_upcoming_today(ev, s.min_before_kickoff) if filters.today_only else ev
+        if kept:
+            events_by_sport[sk] = kept
+            for e in kept:
+                if e.get("id"):
+                    commence_by_id[e["id"]] = e.get("commence_time", "")
+
+    if not events_by_sport:
+        return LocalAgentResponse(
+            picks=[], rejected=[], parlays=[],
+            n_picks_in=0, n_accepted=0, n_rejected=0, n_parlays=0,
+            n_news_calls=0, n_weather_calls=0, tavily_available=False,
+        )
+
+    # 2. Run the blended model to produce raw picks
+    from betbot.analysis import detect_value_bets, rank_value_bets
+    db = Database(s.database_url)
+    prebuilt = _load_team_stats_from_db(db, events_by_sport.keys())
+    raw_bets = detect_value_bets(
+        events_by_sport=events_by_sport,
+        match_history_by_sport={},
+        bankroll=s.bankroll,
+        kelly_fraction=s.kelly_fraction,
+        min_value_edge=edge,
+        min_model_prob=prob,
+        min_book_odds=odds,
+        prebuilt_stats_by_sport=prebuilt,
+    )
+    ranked = rank_value_bets(raw_bets)[: s.top_bets]
+
+    # 3. Convert to plain dicts and inject commence_time so the agent can fetch weather
+    def bet_to_dict(b: ValueBet) -> dict:
+        return {
+            "event_id": b.event_id,
+            "sport_key": b.sport_key,
+            "league": b.league_label,
+            "home_team": b.home_team,
+            "away_team": b.away_team,
+            "market": b.market,
+            "selection_code": b.selection_code,
+            "selection_label": b.selection_label,
+            "model_prob": b.model_prob,
+            "best_odds": b.best_odds,
+            "best_book": b.best_book,
+            "value_edge": b.value_edge,
+            "kelly_stake": b.kelly_stake,
+            "model_type": b.model_type,
+            "commence_time": commence_by_id.get(b.event_id, ""),
+        }
+
+    raw_picks = [bet_to_dict(b) for b in ranked]
+
+    # 4. Run through the rule chain
+    eval_result = evaluate_picks(
+        raw_picks,
+        fetch_news=filters.fetch_news,
+        fetch_weather=filters.fetch_weather,
+        min_final_edge=filters.min_final_edge,
+    )
+
+    # 5. Build parlays from accepted picks only — reconstruct ValueBet objects
+    accepted_bets = [
+        ValueBet(
+            event_id=p["event_id"],
+            sport_key=p["sport_key"],
+            home_team=p["home_team"],
+            away_team=p["away_team"],
+            league_label=p.get("league", ""),
+            market=p["market"],
+            selection_code=p["selection_code"],
+            selection_label=p["selection_label"],
+            model_prob=p["model_prob"],
+            best_odds=p["best_odds"],
+            best_book=p["best_book"],
+            value_edge=p["value_edge"],
+            kelly_stake=p.get("kelly_stake", 0.0),
+            lambda_home=None,
+            lambda_away=None,
+            model_type=p.get("model_type", "poisson"),
+        )
+        for p in eval_result["picks"]
+    ]
+    parlays = build_parlays(accepted_bets, n_legs=filters.n_legs, top_n=filters.n_combos)
+    parlays_out = [
+        {
+            "n_legs": len(p.bets),
+            "combined_odds": p.combined_odds,
+            "combined_prob": p.combined_prob,
+            "combined_ev_pct": p.combined_ev,
+            "legs": [bet_to_dict(b) for b in p.bets],
+        }
+        for p in parlays
+    ]
+
+    return LocalAgentResponse(
+        picks=eval_result["picks"],
+        rejected=eval_result["rejected"],
+        parlays=parlays_out,
+        n_picks_in=len(raw_picks),
+        n_accepted=eval_result["n_accepted"],
+        n_rejected=eval_result["n_rejected"],
+        n_parlays=len(parlays_out),
+        n_news_calls=eval_result["n_news_calls"],
+        n_weather_calls=eval_result["n_weather_calls"],
+        tavily_available=eval_result["tavily_available"],
     )
 
 

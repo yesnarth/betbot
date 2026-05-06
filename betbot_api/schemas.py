@@ -116,3 +116,24 @@ class ManualScanResponse(BaseModel):
     n_parlays: int
     filters_used: dict[str, Any]
     n_events_scanned: int
+
+
+class LocalAgentFilters(ManualScanFilters):
+    """Same filters as the manual scan, plus runtime toggles for the rule engine."""
+    fetch_news: bool = Field(default=True, description="Use Tavily web search to fetch live news")
+    fetch_weather: bool = Field(default=True, description="Fetch Open-Meteo forecast for the home stadium")
+    min_final_edge: float = Field(default=0.02, ge=-0.10, le=0.50,
+                                  description="Reject picks whose calibrated edge falls below this")
+
+
+class LocalAgentResponse(BaseModel):
+    picks: list[dict[str, Any]]
+    rejected: list[dict[str, Any]]
+    parlays: list[dict[str, Any]]
+    n_picks_in: int
+    n_accepted: int
+    n_rejected: int
+    n_parlays: int
+    n_news_calls: int
+    n_weather_calls: int
+    tavily_available: bool
