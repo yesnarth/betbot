@@ -73,21 +73,53 @@ def _fetch_html(league_slug: str, year: int) -> str:
 
 def _extract_teams_data(html: str) -> dict | None:
     """
-    Pull `var teamsData = JSON.parse('...')` out of the HTML.
-    The JSON is wrapped in single quotes and \\x-escaped — we let json.loads
-    handle it after un-escaping the JS string.
+    Try several patterns to extract the JSON-encoded teamsData blob.
+
+    Understat has historically inlined `var teamsData = JSON.parse('…\\x…')`
+    in the page HTML. As of late-2025 the public-facing HTML no longer
+    contains this blob (likely moved to client-side fetch + bot detection).
+
+    We keep this function defensive: every known pattern is tried, and we
+    log a CLEAR warning when none matches so health checks can surface the
+    breakage. The caller treats `None` as "xG temporarily unavailable" and
+    the model falls back to Dixon-Coles + ELO.
     """
-    match = re.search(r"var\s+teamsData\s*=\s*JSON\.parse\('([^']+)'\)", html)
-    if not match:
-        return None
-    raw = match.group(1)
-    # JS escapes hex bytes as \\x..; convert to actual characters.
-    decoded = raw.encode("utf-8").decode("unicode_escape")
+    patterns = [
+        # Historical pattern (single-quoted JS string)
+        r"var\s+teamsData\s*=\s*JSON\.parse\('([^']+)'\)",
+        # Defensive: double-quoted variant in case Understat changes
+        r"var\s+teamsData\s*=\s*JSON\.parse\(\"([^\"]+)\"\)",
+        # Newer pattern: assigned without `var`
+        r"teamsData\s*=\s*JSON\.parse\(['\"]([^'\"]+)['\"]\)",
+    ]
+    for pat in patterns:
+        match = re.search(pat, html)
+        if not match:
+            continue
+        raw = match.group(1)
+        decoded = raw.encode("utf-8").decode("unicode_escape")
+        try:
+            return json.loads(decoded)
+        except json.JSONDecodeError as exc:
+            logger.warning("Understat: matched pattern but JSON parse failed: %s", exc)
+            continue
+
+    logger.warning(
+        "Understat: no teamsData blob in HTML (length=%d). Source likely changed "
+        "or returned a stripped page. xG features will be unavailable; model "
+        "will degrade gracefully to Dixon-Coles + ELO.", len(html),
+    )
+    return None
+
+
+def is_available() -> bool:
+    """Quick liveness check — used by /health/sources. Tries a single fetch
+    on the EPL page and confirms the parser still works."""
     try:
-        return json.loads(decoded)
-    except json.JSONDecodeError as exc:
-        logger.warning("Understat parse failed: %s", exc)
-        return None
+        html = _fetch_html("EPL", date.today().year if date.today().month >= 8 else date.today().year - 1)
+        return _extract_teams_data(html) is not None
+    except Exception:
+        return False
 
 
 def get_league_xg(sport_key: str, year: int | None = None) -> list[TeamXG]:

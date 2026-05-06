@@ -500,6 +500,70 @@ async def agent_recommend(
 # Bankroll — real capital tracking (Phase 9)
 # ---------------------------------------------------------------------------
 
+@app.get("/health/sources")
+def health_sources(_: str = Depends(require_auth)) -> dict:
+    """
+    Probe every external data source and report its status.
+
+    Use this to monitor whether scraped sources (Understat) still work or
+    have been blocked / restructured upstream. Returns one entry per source
+    with: ok (bool), latency_ms (int|None), reason (str when not ok).
+    """
+    import os
+    import time
+    import requests
+    from betbot.data_sources import club_elo, understat
+    s = load_settings()
+
+    def _probe(name: str, fn) -> dict:
+        t0 = time.monotonic()
+        try:
+            ok = bool(fn())
+            return {"name": name, "ok": ok, "latency_ms": int((time.monotonic() - t0) * 1000)}
+        except Exception as exc:
+            return {"name": name, "ok": False,
+                    "latency_ms": int((time.monotonic() - t0) * 1000),
+                    "reason": str(exc)[:200]}
+
+    return {
+        "sources": [
+            _probe("odds_api", lambda: bool(s.odds_api_key)),  # cheap check (key set)
+            _probe("football_data", lambda: bool(s.football_data_api_key)),
+            _probe("club_elo", lambda: len(club_elo.get_all_elo_ratings()) > 100),
+            _probe("understat", understat.is_available),
+            _probe("api_football", lambda: bool(os.getenv("API_FOOTBALL_KEY"))),
+            _probe("tavily", lambda: bool(os.getenv("TAVILY_API_KEY"))),
+            _probe("anthropic", lambda: bool(s.anthropic_api_key)),
+        ],
+    }
+
+
+@app.get("/agent/runs")
+def list_agent_runs(
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    trigger: str | None = Query(default=None,
+                                description="Filter: 'api', 'dashboard', or 'scheduled'"),
+    db: Database = Depends(get_db),
+    _: str = Depends(require_auth),
+) -> list[dict]:
+    """Audit trail: every AI-agent invocation with reasoning + cost + picks."""
+    return db.list_agent_runs(limit=limit, offset=offset, trigger=trigger)
+
+
+@app.get("/agent/runs/{run_id}")
+def get_agent_run(
+    run_id: int,
+    db: Database = Depends(get_db),
+    _: str = Depends(require_auth),
+) -> dict:
+    """Full detail of a single agent run, including the reasoning trace."""
+    row = db.get_agent_run(run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Agent run #{run_id} not found")
+    return row
+
+
 @app.get("/bankroll/state", response_model=BankrollSnapshot)
 def bankroll_state(_: str = Depends(require_auth)) -> BankrollSnapshot:
     """Current snapshot: balance, committed (immobilized on pending bets),

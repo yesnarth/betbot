@@ -69,13 +69,26 @@ class OddsAPIClient:
         except (ValueError, TypeError):
             pass
 
-    def get_events_with_odds(self, sport: str) -> list[dict]:
-        """Fetch H2H odds for all available bookmakers for a given sport."""
+    def get_events_with_odds(self, sport: str, markets: str = "h2h,totals") -> list[dict]:
+        """
+        Fetch odds for the requested markets across all available bookmakers.
+
+        Default `markets` covers what The Odds API reliably supports for soccer:
+          - h2h    : 1/X/2 (match winner)
+          - totals : Over/Under (we filter on the 2.5 line in extract_best_odds)
+
+        BTTS (Both Teams To Score) is calculated by the model but NOT requested
+        from the Odds API — `btts` is not a valid market key for soccer in their
+        EU regions. To enable BTTS value bets we'd need a different odds provider.
+
+        Each additional market costs the same as one h2h-only request in their
+        billing model.
+        """
         url = f"{BASE_URL}/{sport}/odds"
         params = {
             "apiKey": self._key,
             "regions": "eu",
-            "markets": "h2h",
+            "markets": markets,
             "oddsFormat": "decimal",
             "dateFormat": "iso",
         }

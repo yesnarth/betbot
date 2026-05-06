@@ -299,18 +299,22 @@ class Database:
         result: str,
         closing_odds: float | None = None,
     ) -> None:
-        """Mark a prediction's outcome AND trigger the matching bankroll movement.
-
-        - result="win"  → bet_won  (credit stake × odds)
-        - result="loss" → bet_lost (zero-amount audit entry, stake already debited)
-        - result="void" → bet_void (refund the original stake)
         """
-        from betbot.bankroll import (
-            record_bet_lost,
-            record_bet_void,
-            record_bet_won,
-        )
-        # 1. Update the prediction row + capture stake/odds for the bankroll hook
+        Mark a prediction's outcome AND post the matching bankroll movement
+        IN A SINGLE TRANSACTION.
+
+        Behavior:
+          - result="win"  → bet_won  (credit stake × odds)
+          - result="loss" → bet_lost (zero-amount audit entry, stake already debited)
+          - result="void" → bet_void (refund the original stake)
+
+        Both writes commit together or roll back together. A Postgres restart
+        between the two CANNOT leave a "resolved but uncredited" prediction.
+
+        Idempotent: re-resolving the same prediction is a no-op.
+        """
+        from betbot.bankroll import _acquire_ledger_lock, _append
+
         with session_scope() as s:
             row = s.execute(
                 select(Prediction).where(
@@ -320,29 +324,35 @@ class Database:
                 )
             ).scalar_one_or_none()
             if row is None:
+                logger.debug("update_result: no prediction matching %s/%s/%s",
+                             event_id, market, selection)
                 return
-            # Idempotency: don't double-credit if we resolve the same row twice
-            already_resolved = row.result is not None
+
+            # Idempotency: don't double-credit
+            if row.result is not None:
+                return
+
+            stake = row.kelly_stake
+            odds = row.best_odds
+            pred_id = row.id
+
             row.result = result
             row.closing_odds = closing_odds
             row.resolved_at = _utcnow_iso()
-            pred_id = row.id
-            stake = row.kelly_stake
-            odds = row.best_odds
 
-        if already_resolved:
-            return
-
-        # 2. Bankroll movement (outside the prediction transaction)
-        try:
-            if result == "win":
-                record_bet_won(pred_id, stake, odds)
-            elif result == "loss":
-                record_bet_lost(pred_id)
-            elif result == "void":
-                record_bet_void(pred_id, stake)
-        except Exception as exc:
-            logger.error("Bankroll hook failed for pred #%s : %s", pred_id, exc)
+            # Bankroll movement in the SAME transaction. _append acquires the
+            # ledger advisory lock; safe vs concurrent placements.
+            if stake > 0:
+                if result == "win":
+                    payout = stake * odds
+                    _append(s, "bet_won", payout, prediction_id=pred_id,
+                            note=f"resolved {row.home_team} vs {row.away_team}")
+                elif result == "loss":
+                    _append(s, "bet_lost", 0.0, prediction_id=pred_id,
+                            note=f"resolved {row.home_team} vs {row.away_team}")
+                elif result == "void":
+                    _append(s, "bet_void", stake, prediction_id=pred_id,
+                            note=f"voided {row.home_team} vs {row.away_team}")
 
     # ------------------------------------------------------------------
     # Stats / ROI
@@ -411,6 +421,24 @@ class Database:
     # ------------------------------------------------------------------
     # Agent runs (NEW — for AI-agent audit trail)
     # ------------------------------------------------------------------
+
+    def list_agent_runs(self, limit: int = 50, offset: int = 0,
+                        trigger: str | None = None) -> list[dict]:
+        """Return agent runs newest first, optionally filtered by trigger
+        ('api' | 'dashboard' | 'scheduled')."""
+        with session_scope() as s:
+            stmt = select(AgentRun).order_by(AgentRun.id.desc())
+            if trigger:
+                stmt = stmt.where(AgentRun.trigger == trigger)
+            stmt = stmt.limit(limit).offset(offset)
+            rows = s.execute(stmt).scalars().all()
+            return [_to_dict(r) for r in rows]
+
+    def get_agent_run(self, run_id: int) -> dict | None:
+        """Return a single agent run with its full reasoning trace."""
+        with session_scope() as s:
+            row = s.get(AgentRun, run_id)
+            return _to_dict(row) if row else None
 
     def save_agent_run(
         self,

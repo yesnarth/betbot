@@ -56,17 +56,23 @@ class MatchProbs:
     draw: float
     away_win: float
     over_25: float
-    lambda_home: float
-    lambda_away: float
-    model: str  # "poisson" or "consensus"
+    under_25: float = 0.0     # complement of over_25
+    btts_yes: float = 0.0      # Both Teams To Score = Yes
+    btts_no: float = 0.0       # complement
+    lambda_home: float = 0.0
+    lambda_away: float = 0.0
+    model: str = "poisson"
 
     def outcomes(self) -> list[tuple[str, str, float]]:
-        """Return list of (code, label, prob) tuples."""
+        """Return list of (code, label, prob) tuples for ALL exposed markets."""
         return [
-            ("1", "Victoire domicile", self.home_win),
-            ("X", "Match nul", self.draw),
-            ("2", "Victoire extérieur", self.away_win),
-            ("O25", "Plus de 2.5 buts", self.over_25),
+            ("1",     "Victoire domicile",   self.home_win),
+            ("X",     "Match nul",           self.draw),
+            ("2",     "Victoire extérieur",  self.away_win),
+            ("O25",   "Plus de 2.5 buts",    self.over_25),
+            ("U25",   "Moins de 2.5 buts",   self.under_25),
+            ("BTTSY", "Les 2 équipes marquent", self.btts_yes),
+            ("BTTSN", "Une équipe ne marque pas", self.btts_no),
         ]
 
 
@@ -211,12 +217,15 @@ def poisson_match_probs(lambda_home: float, lambda_away: float,
     prob_draw = 0.0
     prob_away = 0.0
     prob_over25 = 0.0
+    prob_btts_yes = 0.0
+    total_mass = 0.0
 
     for i in grid:
         for j in grid:
             p = home_pmf[i] * away_pmf[j]
             if dixon_coles_rho != 0.0:
                 p *= _dixon_coles_tau(i, j, lambda_home, lambda_away, dixon_coles_rho)
+            total_mass += p
             if i > j:
                 prob_home += p
             elif i == j:
@@ -225,19 +234,27 @@ def poisson_match_probs(lambda_home: float, lambda_away: float,
                 prob_away += p
             if i + j > 2:
                 prob_over25 += p
+            if i >= 1 and j >= 1:
+                prob_btts_yes += p
 
-    # Normalize H2H to sum to 1 (handles truncation error from MAX_GOALS)
-    total = prob_home + prob_draw + prob_away
-    if total > 0:
-        prob_home /= total
-        prob_draw /= total
-        prob_away /= total
+    # Normalize EVERY market by the same total mass (handles truncation error
+    # from MAX_GOALS plus any τ correction normalization drift). This is the
+    # critical fix: previously over_25 was un-normalized while H2H was.
+    if total_mass > 0:
+        prob_home    /= total_mass
+        prob_draw    /= total_mass
+        prob_away    /= total_mass
+        prob_over25  /= total_mass
+        prob_btts_yes /= total_mass
 
     return MatchProbs(
         home_win=round(prob_home, 6),
         draw=round(prob_draw, 6),
         away_win=round(prob_away, 6),
         over_25=round(prob_over25, 6),
+        under_25=round(1.0 - prob_over25, 6),
+        btts_yes=round(prob_btts_yes, 6),
+        btts_no=round(1.0 - prob_btts_yes, 6),
         lambda_home=round(lambda_home, 4),
         lambda_away=round(lambda_away, 4),
         model="poisson",
@@ -323,6 +340,9 @@ def consensus_match_probs(event: dict) -> MatchProbs | None:
         draw=round(prob_draw, 6),
         away_win=round(prob_away, 6),
         over_25=probs.over_25,
+        under_25=probs.under_25,
+        btts_yes=probs.btts_yes,
+        btts_no=probs.btts_no,
         lambda_home=lh,
         lambda_away=la,
         model="consensus",
@@ -354,15 +374,30 @@ class BestOdds:
     bookmaker: str
 
 
-def extract_best_odds(event: dict, outcome_name: str) -> BestOdds | None:
-    """Find the best (highest) decimal odds for a given outcome across all bookmakers."""
+def extract_best_odds(
+    event: dict,
+    outcome_name: str,
+    market_key: str = "h2h",
+    point: float | None = None,
+) -> BestOdds | None:
+    """
+    Find the best (highest) decimal odds for a given outcome across all bookmakers.
+
+    Args:
+        outcome_name: e.g. "Real Madrid", "Draw", "Over", "Yes" (BTTS)
+        market_key:   "h2h" (default), "totals" (Over/Under), "btts"
+        point:        for "totals" markets, the line (e.g. 2.5)
+    """
     best: BestOdds | None = None
     for bm in event.get("bookmakers", []):
         for mkt in bm.get("markets", []):
-            if mkt.get("key") != "h2h":
+            if mkt.get("key") != market_key:
                 continue
             for o in mkt.get("outcomes", []):
                 if o.get("name") != outcome_name:
+                    continue
+                # `totals` markets carry a `point` field (the line).
+                if point is not None and o.get("point") not in (point, str(point)):
                     continue
                 try:
                     price = float(o["price"])
@@ -485,6 +520,9 @@ def blended_match_probs(
         draw=round(draw, 6),
         away_win=round(away_win, 6),
         over_25=poisson_probs.over_25,
+        under_25=poisson_probs.under_25,
+        btts_yes=poisson_probs.btts_yes,
+        btts_no=poisson_probs.btts_no,
         lambda_home=round(lambda_home, 4),
         lambda_away=round(lambda_away, 4),
         model="blended" if (has_xg or has_elo) else "poisson",

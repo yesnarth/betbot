@@ -13,6 +13,8 @@ import unicodedata
 from dataclasses import dataclass
 from difflib import get_close_matches
 
+from betbot.calibration import shrink_toward_market
+from betbot.ml import calibrate as ml_calibrate
 from betbot.models import (
     MatchProbs,
     poisson_match_probs,
@@ -224,27 +226,39 @@ def detect_value_bets(
             if probs is None:
                 continue
 
-            # Evaluate each H2H outcome
+            # Evaluate every market we expose. Each tuple is:
+            #   (selection_code, label, outcome_name, market_key, point, raw_prob)
+            # `market_key` matches The Odds API ("h2h" | "totals" | "btts").
+            # `point` is the line for totals (None elsewhere).
+            # Markets actually requested from The Odds API (h2h + totals only).
+            # BTTS is calculated by the model but its odds aren't fetched, so
+            # we don't iterate it here — would always produce best=None.
             outcome_map = [
-                ("1", "Victoire domicile", home, probs.home_win),
-                ("X", "Match nul", "Draw", probs.draw),
-                ("2", "Victoire extérieur", away, probs.away_win),
+                ("1",   "Victoire domicile",   home,    "h2h",    None, probs.home_win),
+                ("X",   "Match nul",           "Draw",  "h2h",    None, probs.draw),
+                ("2",   "Victoire extérieur",  away,    "h2h",    None, probs.away_win),
+                ("O25", "Plus de 2.5 buts",    "Over",  "totals", 2.5,  probs.over_25),
+                ("U25", "Moins de 2.5 buts",   "Under", "totals", 2.5,  probs.under_25),
             ]
 
-            for code, label, outcome_name, raw_model_prob in outcome_map:
+            for code, label, outcome_name, market_key, point, raw_model_prob in outcome_map:
                 if raw_model_prob < min_model_prob:
                     continue
 
-                best = extract_best_odds(event, outcome_name)
+                best = extract_best_odds(event, outcome_name, market_key=market_key, point=point)
                 if best is None or best.price < min_book_odds:
                     continue
 
-                # Market shrinkage: pull the raw model prob toward the market
-                # implied prob when the disagreement is suspiciously large.
-                # This prevents fictitious mega-edges driven by qualitative
-                # info (injuries, suspensions) the model doesn't see.
-                from betbot.calibration import shrink_toward_market
-                model_prob = shrink_toward_market(raw_model_prob, best.price)
+                # Two-stage probability calibration:
+                # 1. Market shrinkage — pull toward the bookmaker-implied
+                #    probability when the disagreement is suspiciously large.
+                #    This caps fictitious mega-edges from qualitative info
+                #    (injuries, suspensions) the statistical model doesn't see.
+                # 2. ML calibration — apply the IsotonicRegression learned from
+                #    historical resolved bets. No-op until 50+ resolved bets,
+                #    then auto-corrects systematic over/under-confidence.
+                shrunk = shrink_toward_market(raw_model_prob, best.price)
+                model_prob = ml_calibrate(shrunk)
 
                 edge = round(model_prob * best.price - 1.0, 4)
                 if edge < min_value_edge:
@@ -260,7 +274,7 @@ def detect_value_bets(
                     home_team=home,
                     away_team=away,
                     league_label=league_label,
-                    market="h2h",
+                    market=market_key,
                     selection_code=code,
                     selection_label=label,
                     model_prob=round(model_prob, 4),
