@@ -78,6 +78,8 @@ def load_settings() -> Settings:
             "Consulte .env.example pour la configuration."
         )
 
+    log_path = os.getenv("LOG_PATH", "betbot.log")  # empty string → stderr-only
+
     database_url = os.getenv("DATABASE_URL", "").strip()
     if not database_url:
         raise EnvironmentError(
@@ -111,6 +113,7 @@ def load_settings() -> Settings:
         top_combos=top_combos,
         scan_hours=scan_hours,
         min_before_kickoff=min_before_kickoff,
+        log_path=log_path,
         database_url=database_url,
         anthropic_api_key=anthropic_key,
         anthropic_model=anthropic_model,

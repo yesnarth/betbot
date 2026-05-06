@@ -25,6 +25,8 @@ from betbot_api.schemas import (
     EventBrief,
     EventsResponse,
     HealthResponse,
+    ManualScanFilters,
+    ManualScanResponse,
     PredictionRow,
     ROIStats,
 )
@@ -168,6 +170,119 @@ def backtest(
 # ---------------------------------------------------------------------------
 # AI Agent — the dashboard's killer feature
 # ---------------------------------------------------------------------------
+
+@app.post("/recommend/manual", response_model=ManualScanResponse)
+def recommend_manual(
+    filters: ManualScanFilters,
+    _: str = Depends(require_auth),
+) -> ManualScanResponse:
+    """
+    Deterministic scan — no AI. Runs the same Dixon-Coles + xG + ELO blended
+    model the worker uses, applies the user's filters, and returns picks +
+    parlays. Free to run, repeatable, no external API costs beyond the Odds API
+    quota that the underlying fetch_events consumes.
+
+    Use this when:
+      - you don't have ANTHROPIC_API_KEY yet
+      - you want a quick repeatable scan without AI overhead
+      - you want a deterministic baseline to compare against the AI agent
+    """
+    from betbot.analysis import build_parlays, detect_value_bets, rank_value_bets
+    from betbot.main import _filter_upcoming_today, _load_team_stats_from_db
+    from betbot_api.main import get_db as _get_db  # avoid circular import flicker
+
+    s = load_settings()
+    odds_client = OddsAPIClient(s.odds_api_key)
+
+    # Resolve filters with defaults from settings
+    edge = filters.min_edge if filters.min_edge is not None else s.min_value_edge
+    prob = filters.min_prob if filters.min_prob is not None else s.min_model_prob
+    odds = filters.min_odds if filters.min_odds is not None else s.min_book_odds
+
+    # Fetch events
+    if filters.sport_key:
+        all_events = {filters.sport_key: odds_client.get_events_with_odds(filters.sport_key)}
+    else:
+        all_events = odds_client.fetch_all_sports()
+
+    # Filter today vs upcoming
+    events_by_sport: dict[str, list[dict]] = {}
+    for sk, ev in all_events.items():
+        kept = _filter_upcoming_today(ev, s.min_before_kickoff) if filters.today_only else ev
+        if kept:
+            events_by_sport[sk] = kept
+
+    n_events = sum(len(v) for v in events_by_sport.values())
+    if n_events == 0:
+        return ManualScanResponse(
+            picks=[], parlays=[], n_picks=0, n_parlays=0,
+            filters_used=filters.model_dump(),
+            n_events_scanned=0,
+        )
+
+    # Run the blended Poisson + ELO model
+    db = Database(s.database_url)
+    prebuilt = _load_team_stats_from_db(db, events_by_sport.keys())
+    raw = detect_value_bets(
+        events_by_sport=events_by_sport,
+        match_history_by_sport={},
+        bankroll=s.bankroll,
+        kelly_fraction=s.kelly_fraction,
+        min_value_edge=edge,
+        min_model_prob=prob,
+        min_book_odds=odds,
+        prebuilt_stats_by_sport=prebuilt,
+    )
+    ranked = rank_value_bets(raw)[: s.top_bets]
+    parlays = build_parlays(ranked, n_legs=filters.n_legs, top_n=filters.n_combos)
+
+    # Convert to dicts
+    def bet_to_dict(b):
+        return {
+            "event_id": b.event_id,
+            "sport_key": b.sport_key,
+            "league": b.league_label,
+            "home_team": b.home_team,
+            "away_team": b.away_team,
+            "market": b.market,
+            "selection_code": b.selection_code,
+            "selection_label": b.selection_label,
+            "model_prob": b.model_prob,
+            "best_odds": b.best_odds,
+            "best_book": b.best_book,
+            "value_edge": b.value_edge,
+            "kelly_stake": b.kelly_stake,
+            "model_type": b.model_type,
+        }
+
+    picks_out = [bet_to_dict(b) for b in ranked]
+    parlays_out = [
+        {
+            "n_legs": len(p.bets),
+            "combined_odds": p.combined_odds,
+            "combined_prob": p.combined_prob,
+            "combined_ev_pct": p.combined_ev,
+            "legs": [bet_to_dict(b) for b in p.bets],
+        }
+        for p in parlays
+    ]
+    return ManualScanResponse(
+        picks=picks_out,
+        parlays=parlays_out,
+        n_picks=len(picks_out),
+        n_parlays=len(parlays_out),
+        filters_used={
+            "sport_key": filters.sport_key,
+            "today_only": filters.today_only,
+            "min_edge": edge,
+            "min_prob": prob,
+            "min_odds": odds,
+            "n_legs": filters.n_legs,
+            "n_combos": filters.n_combos,
+        },
+        n_events_scanned=n_events,
+    )
+
 
 @app.post("/agent/recommend", response_model=AgentResponse)
 async def agent_recommend(

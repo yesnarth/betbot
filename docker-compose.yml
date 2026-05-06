@@ -39,6 +39,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg2://betbot:${POSTGRES_PASSWORD:-betbot_dev_pwd}@db:5432/betbot
+      LOG_PATH: ""
     command: ["alembic", "upgrade", "head"]
     restart: "no"
 
@@ -53,6 +54,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg2://betbot:${POSTGRES_PASSWORD:-betbot_dev_pwd}@db:5432/betbot
+      LOG_PATH: ""
       REDIS_URL: redis://redis:6379/0
       TZ: ${TZ:-Europe/Paris}
     restart: unless-stopped
@@ -75,6 +77,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg2://betbot:${POSTGRES_PASSWORD:-betbot_dev_pwd}@db:5432/betbot
+      LOG_PATH: ""
       REDIS_URL: redis://redis:6379/0
     restart: unless-stopped
     ports:
@@ -102,6 +105,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg2://betbot:${POSTGRES_PASSWORD:-betbot_dev_pwd}@db:5432/betbot
+      LOG_PATH: ""
       BETBOT_API_URL: http://api:8000
     restart: unless-stopped
     ports:

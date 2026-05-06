@@ -95,3 +95,24 @@ class AgentResponse(BaseModel):
     model: str
     agent_run_id: int
     error: str | None = None
+
+
+class ManualScanFilters(BaseModel):
+    """Filters for the no-AI manual scan — same surface as the AI agent's filters
+    but only the ones that make sense for the deterministic pipeline."""
+    sport_key: str | None = Field(default=None)
+    today_only: bool = Field(default=True)
+    min_edge: float | None = Field(default=None, ge=-1.0, le=1.0)
+    min_prob: float | None = Field(default=None, ge=0.0, le=1.0)
+    min_odds: float | None = Field(default=None, ge=1.0)
+    n_legs: int = Field(default=3, ge=1, le=6)
+    n_combos: int = Field(default=3, ge=1, le=10)
+
+
+class ManualScanResponse(BaseModel):
+    picks: list[dict[str, Any]]
+    parlays: list[dict[str, Any]]
+    n_picks: int
+    n_parlays: int
+    filters_used: dict[str, Any]
+    n_events_scanned: int

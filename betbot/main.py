@@ -39,15 +39,26 @@ from betbot.resolver import resolve_pending
 # ---------------------------------------------------------------------------
 
 def setup_logging(log_path: str) -> logging.Logger:
+    """
+    Logger setup. Always logs to stderr (12-factor: containers capture stdout/stderr).
+    File handler is added only when log_path is non-empty AND writable — otherwise
+    we silently skip it. Set LOG_PATH="" in the environment to force stderr-only.
+    """
     logger = logging.getLogger("betbot")
     logger.setLevel(logging.INFO)
     fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(name)s — %(message)s")
-    fh = RotatingFileHandler(log_path, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
-    fh.setFormatter(fmt)
-    logger.addHandler(fh)
+
     ch = logging.StreamHandler()
     ch.setFormatter(fmt)
     logger.addHandler(ch)
+
+    if log_path:
+        try:
+            fh = RotatingFileHandler(log_path, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+            fh.setFormatter(fmt)
+            logger.addHandler(fh)
+        except (PermissionError, OSError) as exc:
+            logger.warning("Skipping file log %s : %s (stderr-only)", log_path, exc)
     return logger
 
 
