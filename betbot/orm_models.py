@@ -91,6 +91,75 @@ class Prediction(Base):
     placed_bookmaker: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
 
+class Promotion(Base):
+    """
+    Bookmaker promo / freebet / refund / cashback tracker.
+
+    Each row is a promo offered by a bookmaker on a specific date, with its
+    terms and the value-cash-equivalent we got from it. This lets us
+    distinguish "real edge" (statistical model) from "promo edge" (free money
+    that the bookmaker uses to acquire/retain users).
+
+    Why it matters: a bot that loses 5% on the model but gains 8% on promos
+    looks profitable, but it's a different game. Tracking promos separately
+    keeps the ROI of the *strategy* honest.
+    """
+    __tablename__ = "promotions"
+    __table_args__ = (
+        Index("ix_promotions_received_at", "received_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    received_at: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)
+    bookmaker_key: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("bookmakers.key", ondelete="SET NULL"), nullable=True,
+    )
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    # Common kinds:
+    #   "freebet"       — token usable on selected events
+    #   "deposit_match" — 100% match on a deposit up to X$
+    #   "refund"        — refund if the bet loses by 1 specific outcome
+    #   "boost"         — odds enhancement
+    #   "cashback"      — % back of weekly losses
+    nominal_value: Mapped[float] = mapped_column(Float, nullable=False)
+    cash_equivalent: Mapped[float] = mapped_column(Float, nullable=False)
+    # cash_equivalent < nominal_value because rollover requirements / odds caps
+    # eat real value. E.g. a 50€ freebet at 2.0 odds gives ~25-35€ EV.
+    rollover_x: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    expires_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    used: Mapped[bool] = mapped_column(default=False)
+    used_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
+class CashOut(Base):
+    """
+    Tracks cash-outs taken before a match settles.
+
+    A cash-out closes a pending bet at a price the bookmaker offers (always
+    below true EV — that's how they monetize). Recording each cash-out lets
+    us:
+      - separate "skill ROI" (would the bet have won?) from "cash-out ROI"
+        (was the cash-out a good decision relative to the held EV?)
+      - measure how often cash-outs cost us long-term
+    """
+    __tablename__ = "cash_outs"
+    __table_args__ = (
+        Index("ix_cash_outs_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    prediction_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("predictions.id", ondelete="CASCADE"), nullable=False,
+    )
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)
+    cash_out_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    # The bookmaker's offered price; we record it but don't trust it for
+    # accounting — the user's bankroll moves by the actual amount received.
+    bookmaker_offered_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
 class AgentRun(Base):
     """
     Persists each AI-agent invocation: the user filters that triggered it,

@@ -17,6 +17,7 @@ BASE_URL = "https://api.the-odds-api.com/v4/sports"
 QUOTA_MINIMUM = 20  # stop if fewer than this many requests remain
 
 SPORT_KEYS = [
+    # Football — full Poisson model (xG/ELO/Tavily news/weather all wired)
     "soccer_france_ligue1",
     "soccer_epl",
     "soccer_spain_la_liga",
@@ -24,7 +25,28 @@ SPORT_KEYS = [
     "soccer_germany_bundesliga",
     "soccer_uefa_champs_league",
     "soccer_africa_cup_of_nations",
+    # Tennis — uses the consensus model only (no per-player Poisson stats yet).
+    # Markets are h2h only ("Player 1 vs Player 2"). Set MULTI_SPORT_TENNIS=1
+    # in .env to actually scan these (default: off, to save Odds API quota).
 ]
+
+
+def _enabled_sport_keys() -> list[str]:
+    """Filter SPORT_KEYS by feature flags. Defaults to football-only.
+
+    Tennis is OFF by default because:
+      1. We don't yet have per-player Poisson stats (model degrades to consensus)
+      2. Each scanned sport costs one Odds API request — protects free quota
+    Toggle via .env: MULTI_SPORT_TENNIS=1
+    """
+    import os
+    keys = list(SPORT_KEYS)
+    if os.getenv("MULTI_SPORT_TENNIS", "0") == "1":
+        keys += ["tennis_atp_french_open", "tennis_atp_us_open",
+                 "tennis_atp_wimbledon", "tennis_atp_aus_open"]
+    if os.getenv("MULTI_SPORT_BASKETBALL", "0") == "1":
+        keys += ["basketball_nba", "basketball_euroleague"]
+    return keys
 
 
 class QuotaExhaustedError(Exception):
@@ -114,9 +136,10 @@ class OddsAPIClient:
         return events
 
     def fetch_all_sports(self) -> dict[str, list[dict]]:
-        """Fetch odds for all configured sport keys. Returns {sport_key: [events]}."""
+        """Fetch odds for all enabled sport keys (filtered by feature flags).
+        Returns {sport_key: [events]}."""
         results: dict[str, list[dict]] = {}
-        for sport in SPORT_KEYS:
+        for sport in _enabled_sport_keys():
             try:
                 events = self.get_events_with_odds(sport)
                 results[sport] = events

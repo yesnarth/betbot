@@ -81,6 +81,30 @@ app.add_middleware(
 # Health
 # ---------------------------------------------------------------------------
 
+@app.post("/auth/login")
+@limiter.limit("5/minute")  # protect against brute-force
+def auth_login(request: Request,
+               username: str = Query(...),
+               password: str = Query(...)) -> dict:
+    """
+    Issue a JWT for valid credentials. Returns 401 otherwise.
+
+    Active when BETBOT_JWT_SECRET is set. Otherwise the dashboard / API
+    keep using HTTP Basic. Token TTL = BETBOT_JWT_TTL_MIN minutes (default 60).
+    """
+    from betbot_api.jwt_auth import (
+        authenticate_user, create_access_token, jwt_enabled,
+    )
+    if not jwt_enabled():
+        raise HTTPException(status_code=503,
+                            detail="JWT disabled (BETBOT_JWT_SECRET not set)")
+    if not authenticate_user(username, password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = create_access_token(subject=username)
+    return {"access_token": token, "token_type": "bearer",
+            "expires_in_min": int(os.getenv("BETBOT_JWT_TTL_MIN", "60"))}
+
+
 @app.get("/health", response_model=HealthResponse)
 def health(db: Database = Depends(get_db)) -> HealthResponse:
     from betbot.bankroll import get_state
@@ -190,6 +214,37 @@ def roi(
     _: str = Depends(require_auth),
 ) -> ROIStats:
     return ROIStats(**db.get_roi_stats(days=days))
+
+
+@app.post("/stats/ab-test")
+@limiter.limit("5/minute")
+def ab_test(
+    request: Request,
+    body: dict,
+    _: str = Depends(require_auth),
+) -> dict:
+    """
+    Compare two rule variants on resolved historical predictions.
+
+    Body:
+      variant_a: {"name": str, ... knobs ...}
+      variant_b: {"name": str, ... knobs ...}
+      days:      lookback window (default 90)
+      only_placed: only count bets the user actually played (default false)
+
+    Knobs (each variant):
+      market_shrink_soft, market_shrink_hard, market_shrink_max,
+      overconfidence_cap, overconfidence_penalty,
+      huge_edge_threshold, huge_edge_penalty
+    """
+    from betbot.ab_test import RuleVariant, compare_variants
+    a = RuleVariant(**(body.get("variant_a") or {"name": "A"}))
+    b = RuleVariant(**(body.get("variant_b") or {"name": "B"}))
+    return compare_variants(
+        a, b,
+        days=int(body.get("days", 90)),
+        only_placed=bool(body.get("only_placed", False)),
+    )
 
 
 @app.post("/stats/backtest")
@@ -523,6 +578,48 @@ async def agent_recommend(
 # Bankroll — real capital tracking (Phase 9)
 # ---------------------------------------------------------------------------
 
+@app.get("/arbitrage")
+@limiter.limit("10/minute")
+def arbitrage_scan(
+    request: Request,
+    sport_key: str | None = Query(default=None,
+                                  description="Filter to one sport, else scan all"),
+    today_only: bool = Query(default=True),
+    _: str = Depends(require_auth),
+) -> dict:
+    """
+    Detect cross-bookmaker arbitrage opportunities — guaranteed profit if you
+    can place all legs at the listed odds. Real arbs are RARE in liquid markets
+    (~1 in 200-1000 events) and usually < 1% profit.
+    """
+    from betbot.arbitrage import scan_arbs, arb_to_dict
+    from betbot.main import _filter_upcoming_today
+    s = load_settings()
+    odds_client = OddsAPIClient(s.odds_api_key)
+
+    if sport_key:
+        all_events = {sport_key: odds_client.get_events_with_odds(sport_key)}
+    else:
+        all_events = odds_client.fetch_all_sports()
+
+    events_by_sport: dict[str, list[dict]] = {}
+    for sk, ev in all_events.items():
+        kept = _filter_upcoming_today(ev, s.min_before_kickoff) if today_only else ev
+        if kept:
+            events_by_sport[sk] = kept
+
+    arbs = scan_arbs(events_by_sport, market_key="h2h")
+    return {
+        "n_opportunities": len(arbs),
+        "arbs": [arb_to_dict(a) for a in arbs],
+        "notes": [
+            "Real arbs are usually < 1% profit and require fast execution.",
+            "Bookmakers may void your bet or limit your account if you arb regularly.",
+            "Always verify odds on the bookmaker site before placing — odds move.",
+        ],
+    }
+
+
 @app.get("/health/sources")
 def health_sources(_: str = Depends(require_auth)) -> dict:
     """
@@ -585,6 +682,83 @@ def get_agent_run(
     if row is None:
         raise HTTPException(status_code=404, detail=f"Agent run #{run_id} not found")
     return row
+
+
+@app.post("/promotions")
+def add_promotion(body: dict, _: str = Depends(require_auth)) -> dict:
+    """
+    Record a bookmaker promo (freebet, deposit match, refund, etc.).
+    Body:
+      kind            : "freebet" | "deposit_match" | "refund" | "boost" | "cashback"
+      nominal_value   : face value (e.g. 50 for a 50€ freebet)
+      cash_equivalent : realistic EV after rollover/odds caps (often < nominal)
+      bookmaker_key   : optional account identifier
+      rollover_x      : optional wagering requirement
+      note            : optional free text
+    """
+    from betbot.promotions import record_promotion
+    promo_id = record_promotion(
+        kind=body.get("kind", "").strip(),
+        nominal_value=float(body["nominal_value"]),
+        cash_equivalent=float(body["cash_equivalent"]),
+        bookmaker_key=body.get("bookmaker_key"),
+        rollover_x=body.get("rollover_x"),
+        expires_at=body.get("expires_at"),
+        note=body.get("note"),
+    )
+    return {"id": promo_id}
+
+
+@app.get("/promotions")
+def list_promos(only_unused: bool = Query(default=False),
+                _: str = Depends(require_auth)) -> list[dict]:
+    from betbot.promotions import list_promotions
+    return list_promotions(only_unused=only_unused)
+
+
+@app.get("/promotions/summary")
+def promo_summary(_: str = Depends(require_auth)) -> dict:
+    from betbot.promotions import promotions_summary
+    return promotions_summary()
+
+
+@app.post("/promotions/{promo_id}/used")
+def mark_promo_used(promo_id: int, _: str = Depends(require_auth)) -> dict:
+    from betbot.promotions import mark_promotion_used
+    if not mark_promotion_used(promo_id):
+        raise HTTPException(status_code=404, detail=f"Promotion {promo_id} not found")
+    return {"id": promo_id, "used": True}
+
+
+@app.post("/cashouts")
+def add_cashout(body: dict, _: str = Depends(require_auth)) -> dict:
+    """
+    Record a cash-out on a pending prediction. Body:
+      prediction_id          : the bet being cashed out
+      cash_out_amount        : actual amount received
+      bookmaker_offered_price: the cash-out price the bookie showed (optional)
+      note                   : optional
+    """
+    from betbot.promotions import record_cashout
+    try:
+        cashout_id = record_cashout(
+            prediction_id=int(body["prediction_id"]),
+            cash_out_amount=float(body["cash_out_amount"]),
+            bookmaker_offered_price=body.get("bookmaker_offered_price"),
+            note=body.get("note"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"id": cashout_id}
+
+
+@app.get("/cashouts")
+def list_cashouts_endpoint(
+    limit: int = Query(default=100, ge=1, le=1000),
+    _: str = Depends(require_auth),
+) -> list[dict]:
+    from betbot.promotions import list_cashouts
+    return list_cashouts(limit=limit)
 
 
 @app.get("/bankroll/state", response_model=BankrollSnapshot)
