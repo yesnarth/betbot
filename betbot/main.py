@@ -418,6 +418,16 @@ def main() -> None:
         settings.scan_hours[2]: "Soir",
     } if len(settings.scan_hours) >= 3 else {h: h for h in settings.scan_hours}
 
+    # Scans : if the worker was offline at the scheduled time, APScheduler
+    # will run a catch-up scan as soon as the worker boots — provided we
+    # boot back within `misfire_grace_time` of the missed firing. We use
+    # 4h grace : long enough to handle the realistic "computer was off
+    # this morning" case, short enough that we don't spam a stale scan
+    # 12 hours after the fact.
+    #
+    # `coalesce=True` means if multiple firings were missed (e.g. both 09h
+    # and 20h), only ONE catch-up scan runs at boot — not two in a row.
+    SCAN_MISFIRE_GRACE = 4 * 3600   # 4h
     for hour in settings.scan_hours:
         h, m = hour.split(":")
         label = labels.get(hour, hour)
@@ -427,10 +437,11 @@ def main() -> None:
             trigger=CronTrigger(hour=int(h), minute=int(m)),
             id=f"scan_{hour}",
             name=f"scan-{label}",
-            misfire_grace_time=600,
+            misfire_grace_time=SCAN_MISFIRE_GRACE,
             coalesce=True,
         )
-        logger.info("Scan planifié à %s (%s) — Europe/Paris", hour, label)
+        logger.info("Scan planifié à %s (%s) — Europe/Paris (catch-up grace : %dh)",
+                    hour, label, SCAN_MISFIRE_GRACE // 3600)
 
     # Mise à jour stats chaque lundi matin
     scheduler.add_job(
