@@ -281,6 +281,20 @@ class Database:
             ).scalars().all()
             return [_to_dict(r) for r in rows]
 
+    def get_skipped_predictions(self, limit: int = 20) -> list[dict]:
+        """Recently skipped picks — for the 'I clicked skip by mistake'
+        recovery UI. Includes both unresolved (where unskip still makes
+        sense) and resolved skipped picks (analytics on what we passed on).
+        Most-recently skipped first."""
+        with session_scope() as s:
+            rows = s.execute(
+                select(Prediction)
+                .where(Prediction.placement_status == "skipped")
+                .order_by(Prediction.placement_status_at.desc())
+                .limit(limit)
+            ).scalars().all()
+            return [_to_dict(r) for r in rows]
+
     def get_confirmed_pending(self) -> list[dict]:
         """Confirmed bets whose match hasn't resolved yet — what the user
         is currently 'on the hook' for."""

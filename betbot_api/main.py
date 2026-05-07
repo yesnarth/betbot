@@ -377,6 +377,16 @@ def proposed_predictions(
     return [PredictionRow(**r) for r in db.get_proposed_predictions()]
 
 
+@app.get("/predictions/skipped", response_model=list[PredictionRow])
+def skipped_predictions(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Database = Depends(get_db),
+    _: str = Depends(require_auth),
+) -> list[PredictionRow]:
+    """Recently skipped picks — supports the 'undo skip' recovery UI."""
+    return [PredictionRow(**r) for r in db.get_skipped_predictions(limit=limit)]
+
+
 @app.get("/predictions/pending", response_model=list[PredictionRow])
 def pending_predictions(
     db: Database = Depends(get_db),

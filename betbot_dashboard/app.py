@@ -678,13 +678,14 @@ with tab_events:
 
 with tab_validate:
     st.subheader("🔔 Picks à valider — recommandations du worker")
+    scan_hours_in_caption = " / ".join(health.get("scan_hours", []))
     st.caption(
-        "Le worker a proposé ces picks lors des scans automatiques (09h00 / 20h00). "
+        f"Le worker a proposé ces picks lors des scans automatiques "
+        f"({scan_hours_in_caption}). "
         "**Aucun argent n'a été engagé** — c'est à toi de placer le pari chez ton "
         "bookmaker, puis de revenir cliquer **« J'ai placé »** pour que le solde "
         "soit débité du stake Kelly. **« Skipper »** archive le pick sans débit. "
-        "Skip par erreur ? Va voir le pick dans la DB : un POST /predictions/{id}/unskip "
-        "le remet en 'proposed' (UI à venir)."
+        "Skip par erreur ? Voir la section « ↩️ Skipped récemment » plus bas."
     )
 
     try:
@@ -694,11 +695,13 @@ with tab_validate:
         proposed = []
 
     if not proposed:
+        scan_hours_str = " ou ".join(health.get("scan_hours", []))
         empty_state(
             "🔔",
             "Aucun pick en attente de validation",
-            "Les picks proposés par le worker apparaîtront ici après le prochain "
-            "scan automatique (09h00, 15h00 ou 20h00 Europe/Paris).",
+            f"Les picks proposés par le worker apparaîtront ici après le prochain "
+            f"scan automatique ({scan_hours_str} Europe/Paris). "
+            f"Auto-archivage des picks proposed > 36h.",
         )
     else:
         st.markdown(f"**{len(proposed)} pick(s) à valider**")
@@ -740,6 +743,44 @@ with tab_validate:
                            f"**Modèle** : `{p.get('model_type', '—')}` · "
                            f"**Best book auto-détecté** : `{p['best_book']}`")
                 st.caption(f"Proposé le : {p['created_at'][:19]}")
+
+    # ─── Skipped récemment — récupération d'accidents ─────────────────────
+    try:
+        skipped = api_get("/predictions/skipped", limit=10)
+    except Exception:
+        skipped = []
+    if skipped:
+        st.markdown("---")
+        with st.expander(f"↩️ Skipped récemment ({len(skipped)})", expanded=False):
+            st.caption(
+                "Picks que tu as déjà skippés (ou auto-archivés par le cron 36h). "
+                "Si tu en as skippé un par erreur, click **↩️ Annuler skip** "
+                "pour le remettre dans la file de validation."
+            )
+            for sk in skipped:
+                pid = sk["id"]
+                resolved_marker = " · ✓ résolu" if sk.get("result") else ""
+                label = (
+                    f"#{pid} · {sk['home_team']} vs {sk['away_team']} — "
+                    f"{sk['selection']} @ {sk['best_odds']:.2f} · "
+                    f"edge {sk['value_edge']*100:+.1f}%{resolved_marker}"
+                )
+                cols = st.columns([4, 1])
+                cols[0].markdown(label)
+                # Only allow unskip if the match isn't already resolved.
+                # A resolved skipped pick is locked-in history.
+                if not sk.get("result"):
+                    if cols[1].button("↩️ Annuler skip",
+                                      key=f"unskip_{pid}", width='stretch'):
+                        try:
+                            api_post(f"/predictions/{pid}/unskip", json={})
+                            st.success(
+                                f"Pick #{pid} remis en 'proposed'. Recharge la page."
+                            )
+                        except Exception as exc:
+                            st.error(f"Erreur : {exc}")
+                else:
+                    cols[1].caption(f"_{sk['result']}_")
 
 
 with tab_pending:
@@ -1170,8 +1211,26 @@ with tab_sources:
         c2.metric("En panne", n_ko, delta="critique" if n_ko else None,
                   delta_color="inverse" if n_ko else "off")
         c3.metric("Non configurées", n_unconf)
-        checked = health_data.get("checked_at", "")[:19].replace("T", " ")
-        c4.metric("Dernière vérif.", checked or "—")
+        # Show relative time since the probe ran — easier to parse at a
+        # glance than the raw ISO timestamp ("il y a 3 min" vs "12:34:56").
+        checked_iso = health_data.get("checked_at", "")
+        relative_age = "—"
+        if checked_iso:
+            try:
+                from datetime import datetime, timezone
+                checked_dt = datetime.fromisoformat(checked_iso.replace("Z", "+00:00"))
+                age_sec = int((datetime.now(timezone.utc) - checked_dt).total_seconds())
+                if age_sec < 60:
+                    relative_age = f"il y a {age_sec}s"
+                elif age_sec < 3600:
+                    relative_age = f"il y a {age_sec // 60}min"
+                elif age_sec < 86400:
+                    relative_age = f"il y a {age_sec // 3600}h"
+                else:
+                    relative_age = f"il y a {age_sec // 86400}j"
+            except Exception:
+                relative_age = checked_iso[:19].replace("T", " ")
+        c4.metric("Dernière vérif.", relative_age)
 
         st.markdown("")
 
@@ -1306,11 +1365,48 @@ with tab_tennis:
 
     if tn_status:
         if tn_status.get("available"):
-            kpi = st.columns(3)
-            kpi[0].metric("Statut", "✓ actif")
-            kpi[1].metric("Joueurs notés", tn_status.get("n_players", 0))
+            # Distinguish "model file loaded" (always true once bootstrapped)
+            # from "actively scanned by the worker" (depends on the env flag
+            # AND on whether a Grand Slam is currently in season).
+            active_sports_now = health.get("active_sports", [])
+            has_active_tennis = any(s.startswith("tennis_") for s in active_sports_now)
+            kpi = st.columns(4)
+            kpi[0].metric("Modèle ELO", "✓ chargé")
+            scanned_label = "✓ oui" if has_active_tennis else "✗ pas en saison"
+            kpi[1].metric("Scanné par le worker", scanned_label,
+                          delta_color="normal" if has_active_tennis else "off")
+            kpi[2].metric("Joueurs notés", tn_status.get("n_players", 0))
             most_recent = tn_status.get("most_recent_match", "?")
-            kpi[2].metric("Dernier match analysé", most_recent or "—")
+            kpi[3].metric("Dernier match", most_recent or "—")
+
+            # Grand Slam countdown when nothing is currently active : helps
+            # the user understand WHEN the tennis picks will start showing
+            # up in the validation queue. Hardcoded calendar (these dates
+            # are stable from year to year within a few days).
+            if not has_active_tennis:
+                from datetime import date
+                gs_calendar = [
+                    ("Australian Open", date(2027, 1, 18)),
+                    ("Roland Garros",   date(2026, 5, 24)),
+                    ("Wimbledon",       date(2026, 6, 29)),
+                    ("US Open",         date(2026, 8, 25)),
+                ]
+                today_d = date.today()
+                upcoming = sorted(
+                    [(name, d) for name, d in gs_calendar if d >= today_d],
+                    key=lambda x: x[1],
+                )
+                if upcoming:
+                    next_name, next_date = upcoming[0]
+                    days_until = (next_date - today_d).days
+                    st.info(
+                        f"🎾 **Aucun Grand Slam actuellement en saison.** "
+                        f"Prochain : **{next_name}** dans **{days_until} jour(s)** "
+                        f"({next_date.isoformat()}). "
+                        f"Le worker recommencera à scanner du tennis automatiquement "
+                        f"quand The Odds API listera le tournoi comme actif.",
+                        icon="📅",
+                    )
 
             st.markdown("")
             st.markdown("**Top 5 ATP (ELO global)**")
@@ -1406,11 +1502,32 @@ with tab_basket:
 
     if bb_status_res:
         if bb_status_res.get("available"):
-            kpi = st.columns(3)
-            kpi[0].metric("Statut", "✓ actif")
-            kpi[1].metric("Équipes notées", bb_status_res.get("n_teams", 0))
+            # Same distinction as the tennis tab : "model loaded" vs "scanned
+            # by worker today". For basket the gating is :
+            #   - MULTI_SPORT_BASKETBALL flag in .env  (controllable)
+            #   - NBA / EuroLeague currently in active_sports (Odds API tells us)
+            active_sports_now = health.get("active_sports", [])
+            has_active_basket = any(
+                s.startswith("basketball_") for s in active_sports_now
+            )
+            kpi = st.columns(4)
+            kpi[0].metric("Modèle stats", "✓ chargé")
+            scanned_label = "✓ oui" if has_active_basket else "✗ off / hors saison"
+            kpi[1].metric("Scanné par le worker", scanned_label,
+                          delta_color="normal" if has_active_basket else "off")
+            kpi[2].metric("Équipes notées", bb_status_res.get("n_teams", 0))
             by_league = bb_status_res.get("by_league", {})
-            kpi[2].metric("Ligues couvertes", ", ".join(by_league.keys()) or "—")
+            kpi[3].metric("Ligues couvertes", ", ".join(by_league.keys()) or "—")
+
+            if not has_active_basket:
+                st.info(
+                    "🏀 Basket non scanné en ce moment. Soit le flag "
+                    "`MULTI_SPORT_BASKETBALL` est à `0` dans `.env`, soit "
+                    "NBA + EuroLeague sont entre saisons (NBA reprend mi-octobre, "
+                    "EuroLeague aussi). Pour l'activer : édite `.env` puis "
+                    "`docker compose up -d --force-recreate api worker`.",
+                    icon="ℹ️",
+                )
 
             st.markdown("")
             st.markdown("**Top 5 par Net Rating (ORtg − DRtg)**")
