@@ -1,35 +1,52 @@
 """
 End-to-end lifecycle test — bet placement → resolution → bankroll updated.
 
+⚠ DESTRUCTIVE: an autouse fixture wipes BankrollEntry and Prediction tables
+between tests for clean isolation. To make sure this CAN NEVER hit the
+production DB, the test only runs when BETBOT_TEST_DATABASE_URL points at
+a database whose name contains "test". Without that, all tests in this
+module are skipped.
+
 Validates the full sequence the user actually goes through:
   1. deposit initial bankroll
-  2. save_prediction (debits the stake atomically)
-  3. confirm_prediction_placed (mark "actually played")
+  2. save_prediction (proposed status, no debit)
+  3. confirm_prediction_placed (debits the stake atomically)
   4. update_result(win) → bankroll credited atomically
-  5. ROI stats reflect ONLY the placed bet, not unplaced ones
-
-Plus the responsible-betting guards: stop-loss, daily caps, cool-off.
-
-Skipped without Postgres.
+  5. ROI stats reflect ONLY the confirmed bets, not proposed/skipped ones
 """
 import os
 import pytest
 
+
+def _is_safe_test_db() -> bool:
+    url = os.getenv("BETBOT_TEST_DATABASE_URL", "").strip()
+    if not url.startswith(("postgresql://", "postgresql+")):
+        return False
+    return "test" in url.lower()
+
+
 pytestmark = pytest.mark.skipif(
-    not os.getenv("DATABASE_URL", "").startswith("postgresql"),
-    reason="E2E lifecycle tests need a real Postgres",
+    not _is_safe_test_db(),
+    reason="E2E lifecycle tests need BETBOT_TEST_DATABASE_URL pointing at a "
+           "Postgres DB whose URL contains 'test' (autouse fixture is destructive).",
 )
 
 
 @pytest.fixture(autouse=True)
-def _reset_db():
-    """Wipe ledger + predictions for clean test isolation."""
-    from betbot.database import session_scope
+def _reset_db(monkeypatch):
+    """Wipe ledger + predictions for clean test isolation. Only runs against
+    the explicitly-opted-in test DB (see pytestmark above)."""
+    # Force the application code to use the test DB even if shells have
+    # DATABASE_URL set to prod.
+    monkeypatch.setenv("DATABASE_URL", os.getenv("BETBOT_TEST_DATABASE_URL", ""))
+    from betbot.database import session_scope, reset_engine
     from betbot.orm_models import BankrollEntry, Prediction
+    reset_engine()
     with session_scope() as s:
         s.query(BankrollEntry).delete()
         s.query(Prediction).delete()
     yield
+    reset_engine()
 
 
 # ---------------------------------------------------------------------------

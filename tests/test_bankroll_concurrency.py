@@ -1,29 +1,43 @@
 """
 Concurrency test for the bankroll ledger.
 
+⚠ DESTRUCTIVE: autouse fixture wipes the ledger and predictions tables
+between tests. Refuses to run unless BETBOT_TEST_DATABASE_URL points at
+a Postgres DB whose URL contains "test".
+
 Validates that the advisory-lock-protected `_append()` cannot be tricked
 by simultaneous threads into reading the same balance and double-spending.
-
-Skipped automatically if no Postgres is reachable.
 """
 import os
 import threading
 import pytest
 
+
+def _is_safe_test_db() -> bool:
+    url = os.getenv("BETBOT_TEST_DATABASE_URL", "").strip()
+    if not url.startswith(("postgresql://", "postgresql+")):
+        return False
+    return "test" in url.lower()
+
+
 pytestmark = pytest.mark.skipif(
-    not os.getenv("DATABASE_URL", "").startswith("postgresql"),
-    reason="bankroll concurrency tests require a real Postgres",
+    not _is_safe_test_db(),
+    reason="bankroll concurrency tests need BETBOT_TEST_DATABASE_URL pointing "
+           "at a Postgres DB whose URL contains 'test' (autouse fixture is destructive).",
 )
 
 
 @pytest.fixture(autouse=True)
-def _reset_ledger():
-    from betbot.database import session_scope
+def _reset_ledger(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", os.getenv("BETBOT_TEST_DATABASE_URL", ""))
+    from betbot.database import session_scope, reset_engine
     from betbot.orm_models import BankrollEntry, Prediction
+    reset_engine()
     with session_scope() as s:
         s.query(BankrollEntry).delete()
         s.query(Prediction).delete()
     yield
+    reset_engine()
 
 
 def test_concurrent_deposits_balance_consistent():

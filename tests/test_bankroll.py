@@ -1,12 +1,10 @@
 """
 Unit tests for the bankroll module.
 
-These tests assume an empty DB at start. They run against the real DATABASE_URL
-in CI / Docker — there is no SQLite mock since BetBot is PostgreSQL-only and
-the bankroll module relies on real session_scope behavior.
-
-When run locally without Docker, set up a fresh test database and point
-DATABASE_URL at it before running this file.
+⚠ DESTRUCTIVE: an autouse fixture wipes the ledger and predictions tables
+between tests. To make sure this CAN NEVER hit production, the test only
+runs when BETBOT_TEST_DATABASE_URL points at a database whose name
+contains "test". Without that, all tests in this module are skipped.
 """
 import os
 import pytest
@@ -24,22 +22,33 @@ from betbot.bankroll import (
 )
 
 
+def _is_safe_test_db() -> bool:
+    url = os.getenv("BETBOT_TEST_DATABASE_URL", "").strip()
+    if not url.startswith(("postgresql://", "postgresql+")):
+        return False
+    return "test" in url.lower()
+
+
 pytestmark = pytest.mark.skipif(
-    not os.getenv("DATABASE_URL", "").startswith("postgresql"),
-    reason="bankroll tests need a real Postgres DB (set DATABASE_URL)",
+    not _is_safe_test_db(),
+    reason="bankroll tests need BETBOT_TEST_DATABASE_URL pointing at a Postgres "
+           "DB whose URL contains 'test' (autouse fixture is destructive).",
 )
 
 
 @pytest.fixture(autouse=True)
-def _reset_ledger():
-    """Wipe the ledger AND test-only predictions before each test. Skipped when no DB."""
-    from betbot.database import session_scope
+def _reset_ledger(monkeypatch):
+    """Wipe the ledger AND test-only predictions before each test. Only runs
+    against the explicitly-opted-in test DB (see pytestmark above)."""
+    monkeypatch.setenv("DATABASE_URL", os.getenv("BETBOT_TEST_DATABASE_URL", ""))
+    from betbot.database import session_scope, reset_engine
     from betbot.orm_models import BankrollEntry, Prediction
+    reset_engine()
     with session_scope() as s:
-        # Order matters: ledger first (FK references predictions)
         s.query(BankrollEntry).delete()
         s.query(Prediction).delete()
     yield
+    reset_engine()
 
 
 def test_empty_state():
