@@ -9,7 +9,7 @@ truth.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import inspect, select, func
 from sqlalchemy.engine import Engine
@@ -194,38 +194,26 @@ class Database:
         lambda_home: float | None = None,
         lambda_away: float | None = None,
         model_type: str = "poisson",
-        enforce_funds: bool = True,
+        enforce_funds: bool = True,  # kept for signature compat, unused now
     ) -> bool:
         """
-        Save a prediction AND immobilize its Kelly stake atomically.
+        Save a prediction as PROPOSED. The bankroll is **NOT** debited at this
+        stage — that only happens when the user explicitly confirms placement
+        via `confirm_prediction_placed()`. This matches the real workflow :
+        the bot can't place real bets (the user's bookmakers don't expose
+        APIs), so picks live in 'proposed' state until the user does the
+        actual click at the bookmaker site and comes back to confirm.
 
-        Both the Prediction row and the bankroll_ledger row are inserted in a
-        SINGLE transaction. Either both succeed, or neither — no fantôme rows.
+        Returns True if inserted, False if a row with the same
+        (event_id, market, selection) already exists.
 
-        Returns True if inserted, False if duplicate. Raises
-        InsufficientFundsError if the bankroll's available balance is below the
-        stake (set enforce_funds=False to bypass, useful for backtests).
+        Note: the `enforce_funds` argument is kept for backwards compatibility
+        with backtest code paths but no longer has any effect at save time.
+        Funds are checked at confirm time.
         """
-        from betbot.bankroll import (
-            InsufficientFundsError,
-            _acquire_ledger_lock,
-            _append,
-            _state_inside_lock,
-        )
-        from betbot.guards import GuardViolation, check_can_place_bet
-
-        # Pre-flight responsible-betting guards (stop-loss, daily cap, exposure)
-        if kelly_stake > 0 and enforce_funds:
-            try:
-                check_can_place_bet(kelly_stake)
-            except GuardViolation as exc:
-                logger.warning("Guard blocked prediction (%s vs %s) : %s",
-                               home_team, away_team, exc)
-                raise
-
         try:
             with session_scope() as s:
-                # 1. Idempotency check on (event_id, market, selection)
+                # Idempotency check on (event_id, market, selection)
                 exists = s.execute(
                     select(Prediction.id).where(
                         Prediction.event_id == event_id,
@@ -236,18 +224,6 @@ class Database:
                 if exists:
                     return False
 
-                # 2. Acquire ledger lock — no concurrent placement can race past here
-                if kelly_stake > 0:
-                    _acquire_ledger_lock(s)
-                    if enforce_funds:
-                        balance, _ = _state_inside_lock(s)
-                        if kelly_stake > balance:
-                            raise InsufficientFundsError(
-                                f"Cannot place bet of {kelly_stake:.2f} — "
-                                f"only {balance:.2f} on hand"
-                            )
-
-                # 3. Insert the prediction
                 pred = Prediction(
                     created_at=_utcnow_iso(),
                     event_id=event_id,
@@ -264,25 +240,20 @@ class Database:
                     lambda_home=lambda_home,
                     lambda_away=lambda_away,
                     model_type=model_type,
+                    placement_status="proposed",
+                    placement_status_at=_utcnow_iso(),
+                    actually_placed=False,
                 )
                 s.add(pred)
-                s.flush()  # populate pred.id
-
-                # 4. Insert the matching ledger row in the SAME transaction
-                if kelly_stake > 0:
-                    _append(
-                        s, "bet_placed", -kelly_stake,
-                        prediction_id=pred.id,
-                        note=f"{home_team} vs {away_team} [{selection}]",
-                    )
                 return True
-        except InsufficientFundsError:
-            raise  # bubble up; session_scope already rolled back
         except Exception as exc:
             logger.error("Erreur sauvegarde prédiction : %s", exc)
             return False
 
     def get_pending_predictions(self) -> list[dict]:
+        """All predictions awaiting a match outcome, regardless of placement
+        status. Kept for backwards compat; new UI should prefer the typed
+        `get_proposed_predictions()` / `get_confirmed_pending()` accessors."""
         with session_scope() as s:
             rows = s.execute(
                 select(Prediction)
@@ -290,6 +261,63 @@ class Database:
                 .order_by(Prediction.created_at)
             ).scalars().all()
             return [_to_dict(r) for r in rows]
+
+    def get_proposed_predictions(self) -> list[dict]:
+        """Picks the bot has proposed but the user hasn't acted on yet.
+        Newest first so the dashboard shows the most recent recommendations
+        at the top of the validation queue."""
+        with session_scope() as s:
+            rows = s.execute(
+                select(Prediction)
+                .where(Prediction.placement_status == "proposed",
+                       Prediction.result.is_(None))
+                .order_by(Prediction.created_at.desc())
+            ).scalars().all()
+            return [_to_dict(r) for r in rows]
+
+    def get_confirmed_pending(self) -> list[dict]:
+        """Confirmed bets whose match hasn't resolved yet — what the user
+        is currently 'on the hook' for."""
+        with session_scope() as s:
+            rows = s.execute(
+                select(Prediction)
+                .where(Prediction.placement_status == "confirmed",
+                       Prediction.result.is_(None))
+                .order_by(Prediction.created_at)
+            ).scalars().all()
+            return [_to_dict(r) for r in rows]
+
+    def auto_skip_expired_proposed(self, max_age_hours: int = 36) -> int:
+        """
+        Auto-skip 'proposed' predictions that the user never acted on within
+        `max_age_hours` of their creation. We use creation age as the
+        expiry signal because we don't always have a reliable kickoff
+        timestamp on the prediction row (commence_time is stored at scan
+        time but not always on the Prediction).
+
+        Default 36h covers the worst case : a pick proposed at the 20h scan
+        on Friday for a Sunday afternoon match (~42h) — but for that case
+        the user has Saturday + Sunday morning to react. Most picks are
+        for matches within 24h of scan, so 36h is a safe net.
+
+        Returns the count of rows transitioned to 'skipped'.
+        """
+        cutoff_iso = (
+            datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+        ).isoformat()
+        with session_scope() as s:
+            rows = s.execute(
+                select(Prediction).where(
+                    Prediction.placement_status == "proposed",
+                    Prediction.created_at < cutoff_iso,
+                )
+            ).scalars().all()
+            n = 0
+            for row in rows:
+                row.placement_status = "skipped"
+                row.placement_status_at = _utcnow_iso()
+                n += 1
+            return n
 
     def update_result(
         self,
@@ -340,9 +368,16 @@ class Database:
             row.closing_odds = closing_odds
             row.resolved_at = _utcnow_iso()
 
-            # Bankroll movement in the SAME transaction. _append acquires the
-            # ledger advisory lock; safe vs concurrent placements.
-            if stake > 0:
+            # Bankroll movement ONLY for predictions the user actually
+            # confirmed at the bookmaker. 'proposed' or 'skipped' picks
+            # never debited the bankroll, so they shouldn't credit it
+            # either when their match resolves. We still record the
+            # `result` field for analytics ("would-have ROI" on skipped
+            # picks, raw model accuracy on proposed picks).
+            is_money_at_stake = (
+                stake > 0 and row.placement_status == "confirmed"
+            )
+            if is_money_at_stake:
                 if result == "win":
                     payout = stake * odds
                     _append(s, "bet_won", payout, prediction_id=pred_id,
@@ -433,23 +468,116 @@ class Database:
         bookmaker: str | None = None,
         unconfirm: bool = False,
     ) -> bool:
-        """Mark a recommended prediction as actually placed at a bookmaker.
+        """
+        Confirm that the user actually placed this bet at their bookmaker.
 
-        Set unconfirm=True to revert the placement marker (mistake fix).
+        This is when the bankroll is debited : we insert the matching
+        bet_placed ledger entry and acquire the advisory lock atomically.
+        Pre-flight guard checks (stop-loss, daily cap, exposure) run here too.
+
+        Idempotent: re-confirming a 'confirmed' row is a no-op.
+        Set unconfirm=True to revert (mistake correction): re-credits the
+        stake and flips placement_status back to 'proposed'.
+
         Returns True on success, False if prediction not found.
+        Raises InsufficientFundsError or GuardViolation when applicable.
+        """
+        from betbot.bankroll import (
+            InsufficientFundsError,
+            _acquire_ledger_lock,
+            _append,
+            _state_inside_lock,
+        )
+        from betbot.guards import GuardViolation, check_can_place_bet
+
+        with session_scope() as s:
+            row = s.get(Prediction, prediction_id)
+            if row is None:
+                return False
+
+            if unconfirm:
+                # Mistake correction : refund the stake and revert to 'proposed'
+                if row.placement_status != "confirmed":
+                    return True  # nothing to revert
+                if row.kelly_stake > 0:
+                    _acquire_ledger_lock(s)
+                    _append(
+                        s, "adjustment", row.kelly_stake,
+                        prediction_id=row.id,
+                        note=f"unconfirm placement (mistake correction)",
+                    )
+                row.placement_status = "proposed"
+                row.placement_status_at = _utcnow_iso()
+                row.actually_placed = False
+                row.placed_at = None
+                row.placed_bookmaker = None
+                return True
+
+            # Already confirmed — idempotent no-op
+            if row.placement_status == "confirmed":
+                return True
+
+            # Skipped predictions can't be confirmed without unskipping first
+            if row.placement_status == "skipped":
+                raise ValueError("Cannot confirm a skipped prediction")
+
+            # Pre-flight guards
+            if row.kelly_stake > 0:
+                try:
+                    check_can_place_bet(row.kelly_stake)
+                except GuardViolation as exc:
+                    logger.warning("Guard blocked confirm (%s) : %s",
+                                   prediction_id, exc)
+                    raise
+
+                _acquire_ledger_lock(s)
+                balance, _ = _state_inside_lock(s)
+                if row.kelly_stake > balance:
+                    raise InsufficientFundsError(
+                        f"Cannot confirm bet of {row.kelly_stake:.2f} — "
+                        f"only {balance:.2f} on hand"
+                    )
+                _append(
+                    s, "bet_placed", -row.kelly_stake,
+                    prediction_id=row.id,
+                    note=f"{row.home_team} vs {row.away_team} [{row.selection}]",
+                )
+
+            row.placement_status = "confirmed"
+            row.placement_status_at = _utcnow_iso()
+            row.actually_placed = True
+            row.placed_at = _utcnow_iso()
+            row.placed_bookmaker = bookmaker
+            return True
+
+    def skip_prediction(
+        self,
+        prediction_id: int,
+        reason: str = "user_skipped",
+    ) -> bool:
+        """
+        Mark a proposed prediction as skipped — bankroll untouched.
+
+        Used when the user decides not to place a recommended bet, OR when
+        the auto-skip cron picks up a 'proposed' row past kickoff. The
+        prediction is NOT deleted (we keep it for analytics: which picks
+        the user passed on, kept for would-have ROI tracking).
+
+        Idempotent for already-skipped rows. Returns True on success,
+        False if prediction not found, raises ValueError for confirmed bets.
         """
         with session_scope() as s:
             row = s.get(Prediction, prediction_id)
             if row is None:
                 return False
-            if unconfirm:
-                row.actually_placed = False
-                row.placed_at = None
-                row.placed_bookmaker = None
-            else:
-                row.actually_placed = True
-                row.placed_at = _utcnow_iso()
-                row.placed_bookmaker = bookmaker
+            if row.placement_status == "skipped":
+                return True  # idempotent
+            if row.placement_status == "confirmed":
+                raise ValueError(
+                    "Cannot skip a confirmed prediction — use unconfirm first"
+                )
+            row.placement_status = "skipped"
+            row.placement_status_at = _utcnow_iso()
             return True
 
     def list_agent_runs(self, limit: int = 50, offset: int = 0,
