@@ -238,26 +238,74 @@ def list_events(
 # ---------------------------------------------------------------------------
 
 @app.post("/predictions/{prediction_id}/confirm-placed")
+@limiter.limit("30/minute")
 def confirm_placed(
+    request: Request,
     prediction_id: int,
     body: dict | None = None,
     db: Database = Depends(get_db),
     _: str = Depends(require_auth),
 ) -> dict:
-    """Mark a recommended prediction as actually placed at a bookmaker.
+    """
+    Confirm the user actually placed this bet at their bookmaker.
+    THIS is when the bankroll is debited (atomic with the placement-status
+    update). Pre-flight guard checks (stop-loss, daily cap, exposure)
+    apply here, NOT at scan time.
 
     Body (optional): {"bookmaker": "pinnacle", "unconfirm": false}.
-    The bot itself never places bets — this lets the user confirm what they
-    actually played, so ROI / CLV stats reflect reality, not just recommendations.
+    Set unconfirm=true to revert (re-credits the stake).
     """
+    from betbot.bankroll import InsufficientFundsError
+    from betbot.guards import GuardViolation
     body = body or {}
     bookmaker = body.get("bookmaker")
     unconfirm = bool(body.get("unconfirm", False))
-    ok = db.confirm_prediction_placed(prediction_id, bookmaker, unconfirm=unconfirm)
+    try:
+        ok = db.confirm_prediction_placed(prediction_id, bookmaker, unconfirm=unconfirm)
+    except InsufficientFundsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except GuardViolation as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if not ok:
         raise HTTPException(status_code=404, detail=f"Prediction {prediction_id} not found")
     return {"prediction_id": prediction_id, "actually_placed": not unconfirm,
             "bookmaker": bookmaker}
+
+
+@app.post("/predictions/{prediction_id}/skip")
+@limiter.limit("30/minute")
+def skip_prediction(
+    request: Request,
+    prediction_id: int,
+    body: dict | None = None,
+    db: Database = Depends(get_db),
+    _: str = Depends(require_auth),
+) -> dict:
+    """
+    Skip a proposed pick — the user passed on the recommendation.
+    No bankroll movement. Kept in DB for analytics (would-have ROI).
+    """
+    body = body or {}
+    reason = body.get("reason", "user_skipped")
+    try:
+        ok = db.skip_prediction(prediction_id, reason=reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Prediction {prediction_id} not found")
+    return {"prediction_id": prediction_id, "placement_status": "skipped",
+            "reason": reason}
+
+
+@app.get("/predictions/proposed", response_model=list[PredictionRow])
+def proposed_predictions(
+    db: Database = Depends(get_db),
+    _: str = Depends(require_auth),
+) -> list[PredictionRow]:
+    """Picks the bot has proposed and the user hasn't acted on yet."""
+    return [PredictionRow(**r) for r in db.get_proposed_predictions()]
 
 
 @app.get("/predictions/pending", response_model=list[PredictionRow])
@@ -265,8 +313,8 @@ def pending_predictions(
     db: Database = Depends(get_db),
     _: str = Depends(require_auth),
 ) -> list[PredictionRow]:
-    rows = db.get_pending_predictions()
-    return [PredictionRow(**r) for r in rows]
+    """Confirmed bets awaiting match outcome (the user is on the hook for these)."""
+    return [PredictionRow(**r) for r in db.get_confirmed_pending()]
 
 
 @app.post("/predictions/resolve")
@@ -724,6 +772,13 @@ def health_sources(_: str = Depends(require_auth)) -> dict:
     from betbot.data_sources import club_elo, understat
     s = load_settings()
 
+    # Per-probe timeout : a single slow source (Understat is notoriously
+    # flaky) must not block the whole health endpoint. Each probe runs in
+    # its own thread with a 4s wall-clock cap. Prevents the dashboard
+    # "Erreur : timed out" we used to see when Understat was being slow.
+    import concurrent.futures as _cf
+    PROBE_TIMEOUT_SEC = 4
+
     def _probe(name: str, criticality: str, configured: bool, live_check) -> dict:
         if not configured:
             return {
@@ -734,13 +789,22 @@ def health_sources(_: str = Depends(require_auth)) -> dict:
             }
         t0 = time.monotonic()
         try:
-            ok = bool(live_check())
+            with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+                future = ex.submit(live_check)
+                ok = bool(future.result(timeout=PROBE_TIMEOUT_SEC))
             return {
                 "name": name, "criticality": criticality,
                 "status": "ok" if ok else "ko",
                 "ok": ok,
                 "latency_ms": int((time.monotonic() - t0) * 1000),
                 "reason": "" if ok else "probe returned falsy result",
+            }
+        except _cf.TimeoutError:
+            return {
+                "name": name, "criticality": criticality,
+                "status": "ko", "ok": False,
+                "latency_ms": PROBE_TIMEOUT_SEC * 1000,
+                "reason": f"probe timed out after {PROBE_TIMEOUT_SEC}s",
             }
         except Exception as exc:
             return {

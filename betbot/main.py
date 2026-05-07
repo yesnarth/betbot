@@ -525,6 +525,21 @@ def main() -> None:
         misfire_grace_time=3600,
     )
 
+    # Auto-skip stale proposed picks — runs every 30 min. A pick that has been
+    # 'proposed' for more than 36h is presumed past kickoff and gets archived
+    # as 'skipped'. Prevents the dashboard from accumulating expired picks.
+    def _auto_skip_job():
+        n = db.auto_skip_expired_proposed(max_age_hours=36)
+        if n:
+            logger.info("auto-skip: archived %d expired proposed picks", n)
+    scheduler.add_job(
+        _wrap("auto_skip_proposed", _auto_skip_job),
+        trigger=CronTrigger(minute="*/30"),
+        id="auto_skip_proposed",
+        name="auto-skip",
+        misfire_grace_time=120,
+    )
+
     logger.info("Bot actif (APScheduler, fuseau Europe/Paris). CTRL+C pour arrêter.")
     try:
         scheduler.start()

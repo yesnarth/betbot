@@ -52,6 +52,10 @@ class PredictionRow(BaseModel):
     kelly_stake: float
     model_type: str
     result: str | None = None
+    placement_status: str = "proposed"     # proposed | confirmed | skipped
+    placement_status_at: str | None = None
+    placed_bookmaker: str | None = None
+    commence_time: str | None = None       # match kickoff (used by UI countdown)
 
 
 class ROIStats(BaseModel):
