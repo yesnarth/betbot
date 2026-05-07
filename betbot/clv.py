@@ -62,10 +62,17 @@ def snapshot_closing_odds(
     counts = {"checked": 0, "snapped": 0, "missing_event": 0, "errors": 0}
 
     with session_scope() as s:
+        # CLV is the closing line value of an actually-placed bet vs the
+        # final book price. It only makes sense for picks the user has
+        # CONFIRMED at the bookmaker. Snapshotting odds for 'proposed'
+        # (unconfirmed) or 'skipped' picks would burn Odds API quota for
+        # data we'll never use — at the rate of 1 req per sport_key per
+        # 10 min cycle. Filter to confirmed only.
         pending = s.execute(
             select(Prediction).where(
                 Prediction.result.is_(None),
                 Prediction.closing_odds.is_(None),
+                Prediction.placement_status == "confirmed",
             )
         ).scalars().all()
 

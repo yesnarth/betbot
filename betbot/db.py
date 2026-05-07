@@ -194,7 +194,7 @@ class Database:
         lambda_home: float | None = None,
         lambda_away: float | None = None,
         model_type: str = "poisson",
-        enforce_funds: bool = True,  # kept for signature compat, unused now
+        enforce_funds: bool = True,  # noqa: ARG002 — kept for caller-API stability
     ) -> bool:
         """
         Save a prediction as PROPOSED. The bankroll is **NOT** debited at this
@@ -207,10 +207,12 @@ class Database:
         Returns True if inserted, False if a row with the same
         (event_id, market, selection) already exists.
 
-        Note: the `enforce_funds` argument is kept for backwards compatibility
-        with backtest code paths but no longer has any effect at save time.
-        Funds are checked at confirm time.
+        The `enforce_funds` argument is **deprecated** — under the advisor
+        workflow, funds are checked at confirm time, not save time. Kept in
+        the signature so callers (worker, MCP) don't break ; will be removed
+        in a future major version.
         """
+        del enforce_funds  # explicitly silence the unused-arg warning
         try:
             with session_scope() as s:
                 # Idempotency check on (event_id, market, selection)
@@ -251,13 +253,17 @@ class Database:
             return False
 
     def get_pending_predictions(self) -> list[dict]:
-        """All predictions awaiting a match outcome, regardless of placement
-        status. Kept for backwards compat; new UI should prefer the typed
-        `get_proposed_predictions()` / `get_confirmed_pending()` accessors."""
+        """Confirmed bets awaiting outcome — what the resolver should fetch
+        scores for. Used to be 'all rows with result IS NULL' but that wasted
+        quota on proposed/skipped picks the user never bet on. The semantic
+        meaning of 'pending' in this codebase is now strictly 'confirmed and
+        not resolved'. For the proposed-validation queue, use
+        `get_proposed_predictions()`."""
         with session_scope() as s:
             rows = s.execute(
                 select(Prediction)
-                .where(Prediction.result.is_(None))
+                .where(Prediction.result.is_(None),
+                       Prediction.placement_status == "confirmed")
                 .order_by(Prediction.created_at)
             ).scalars().all()
             return [_to_dict(r) for r in rows]
@@ -397,11 +403,15 @@ class Database:
         """
         Return ROI + CLV stats for the last N days.
 
-        only_placed=True (default): include only predictions where
-        actually_placed=True. This is the honest metric — measuring performance
-        on bets the user actually took, not just recommendations.
+        only_placed=True (default): include only predictions the user actually
+        confirmed (placement_status='confirmed'). This is the honest metric —
+        measuring performance on bets the user actually took, not just
+        recommendations.
 
-        Set only_placed=False for the legacy behavior (count every recommended bet).
+        Set only_placed=False for the analytics counterpart : measures the
+        model's accuracy across ALL picks (proposed + confirmed + skipped),
+        useful to compare "what the bot would have done if you'd taken
+        every pick" vs "what you actually got".
 
         CLV (Closing Line Value) is the gold standard skill metric.
         """
@@ -419,7 +429,7 @@ class Database:
                 Prediction.created_at >= cutoff_iso,
             )
             if only_placed:
-                stmt = stmt.where(Prediction.actually_placed.is_(True))
+                stmt = stmt.where(Prediction.placement_status == "confirmed")
             preds = s.execute(stmt).all()
 
         if not preds:
@@ -578,6 +588,34 @@ class Database:
                 )
             row.placement_status = "skipped"
             row.placement_status_at = _utcnow_iso()
+            # Symmetric with confirm_prediction_placed which sets both. Keeps
+            # the legacy `actually_placed` flag aligned with `placement_status`.
+            row.actually_placed = False
+            return True
+
+    def unskip_prediction(self, prediction_id: int) -> bool:
+        """
+        Revert a skipped prediction back to 'proposed' — accident recovery.
+
+        If the user clicked skip by mistake and the match hasn't been resolved
+        yet, this brings the pick back into the validation queue. Idempotent
+        for already-proposed rows. Returns False if not found, raises
+        ValueError if the prediction is already confirmed (shouldn't happen
+        since confirm and skip are mutually exclusive).
+        """
+        with session_scope() as s:
+            row = s.get(Prediction, prediction_id)
+            if row is None:
+                return False
+            if row.placement_status == "proposed":
+                return True  # idempotent
+            if row.placement_status == "confirmed":
+                raise ValueError(
+                    "Cannot unskip a confirmed prediction — it was never skipped"
+                )
+            row.placement_status = "proposed"
+            row.placement_status_at = _utcnow_iso()
+            row.actually_placed = False
             return True
 
     def list_agent_runs(self, limit: int = 50, offset: int = 0,
