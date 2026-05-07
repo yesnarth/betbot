@@ -350,9 +350,10 @@ with section_decision:
     ])
 
 with section_matches:
-    st.caption("Matchs disponibles côté Odds API et paris déjà placés.")
-    tab_events, tab_pending = st.tabs([
+    st.caption("Matchs disponibles, picks à valider, et bets en attente de résolution.")
+    tab_events, tab_validate, tab_pending = st.tabs([
         "📅 Matchs disponibles",
+        "🔔 Picks à valider",
         "⏳ Paris en attente",
     ])
 
@@ -628,24 +629,111 @@ with tab_events:
 # Tab 3 — Pending predictions
 # ---------------------------------------------------------------------------
 
+with tab_validate:
+    st.subheader("🔔 Picks à valider — recommandations du worker")
+    st.caption(
+        "Le worker a proposé ces picks lors des scans automatiques (09h, 15h, 20h). "
+        "**Aucun argent n'a été engagé** — c'est à toi de placer le pari chez ton "
+        "bookmaker, puis de revenir cliquer **« J'ai placé »** pour que le solde "
+        "soit débité du stake Kelly. **« Skipper »** archive le pick sans débit."
+    )
+
+    try:
+        proposed = api_get("/predictions/proposed")
+    except Exception as exc:
+        st.error(f"Erreur : {exc}")
+        proposed = []
+
+    if not proposed:
+        empty_state(
+            "🔔",
+            "Aucun pick en attente de validation",
+            "Les picks proposés par le worker apparaîtront ici après le prochain "
+            "scan automatique (09h00, 15h00 ou 20h00 Europe/Paris).",
+        )
+    else:
+        st.markdown(f"**{len(proposed)} pick(s) à valider**")
+        for p in proposed:
+            pid = p["id"]
+            label = (
+                f"#{pid} · {p['home_team']} vs {p['away_team']} — "
+                f"{p['selection']} @ {p['best_odds']:.2f} · "
+                f"prob {p['model_prob']*100:.1f}% · edge {p['value_edge']*100:+.1f}% · "
+                f"Kelly **${p['kelly_stake']:.2f}**"
+            )
+            with st.expander(label, expanded=False):
+                c1, c2, c3 = st.columns([1, 1, 2])
+                bookmaker = c3.text_input(
+                    "Bookmaker", value="",
+                    placeholder="ex : pinnacle, bet365, unibet…",
+                    key=f"bm_{pid}",
+                )
+                if c1.button("✅ J'ai placé", key=f"confirm_{pid}", type="primary"):
+                    try:
+                        api_post(f"/predictions/{pid}/confirm-placed",
+                                 json={"bookmaker": bookmaker or None})
+                        st.success(
+                            f"✅ Pick #{pid} confirmé. "
+                            f"Bankroll débité de ${p['kelly_stake']:.2f}. "
+                            f"Recharge la page."
+                        )
+                    except Exception as exc:
+                        st.error(f"Erreur : {exc}")
+                if c2.button("❌ Skipper", key=f"skip_{pid}"):
+                    try:
+                        api_post(f"/predictions/{pid}/skip",
+                                 json={"reason": "user_skipped"})
+                        st.info(f"Pick #{pid} skippé. Recharge la page.")
+                    except Exception as exc:
+                        st.error(f"Erreur : {exc}")
+
+                st.markdown(f"**Sport** : `{p.get('sport_key', '—')}` · "
+                           f"**Modèle** : `{p.get('model_type', '—')}` · "
+                           f"**Best book auto-détecté** : `{p['best_book']}`")
+                st.caption(f"Proposé le : {p['created_at'][:19]}")
+
+
 with tab_pending:
-    st.subheader("Paris en attente de résultat")
+    st.subheader("⏳ Paris confirmés en attente de résolution")
+    st.caption(
+        "Les paris que **tu as confirmé avoir placés** chez ton bookmaker. "
+        "Le worker récupère les résultats à 04h chaque jour et met à jour "
+        "ton solde automatiquement (gain × cote, ou stake perdu)."
+    )
     try:
         rows = api_get("/predictions/pending")
         if not rows:
             empty_state(
                 "⏳",
-                "Aucun pari en attente",
-                "Les paris arrivent ici quand un scan (manuel ou auto) sauvegarde "
-                "des picks, ou quand tu valides l'output de l'agent IA.",
+                "Aucun pari confirmé en attente",
+                "Va dans « 🔔 Picks à valider » pour confirmer les "
+                "recommandations du worker que tu as réellement placées.",
             )
         else:
             df = pd.DataFrame(rows)
             cols = [c for c in [
-                "created_at", "home_team", "away_team", "selection",
-                "best_odds", "closing_odds", "model_prob", "value_edge", "kelly_stake",
+                "id", "created_at", "home_team", "away_team", "selection",
+                "best_odds", "model_prob", "value_edge", "kelly_stake",
+                "placed_bookmaker",
             ] if c in df.columns]
-            st.dataframe(df[cols], width='stretch', hide_index=True)
+            disp = df[cols].rename(columns={
+                "id": "ID", "created_at": "Confirmé le",
+                "home_team": "Domicile", "away_team": "Extérieur",
+                "selection": "Pari", "best_odds": "Cote",
+                "model_prob": "Proba modèle", "value_edge": "Edge",
+                "kelly_stake": "Mise Kelly", "placed_bookmaker": "Bookmaker",
+            })
+            cfg = {
+                "Cote": st.column_config.NumberColumn(format="%.2f"),
+                "Mise Kelly": st.column_config.NumberColumn(format="$%.2f"),
+            }
+            if "Proba modèle" in disp.columns:
+                disp["Proba modèle"] = disp["Proba modèle"] * 100
+                cfg["Proba modèle"] = st.column_config.NumberColumn(format="%.1f%%")
+            if "Edge" in disp.columns:
+                disp["Edge"] = disp["Edge"] * 100
+                cfg["Edge"] = st.column_config.NumberColumn(format="%+.1f%%")
+            st.dataframe(disp, width='stretch', hide_index=True, column_config=cfg)
     except Exception as exc:
         st.error(f"Erreur : {exc}")
 

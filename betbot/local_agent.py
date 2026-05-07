@@ -328,6 +328,8 @@ def evaluate_picks(
     trigger: str = "local_agent",
     filters: dict | None = None,
 ) -> dict:
+    import time as _time
+    _t_start = _time.monotonic()
     """
     Run every pick through the rule chain and return calibrated picks.
 
@@ -503,8 +505,11 @@ def evaluate_picks(
                 reasoning=reasoning,
                 picks=accepted,
                 n_tool_calls=n_news_calls + n_weather_calls,
-                duration_ms=None,
-                cost_usd=0.0,
+                # Real duration : the local agent is free (no $ cost), but we
+                # still measure wall-clock time to surface slow runs (a stuck
+                # Tavily call etc.) in the dashboard's history view.
+                duration_ms=int((_time.monotonic() - _t_start) * 1000),
+                cost_usd=0.0,  # local agent uses Tavily/Open-Meteo free tiers
                 status="ok",
             )
         except Exception as exc:
