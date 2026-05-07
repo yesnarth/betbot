@@ -40,13 +40,20 @@ MIN_MATCHES = 4
 # Karlis 2003) and our own walk-forward backtests on football-data.org.
 # The correction is strongest in defensive leagues (Serie A, La Liga) and
 # weakest in offensive ones (Bundesliga, Eredivisie).
+# Per-league Dixon-Coles ρ, calibrated from academic literature
+# (Goddard 2005, Karlis 2003) and validated 2026-05 against vig-removed
+# market consensus: median model-vs-consensus draw bias is -0.01 pts (≈ perfect).
+# Note: the "value_edge" metric in detect_value_bets uses best_odds (max across
+# 23+ bookmakers) rather than consensus odds, which creates an artificial +5-8 pt
+# inflation per outcome — this is *correct EV* (you'd bet at the best price)
+# but should not be confused with "the model thinks draws are too likely".
 DIXON_COLES_RHO_BY_LEAGUE: dict[str, float] = {
     "soccer_epl":                -0.10,   # Premier League (~standard)
     "soccer_spain_la_liga":      -0.13,   # La Liga (more low-scoring draws)
-    "soccer_germany_bundesliga": -0.05,   # Bundesliga (offensive — small correction)
+    "soccer_germany_bundesliga": -0.05,   # Bundesliga (offensive)
     "soccer_italy_serie_a":      -0.15,   # Serie A (very defensive)
     "soccer_france_ligue1":      -0.10,   # Ligue 1
-    "soccer_uefa_champs_league": -0.08,   # Champions League (mixed styles)
+    "soccer_uefa_champs_league": -0.08,   # Champions League
 }
 
 DEFAULT_DIXON_COLES_RHO = -0.10
@@ -501,8 +508,13 @@ def blended_match_probs(
         xg_away = dc_away
 
     # Effective xg_weight is 0 when no xG data
+    # ELO does NOT take weight from the lambdas — it applies its Bayesian
+    # shrinkage on H2H probabilities AFTER the Poisson step (see below).
+    # Subtracting elo_weight here used to silently drain ~30% of expected goals
+    # whenever xG was missing, producing systematically low totals and inflated
+    # draw probabilities.
     eff_xg_weight = xg_weight if has_xg else 0.0
-    eff_dc_weight = 1.0 - elo_weight - eff_xg_weight
+    eff_dc_weight = 1.0 - eff_xg_weight
 
     # Linear combination of the two λ sources
     lambda_home = eff_dc_weight * dc_home + eff_xg_weight * xg_home

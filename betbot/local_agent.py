@@ -45,7 +45,17 @@ logger = logging.getLogger("betbot.local_agent")
 # confidence; more than 1.0 increases. Values come from intuition + literature
 # (Goddard 2005 on home advantage, EPL injury studies on Tier-1 absence
 # impact ≈ 8-12% probability swing).
-RULE_HUGE_EDGE_NO_CONFIRMATION = 0.65   # raw edge > 35% with no news support
+# Tiered edge-shrinkage ladder. Real edges in liquid markets are rarely > 5-8%;
+# the bigger the apparent edge, the more likely it is a model artifact. Each
+# tier defines (raw_edge_threshold, probability multiplier).
+RULE_HUGE_EDGE_TIERS = (
+    (0.35, 0.60),   # > 35%: very strong shrink (model almost certainly wrong)
+    (0.22, 0.78),   # 22-35%: strong shrink
+    (0.15, 0.90),   # 15-22%: moderate shrink (real edges of this size are rare)
+)
+# Backwards-compat: legacy single-threshold name used in tests/UI references
+RULE_HUGE_EDGE_NO_CONFIRMATION = RULE_HUGE_EDGE_TIERS[0][1]  # = 0.60
+
 RULE_INJURY_FAVORITE = 0.85             # injury news on the team WE picked
 RULE_INJURY_OPPONENT = 1.06             # injury news on the OPPOSING team
 RULE_BAD_WEATHER_OVER = 0.85            # rain/wind on an Over 2.5 pick
@@ -194,15 +204,21 @@ def _rule_huge_edge_needs_confirmation(
     opposing team's bad shape, the pick is almost certainly a model artifact.
     Apply a strong probability penalty.
     """
-    if raw_edge <= 0.35:
+    # Find the highest tier that fires (tiers are sorted high→low)
+    multiplier: float | None = None
+    for threshold, mult in RULE_HUGE_EDGE_TIERS:
+        if raw_edge > threshold:
+            multiplier = mult
+            break
+    if multiplier is None:
         return
     # Only count supporting news that ACTUALLY mentions the opposing team
     has_supporting, _ = _news_mentions_injury(news_opposing_team, opposing_team or "")
     if not has_supporting:
-        ev.final_prob *= RULE_HUGE_EDGE_NO_CONFIRMATION
+        ev.final_prob *= multiplier
         ev.rationale.append(
             f"⚠ Edge brut {raw_edge*100:+.0f}% sans news favorable confirmée — "
-            f"probabilité réduite de {(1-RULE_HUGE_EDGE_NO_CONFIRMATION)*100:.0f}%."
+            f"probabilité réduite de {(1-multiplier)*100:.0f}%."
         )
 
 

@@ -3,11 +3,31 @@ from betbot.analysis import _fuzzy_lookup, _normalize_name
 
 
 def test_normalize_strips_common_suffixes():
+    # Only TRUE corporate suffixes are stripped — discriminating tokens like
+    # "united", "city", "hotspur" must be preserved to avoid name collisions
+    # (e.g. "Manchester United" vs "Manchester City" both normalising to
+    # "manchester" if "united" / "city" were stripped).
     assert _normalize_name("Arsenal FC") == "arsenal"
     assert _normalize_name("Real Madrid CF") == "real madrid"
-    assert _normalize_name("Tottenham Hotspur FC") == "tottenham"
-    # Year suffix
+    assert _normalize_name("Tottenham Hotspur FC") == "tottenham hotspur"
+    # Year suffix is still stripped
     assert _normalize_name("Parma Calcio 1913") == "parma"
+    # Discriminating tokens must NOT be stripped (the Manchester collision bug)
+    assert "united" in _normalize_name("Manchester United FC")
+    assert "city" in _normalize_name("Manchester City FC")
+
+
+def test_manchester_united_does_not_collide_with_manchester_city():
+    """Regression test: with `city` and `united` previously in _STRIP_WORDS,
+    'Manchester United' silently inherited 'Manchester City FC' team stats."""
+    cache = {
+        "Manchester City FC":   "city_row",
+        "Manchester United FC": "united_row",
+    }
+    obj_u, _ = _fuzzy_lookup("Manchester United", cache)
+    obj_c, _ = _fuzzy_lookup("Manchester City",   cache)
+    assert obj_u == "united_row"
+    assert obj_c == "city_row"
 
 
 def test_normalize_strips_accents():

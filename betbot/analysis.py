@@ -61,13 +61,16 @@ class Parlay:
 # Team name normalization (bridges Odds API ↔ football-data.org names)
 # ---------------------------------------------------------------------------
 
+# Only strip TRUE corporate suffixes — never discriminating tokens like
+# "united", "city", "hotspur", which are the only thing that tells "Manchester
+# United" apart from "Manchester City". Stripping them caused a name collision
+# bug where both teams normalized to "manchester", so lookups for one returned
+# the other's stats.
 _STRIP_WORDS = frozenset([
     'fc', 'cf', 'ac', 'rc', 'rcd', 'as', 'ss', 'us', 'ud', 'cd', 'afc',
     'sc', 'bv', 'sv', 'fk', 'nk', 'sk',
     'de', 'del', 'la', 'le', 'les',
-    'city', 'united', 'town', 'county', 'rovers', 'wanderers',
     'calcio', 'balompie',
-    'hotspur', 'albion',
 ])
 
 # Odds API common name → distinctive fragment present in the normalized DB name.
@@ -97,7 +100,12 @@ def _normalize_name(name: str) -> str:
 
 
 def _fuzzy_lookup(name: str, cache: dict):
-    """Look up a team in cache: exact → alias → normalized → substring (≥6 chars) → fuzzy."""
+    """Look up a team in cache: exact → normalized → alias → token-set → fuzzy.
+
+    Token-set matching beats substring because it requires the discriminating
+    tokens (city/united/hotspur) to match — preventing the historical bug
+    where 'Manchester United' would silently get 'Manchester City' stats.
+    """
     if name in cache:
         return cache[name], name
 
@@ -108,23 +116,36 @@ def _fuzzy_lookup(name: str, cache: dict):
     if norm_query in norm_index:
         return cache[norm_index[norm_query]], norm_index[norm_query]
 
-    # 2. Known alias (handles fundamentally different names between the two APIs)
+    # 2. Known alias (different names between Odds API and football-data)
     alias_fragment = _KNOWN_ALIASES.get(norm_query)
     if alias_fragment:
         for norm_key, orig_key in norm_index.items():
-            if alias_fragment in norm_key:
+            if alias_fragment in norm_key.split():
                 return cache[orig_key], orig_key
 
-    # 3. Substring match — the shorter name must be ≥ 6 chars to avoid short city-name collisions
-    #    (e.g. prevent "milan" from matching "inter milan" when looking for AC Milan)
-    for norm_key, orig_key in norm_index.items():
-        shorter = norm_key if len(norm_key) <= len(norm_query) else norm_query
-        longer  = norm_query if shorter == norm_key else norm_key
-        if len(shorter) >= 6 and shorter in longer:
-            return cache[orig_key], orig_key
+    # 3. Token-set match — every token of the shorter name must appear in the
+    #    longer name. Example: "manchester united" tokens {manchester, united}
+    #    must ALL be present in candidate's tokens. This rejects the buggy case
+    #    where "manchester united" silently matched "manchester city".
+    query_tokens = set(norm_query.split())
+    if query_tokens:
+        best_match: tuple[str, str] | None = None
+        best_overlap = 0
+        for norm_key, orig_key in norm_index.items():
+            key_tokens = set(norm_key.split())
+            shorter, longer = (
+                (query_tokens, key_tokens) if len(query_tokens) <= len(key_tokens)
+                else (key_tokens, query_tokens)
+            )
+            # ALL tokens of the shorter side must be in the longer side
+            if shorter and shorter.issubset(longer) and len(shorter) > best_overlap:
+                best_overlap = len(shorter)
+                best_match = (orig_key, orig_key)
+        if best_match:
+            return cache[best_match[0]], best_match[1]
 
-    # 4. Fuzzy match (last resort)
-    close = get_close_matches(norm_query, list(norm_index.keys()), n=1, cutoff=0.65)
+    # 4. Fuzzy match (last resort, conservative threshold)
+    close = get_close_matches(norm_query, list(norm_index.keys()), n=1, cutoff=0.75)
     if close:
         orig_key = norm_index[close[0]]
         return cache[orig_key], orig_key
@@ -234,13 +255,30 @@ def detect_value_bets(
             # Markets actually requested from The Odds API (h2h + totals only).
             # BTTS is calculated by the model but its odds aren't fetched, so
             # we don't iterate it here — would always produce best=None.
-            outcome_map = [
-                ("1",   "Victoire domicile",   home,    "h2h",    None, probs.home_win),
-                ("X",   "Match nul",           "Draw",  "h2h",    None, probs.draw),
-                ("2",   "Victoire extérieur",  away,    "h2h",    None, probs.away_win),
-                ("O25", "Plus de 2.5 buts",    "Over",  "totals", 2.5,  probs.over_25),
-                ("U25", "Moins de 2.5 buts",   "Under", "totals", 2.5,  probs.under_25),
-            ]
+            is_tennis = bool(sport_key and sport_key.startswith("tennis_"))
+            is_basketball = bool(sport_key and sport_key.startswith("basketball_"))
+            if is_tennis:
+                outcome_map = [
+                    ("1", "Victoire joueur 1", home, "h2h", None, probs.home_win),
+                    ("2", "Victoire joueur 2", away, "h2h", None, probs.away_win),
+                ]
+            elif is_basketball:
+                # Basketball: only moneyline. The totals market uses team-specific
+                # lines (e.g. 224.5) that we don't fetch from the Odds API yet —
+                # adding it would require a separate pipeline path with the actual
+                # over/under line per game.
+                outcome_map = [
+                    ("1", "Victoire équipe à domicile", home, "h2h", None, probs.home_win),
+                    ("2", "Victoire équipe extérieure", away, "h2h", None, probs.away_win),
+                ]
+            else:
+                outcome_map = [
+                    ("1",   "Victoire domicile",   home,    "h2h",    None, probs.home_win),
+                    ("X",   "Match nul",           "Draw",  "h2h",    None, probs.draw),
+                    ("2",   "Victoire extérieur",  away,    "h2h",    None, probs.away_win),
+                    ("O25", "Plus de 2.5 buts",    "Over",  "totals", 2.5,  probs.over_25),
+                    ("U25", "Moins de 2.5 buts",   "Under", "totals", 2.5,  probs.under_25),
+                ]
 
             for code, label, outcome_name, market_key, point, raw_model_prob in outcome_map:
                 if raw_model_prob < min_model_prob:
@@ -292,6 +330,58 @@ def detect_value_bets(
     return all_bets
 
 
+def _tennis_event_to_probs(home: str, away: str, sport_key: str) -> MatchProbs | None:
+    """Tennis-specific path : surface-aware ELO from Sackmann history."""
+    from betbot.tennis_model import predict as tennis_predict
+    surface_map = {
+        "tennis_atp_aus_open":     "Hard",
+        "tennis_atp_us_open":      "Hard",
+        "tennis_atp_french_open":  "Clay",
+        "tennis_atp_wimbledon":    "Grass",
+    }
+    surface = surface_map.get(sport_key or "", "Hard")
+    tp = tennis_predict(home, away, surface=surface)
+    if tp is None:
+        return None
+    # Tennis has no draw and no totals 2.5 market — set them to dummy values.
+    return MatchProbs(
+        home_win=tp.home_win,
+        draw=0.0,
+        away_win=tp.away_win,
+        over_25=0.0,
+        under_25=1.0,
+        btts_yes=0.0,
+        btts_no=1.0,
+        lambda_home=0.0,
+        lambda_away=0.0,
+        model=f"tennis_elo_{surface.lower()}",
+    )
+
+
+def _basketball_event_to_probs(home: str, away: str, sport_key: str) -> MatchProbs | None:
+    """Basketball-specific path : pace + offensive/defensive rating model."""
+    from betbot.basketball_model import predict as bb_predict
+    league = "euroleague" if "euroleague" in (sport_key or "") else "nba"
+    bp = bb_predict(home, away, league=league)
+    if bp is None:
+        return None
+    # We don't currently fetch the basketball totals odds line, so we surface
+    # the predicted total in the model name for diagnostics. Downstream code
+    # only looks at home_win / away_win for h2h evaluation.
+    return MatchProbs(
+        home_win=bp.home_win,
+        draw=0.0,           # basketball doesn't draw (OT until winner)
+        away_win=bp.away_win,
+        over_25=0.0,        # basketball totals line is e.g. 220.5, not 2.5
+        under_25=1.0,
+        btts_yes=0.0,
+        btts_no=1.0,
+        lambda_home=bp.expected_home_points,
+        lambda_away=bp.expected_away_points,
+        model=f"basketball_pace_{league}",
+    )
+
+
 def _compute_probs(
     home: str,
     away: str,
@@ -314,8 +404,42 @@ def _compute_probs(
 
     Falls back to the multi-bookmaker consensus model if either team has no stats.
     """
+    # Tennis has its own ELO-based path — short-circuit before hitting the
+    # football-shaped team_stats lookup.
+    if sport_key and sport_key.startswith("tennis_"):
+        tp = _tennis_event_to_probs(home, away, sport_key)
+        if tp is not None:
+            logger.debug("tennis ELO %s vs %s on %s: H=%.1f%% A=%.1f%%",
+                         home, away, tp.model, tp.home_win * 100, tp.away_win * 100)
+            return tp
+        logger.debug("tennis ELO miss for %s / %s — falling back to consensus", home, away)
+        return consensus_match_probs(event)
+
+    # Basketball : pace + offensive/defensive rating model
+    if sport_key and sport_key.startswith("basketball_"):
+        bp = _basketball_event_to_probs(home, away, sport_key)
+        if bp is not None:
+            logger.debug("basket %s %s vs %s : H=%.1f%% A=%.1f%% (total=%.1f)",
+                         bp.model, home, away,
+                         bp.home_win * 100, bp.away_win * 100,
+                         bp.lambda_home + bp.lambda_away)
+            return bp
+        logger.debug("basket model miss for %s / %s — falling back to consensus", home, away)
+        return consensus_match_probs(event)
+
     home_stats, home_matched = _fuzzy_lookup(home, team_stats_cache)
     away_stats, away_matched = _fuzzy_lookup(away, team_stats_cache)
+
+    # Visibility on imperfect matches — these are the rows where stats could
+    # be wrong. Surfacing them here lets us catch new collisions early.
+    if home_matched and home_matched != home and _normalize_name(home_matched) != _normalize_name(home):
+        logger.info("team-match home: '%s' -> '%s'", home, home_matched)
+    if away_matched and away_matched != away and _normalize_name(away_matched) != _normalize_name(away):
+        logger.info("team-match away: '%s' -> '%s'", away, away_matched)
+    if home_stats is None:
+        logger.warning("team-match MISS home: '%s' has no stats in cache", home)
+    if away_stats is None:
+        logger.warning("team-match MISS away: '%s' has no stats in cache", away)
 
     if home_stats and away_stats:
         try:
