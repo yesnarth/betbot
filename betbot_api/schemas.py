@@ -14,6 +14,11 @@ class HealthResponse(BaseModel):
     balance: float                    # actual current bankroll balance
     available: float                  # balance minus committed stakes
     agent_enabled: bool
+    odds_quota_remaining: int = -1    # The Odds API monthly quota left; -1 = unknown
+    odds_quota_minimum: int = 20      # safety threshold below which scans are blocked
+    odds_quota_exhausted: bool = False  # true when quota_remaining < odds_quota_minimum
+    active_sports: list[str] = []     # currently in-season sports from our wishlist
+    db_latency_ms: int = -1           # SELECT 1 round-trip latency; -1 = unknown
 
 
 class EventBrief(BaseModel):
@@ -118,6 +123,8 @@ class ManualScanResponse(BaseModel):
     n_parlays: int
     filters_used: dict[str, Any]
     n_events_scanned: int
+    odds_quota_remaining: int = -1
+    odds_quota_exhausted: bool = False
 
 
 class LocalAgentFilters(ManualScanFilters):
@@ -141,8 +148,14 @@ class BankrollSnapshot(BaseModel):
 
 
 class BankrollMutation(BaseModel):
-    amount: float = Field(..., gt=0, description="Amount in account currency (always positive)")
-    note: str | None = None
+    # Upper bound prevents accidents (typing 1000000 instead of 100) AND a
+    # whole class of authenticated-attacker abuse vectors (huge deposit
+    # corrupting Kelly stake math, integer overflows downstream, etc.).
+    amount: float = Field(
+        ..., gt=0, le=1_000_000,
+        description="Amount in account currency (positive, max 1 000 000)",
+    )
+    note: str | None = Field(default=None, max_length=500)
 
 
 class BankrollLedgerRow(BaseModel):
@@ -166,3 +179,5 @@ class LocalAgentResponse(BaseModel):
     n_news_calls: int
     n_weather_calls: int
     tavily_available: bool
+    odds_quota_remaining: int = -1
+    odds_quota_exhausted: bool = False

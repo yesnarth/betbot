@@ -51,14 +51,27 @@ def _verify_password(plain: str, hashed: str) -> bool:
 
 
 def authenticate_user(username: str, password: str) -> bool:
-    """Validate username + password against the configured credentials."""
+    """Validate username + password against the configured credentials.
+
+    BETBOT_PASSWORD_HASH (bcrypt) is the production path. The plaintext
+    BETBOT_PASSWORD fallback is allowed ONLY in development — explicitly
+    opt-in via BETBOT_ALLOW_PLAINTEXT_PASSWORD=1. Production deployments
+    set BETBOT_HSTS_ENABLED=1 (or have any hash configured) and the
+    plaintext path raises before exposing the bypass.
+    """
     expected_user = os.getenv("BETBOT_USERNAME", "betbot")
     if username != expected_user:
         return False
-    pwd_hash = os.getenv("BETBOT_PASSWORD_HASH", "")
+    pwd_hash = os.getenv("BETBOT_PASSWORD_HASH", "").strip()
     if pwd_hash:
         return _verify_password(password, pwd_hash)
-    # Fallback: plain BETBOT_PASSWORD (less safe — only for early setup)
+    # Plaintext fallback — gated behind an explicit dev flag.
+    if os.getenv("BETBOT_ALLOW_PLAINTEXT_PASSWORD", "0") != "1":
+        raise RuntimeError(
+            "Plaintext password fallback refused : set BETBOT_PASSWORD_HASH "
+            "(bcrypt) for production, or BETBOT_ALLOW_PLAINTEXT_PASSWORD=1 "
+            "to opt into the dev-only fallback."
+        )
     plain = os.getenv("BETBOT_PASSWORD", "")
     return bool(plain) and password == plain
 

@@ -40,7 +40,7 @@ logger = logging.getLogger("betbot.ml")
 # the isotonic fit is high-variance — better to ship the raw probability.
 MIN_SAMPLES_TO_TRUST = 50
 
-CALIBRATOR_PATH = Path(os.getenv("CALIBRATOR_PATH", "data/calibrator.joblib"))
+CALIBRATOR_PATH = Path(os.getenv("CALIBRATOR_PATH", "data/calibrator.json"))
 
 
 # ---------------------------------------------------------------------------
@@ -66,14 +66,18 @@ def _collect_training_data() -> list[tuple[float, int]]:
 
 def train_calibrator(min_samples: int = MIN_SAMPLES_TO_TRUST) -> dict:
     """
-    Fit an Isotonic Regression on resolved predictions and persist it.
+    Fit an Isotonic Regression on resolved predictions and persist it as JSON.
+
+    We persist only the (X_thresholds_, y_thresholds_) pair as JSON instead of
+    pickling the sklearn IsotonicRegression. This is **safer** (no pickle/RCE
+    deserialization vector) and **portable** — at predict time we only need
+    monotone linear interpolation between thresholds, which is just numpy.interp.
 
     Returns a status dict with:
       - n_samples         : how many resolved predictions were used
       - trained           : True if calibrator was fitted and saved
       - reason            : explanation when training was skipped
-      - brier_before/after: improvement on the training set (information only;
-                            not a true validation score)
+      - brier_before/after: improvement on the training set
     """
     samples = _collect_training_data()
     if len(samples) < min_samples:
@@ -85,30 +89,33 @@ def train_calibrator(min_samples: int = MIN_SAMPLES_TO_TRUST) -> dict:
 
     try:
         from sklearn.isotonic import IsotonicRegression
-        import joblib
     except ImportError as exc:
         return {"trained": False, "n_samples": len(samples), "reason": f"sklearn unavailable: {exc}"}
 
     probs = [s[0] for s in samples]
     outcomes = [s[1] for s in samples]
 
-    # Brier on raw probabilities (before)
     brier_before = sum((p - y) ** 2 for p, y in samples) / len(samples)
 
     iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
     iso.fit(probs, outcomes)
 
-    # Brier on calibrated probabilities (training set — overfit-biased,
-    # for information only; real validation would use cross-validation)
     calibrated = iso.predict(probs)
     brier_after = sum((c - y) ** 2 for c, y in zip(calibrated, outcomes)) / len(samples)
 
+    payload = {
+        "format": "isotonic-thresholds-v1",
+        "x_thresholds": iso.X_thresholds_.tolist(),
+        "y_thresholds": iso.y_thresholds_.tolist(),
+        "y_min": 0.0,
+        "y_max": 1.0,
+        "trained_at": datetime.now(timezone.utc).isoformat(),
+        "n_samples": len(samples),
+        "brier_before": round(brier_before, 4),
+        "brier_after": round(brier_after, 4),
+    }
     CALIBRATOR_PATH.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(
-        {"model": iso, "trained_at": datetime.now(timezone.utc).isoformat(),
-         "n_samples": len(samples)},
-        CALIBRATOR_PATH,
-    )
+    CALIBRATOR_PATH.write_text(json.dumps(payload, indent=1), encoding="utf-8")
     logger.info(
         "Calibrator trained on %d samples, Brier %.4f → %.4f, saved to %s",
         len(samples), brier_before, brier_after, CALIBRATOR_PATH,
@@ -126,22 +133,29 @@ def train_calibrator(min_samples: int = MIN_SAMPLES_TO_TRUST) -> dict:
 # Apply
 # ---------------------------------------------------------------------------
 
-_cached_calibrator = None  # tuple[IsotonicRegression, str] | None
+# Cached as (x_thresholds: list[float], y_thresholds: list[float], trained_at: str)
+_cached_calibrator: tuple[list[float], list[float], str] | None = None
 
 
 def _load_calibrator():
-    """Lazily load and cache the persisted calibrator. Returns None if absent."""
+    """Lazily load and cache the persisted calibrator from JSON. Returns None if absent."""
     global _cached_calibrator
     if _cached_calibrator is not None:
         return _cached_calibrator
     if not CALIBRATOR_PATH.exists():
         return None
     try:
-        import joblib
-        payload = joblib.load(CALIBRATOR_PATH)
-        _cached_calibrator = (payload["model"], payload.get("trained_at", "?"))
+        payload = json.loads(CALIBRATOR_PATH.read_text(encoding="utf-8"))
+        if payload.get("format") != "isotonic-thresholds-v1":
+            logger.warning("Calibrator file format mismatch: %s", payload.get("format"))
+            return None
+        _cached_calibrator = (
+            list(payload["x_thresholds"]),
+            list(payload["y_thresholds"]),
+            payload.get("trained_at", "?"),
+        )
         return _cached_calibrator
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
         logger.warning("Could not load calibrator: %s", exc)
         return None
 
@@ -155,15 +169,26 @@ def reset_cache() -> None:
 def calibrate(prob: float) -> float:
     """
     Apply the persisted Isotonic calibration to a raw model probability.
+
+    Pure JSON+numpy implementation — no pickle/joblib deserialization, so
+    even an attacker writing a malicious file can only cause garbage output,
+    never code execution. The math is the same as IsotonicRegression.predict
+    on univariate data: monotone linear interpolation between thresholds.
+
     Returns `prob` unchanged when no calibrator is available.
     """
     cal = _load_calibrator()
     if cal is None:
         return prob
-    iso, _ = cal
+    x_t, y_t, _ = cal
+    if not x_t or not y_t:
+        return prob
     try:
-        return float(iso.predict([prob])[0])
-    except Exception:  # noqa: BLE001
+        import numpy as np
+        # `clip` behaviour: predictions outside the training range pin to nearest
+        result = float(np.interp(prob, x_t, y_t))
+        return max(0.0, min(result, 1.0))
+    except (ValueError, TypeError):
         return prob
 
 
@@ -172,7 +197,7 @@ def calibrator_status() -> dict:
     cal = _load_calibrator()
     if cal is None:
         return {"available": False, "path": str(CALIBRATOR_PATH)}
-    _, trained_at = cal
+    _, _, trained_at = cal
     return {
         "available": True,
         "path": str(CALIBRATOR_PATH),

@@ -73,8 +73,34 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
-    allow_headers=["*"],
+    allow_headers=["authorization", "content-type", "x-requested-with"],
 )
+
+
+# Security headers middleware — defends against MIME sniffing, click-jacking,
+# information leakage via referrer, and (when behind HTTPS) downgrade attacks.
+from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("Permissions-Policy",
+                                    "camera=(), microphone=(), geolocation=(), payment=()")
+        # HSTS only when running behind HTTPS — opt-in via env to avoid breaking
+        # local HTTP development.
+        if os.getenv("BETBOT_HSTS_ENABLED", "0") == "1":
+            response.headers.setdefault(
+                "Strict-Transport-Security",
+                "max-age=63072000; includeSubDomains",
+            )
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 # ---------------------------------------------------------------------------
@@ -107,10 +133,52 @@ def auth_login(request: Request,
 
 @app.get("/health", response_model=HealthResponse)
 def health(db: Database = Depends(get_db)) -> HealthResponse:
+    """
+    Liveness + readiness probe.
+
+    Exercises a real `SELECT 1` against Postgres so the check fails when the
+    DB is unreachable, frozen, or in read-only failover state. If the SELECT
+    raises, returns HTTP 503 instead of a stale "ok" payload.
+    """
+    from time import monotonic
+    from sqlalchemy import text
     from betbot.bankroll import get_state
+    from betbot.api import OddsAPIClient, _quota_minimum, _enabled_sport_keys
+    from betbot.database import session_scope
+
     s = load_settings()
+
+    # ---- DB probe : SELECT 1 with latency measurement ----------------------
+    db_ok = False
+    db_latency_ms = -1
+    try:
+        t0 = monotonic()
+        with session_scope() as session:
+            session.execute(text("SELECT 1")).scalar_one()
+        db_latency_ms = int((monotonic() - t0) * 1000)
+        db_ok = True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Health DB probe failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"database unreachable: {exc}")
+
     n_teams = sum(len(db.get_all_team_stats_for_league(k)) for k in SPORT_KEYS)
     bankroll_state = get_state()
+
+    # Probe the Odds API quota + active sports — both use the free /v4/sports endpoint
+    quota_remaining = -1
+    quota_min = _quota_minimum()
+    quota_exhausted = False
+    active_sports: list[str] = []
+    try:
+        client = OddsAPIClient(s.odds_api_key)
+        active = client.get_active_sports()
+        quota_remaining = client.quota_remaining
+        quota_exhausted = quota_remaining >= 0 and quota_remaining < quota_min
+        wishlist = _enabled_sport_keys()
+        active_sports = [k for k in wishlist if k in active]
+    except Exception:
+        pass
+
     return HealthResponse(
         status="ok",
         teams_in_db=n_teams,
@@ -119,6 +187,11 @@ def health(db: Database = Depends(get_db)) -> HealthResponse:
         balance=bankroll_state.balance,
         available=bankroll_state.available,
         agent_enabled=bool(s.anthropic_api_key),
+        odds_quota_remaining=quota_remaining,
+        odds_quota_minimum=quota_min,
+        odds_quota_exhausted=quota_exhausted,
+        active_sports=active_sports,
+        db_latency_ms=db_latency_ms,
     )
 
 
@@ -323,6 +396,8 @@ def recommend_manual(
             picks=[], parlays=[], n_picks=0, n_parlays=0,
             filters_used=filters.model_dump(),
             n_events_scanned=0,
+            odds_quota_remaining=odds_client.quota_remaining,
+            odds_quota_exhausted=odds_client.quota_exhausted,
         )
 
     # Run the blended Poisson + ELO model
@@ -386,6 +461,8 @@ def recommend_manual(
             "n_combos": filters.n_combos,
         },
         n_events_scanned=n_events,
+        odds_quota_remaining=odds_client.quota_remaining,
+        odds_quota_exhausted=odds_client.quota_exhausted,
     )
 
 
@@ -446,7 +523,10 @@ def recommend_agent_local(
         return LocalAgentResponse(
             picks=[], rejected=[], parlays=[],
             n_picks_in=0, n_accepted=0, n_rejected=0, n_parlays=0,
-            n_news_calls=0, n_weather_calls=0, tavily_available=False,
+            n_news_calls=0, n_weather_calls=0,
+            tavily_available=bool(os.getenv("TAVILY_API_KEY")),
+            odds_quota_remaining=odds_client.quota_remaining,
+            odds_quota_exhausted=odds_client.quota_exhausted,
         )
 
     # 2. Run the blended model to produce raw picks
@@ -544,6 +624,8 @@ def recommend_agent_local(
         n_news_calls=eval_result["n_news_calls"],
         n_weather_calls=eval_result["n_weather_calls"],
         tavily_available=eval_result["tavily_available"],
+        odds_quota_remaining=odds_client.quota_remaining,
+        odds_quota_exhausted=odds_client.quota_exhausted,
     )
 
 
@@ -627,37 +709,178 @@ def health_sources(_: str = Depends(require_auth)) -> dict:
     """
     Probe every external data source and report its status.
 
-    Use this to monitor whether scraped sources (Understat) still work or
-    have been blocked / restructured upstream. Returns one entry per source
-    with: ok (bool), latency_ms (int|None), reason (str when not ok).
+    Each source carries:
+      - status: "ok" | "ko" | "not_configured"  (distinguishes credential issue from real outage)
+      - criticality: "critical" | "important" | "optional"
+        * critical  : without it the system stops working (odds_api)
+        * important : degrades quality but doesn't break anything (football_data, club_elo)
+        * optional  : only powers a specific feature (anthropic = AI agent, tavily = news)
+      - latency_ms: how long the probe took
+      - reason: error message when status != "ok"
     """
     import os
     import time
-    import requests
+    from datetime import datetime, timezone
     from betbot.data_sources import club_elo, understat
     s = load_settings()
 
-    def _probe(name: str, fn) -> dict:
+    def _probe(name: str, criticality: str, configured: bool, live_check) -> dict:
+        if not configured:
+            return {
+                "name": name, "criticality": criticality,
+                "status": "not_configured", "ok": False,
+                "latency_ms": 0,
+                "reason": f"clé/credential absent — voir .env",
+            }
         t0 = time.monotonic()
         try:
-            ok = bool(fn())
-            return {"name": name, "ok": ok, "latency_ms": int((time.monotonic() - t0) * 1000)}
+            ok = bool(live_check())
+            return {
+                "name": name, "criticality": criticality,
+                "status": "ok" if ok else "ko",
+                "ok": ok,
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+                "reason": "" if ok else "probe returned falsy result",
+            }
         except Exception as exc:
-            return {"name": name, "ok": False,
-                    "latency_ms": int((time.monotonic() - t0) * 1000),
-                    "reason": str(exc)[:200]}
+            return {
+                "name": name, "criticality": criticality,
+                "status": "ko", "ok": False,
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+                "reason": str(exc)[:200],
+            }
 
+    sources = [
+        _probe("odds_api",      "critical",  bool(s.odds_api_key),
+               lambda: bool(s.odds_api_key)),
+        _probe("football_data", "important", bool(s.football_data_api_key),
+               lambda: bool(s.football_data_api_key)),
+        _probe("club_elo",      "important", True,
+               lambda: len(club_elo.get_all_elo_ratings()) > 100),
+        _probe("understat",     "optional",  True,
+               understat.is_available),
+        _probe("api_football",  "optional",  bool(os.getenv("API_FOOTBALL_KEY")),
+               lambda: bool(os.getenv("API_FOOTBALL_KEY"))),
+        _probe("tavily",        "optional",  bool(os.getenv("TAVILY_API_KEY")),
+               lambda: bool(os.getenv("TAVILY_API_KEY"))),
+        _probe("anthropic",     "optional",  bool(s.anthropic_api_key),
+               lambda: bool(s.anthropic_api_key)),
+    ]
     return {
-        "sources": [
-            _probe("odds_api", lambda: bool(s.odds_api_key)),  # cheap check (key set)
-            _probe("football_data", lambda: bool(s.football_data_api_key)),
-            _probe("club_elo", lambda: len(club_elo.get_all_elo_ratings()) > 100),
-            _probe("understat", understat.is_available),
-            _probe("api_football", lambda: bool(os.getenv("API_FOOTBALL_KEY"))),
-            _probe("tavily", lambda: bool(os.getenv("TAVILY_API_KEY"))),
-            _probe("anthropic", lambda: bool(s.anthropic_api_key)),
-        ],
+        "sources": sources,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# ML probability calibrator — Isotonic regression on resolved bets
+# ---------------------------------------------------------------------------
+
+@app.get("/ml/calibrator/status")
+def ml_calibrator_status(_: str = Depends(require_auth)) -> dict:
+    """
+    Show whether a calibrator is fitted and ready, plus how many resolved bets
+    are available for the next training run.
+    """
+    from betbot.ml import calibrator_status, _collect_training_data, MIN_SAMPLES_TO_TRUST
+    status = calibrator_status()
+    samples = _collect_training_data()
+    n_resolved = len(samples)
+    return {
+        **status,
+        "n_resolved_bets": n_resolved,
+        "min_samples_to_trust": MIN_SAMPLES_TO_TRUST,
+        "ready_to_train": n_resolved >= MIN_SAMPLES_TO_TRUST,
+    }
+
+
+@app.post("/ml/calibrator/train")
+@limiter.limit("5/minute")
+def ml_calibrator_train(
+    request: Request,
+    _: str = Depends(require_auth),
+) -> dict:
+    """Force a retrain of the calibrator on whatever resolved bets are available."""
+    from betbot.ml import train_calibrator, reset_cache
+    result = train_calibrator()
+    reset_cache()  # so the next scan picks up the new model
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Tennis ELO ratings
+# ---------------------------------------------------------------------------
+
+@app.get("/tennis/status")
+def tennis_status(_: str = Depends(require_auth)) -> dict:
+    """Show the state of the tennis ELO ratings (n_players, top, last match date)."""
+    from betbot.tennis_model import status
+    return status()
+
+
+@app.post("/tennis/refresh")
+@limiter.limit("2/minute")
+def tennis_refresh(
+    request: Request,
+    tour: str = Query(default="atp", description="atp | wta | both"),
+    _: str = Depends(require_auth),
+) -> dict:
+    """Force a refresh of tennis ELO from the latest Sackmann CSV data."""
+    from betbot.tennis_bootstrap import refresh_ratings
+    return refresh_ratings(tour=tour)
+
+
+@app.get("/tennis/predict")
+def tennis_predict_endpoint(
+    home: str = Query(...),
+    away: str = Query(...),
+    surface: str = Query(default="Hard"),
+    _: str = Depends(require_auth),
+) -> dict:
+    """Quick preview of an ELO-based tennis prediction for any player pair."""
+    from betbot.tennis_model import predict
+    p = predict(home, away, surface)
+    if p is None:
+        return {"error": "player not found in ratings"}
+    return p.__dict__
+
+
+# ---------------------------------------------------------------------------
+# Basketball pace / off-rating model
+# ---------------------------------------------------------------------------
+
+@app.get("/basketball/status")
+def basketball_status(_: str = Depends(require_auth)) -> dict:
+    """Show the state of the NBA team stats (n_teams, top by net rating)."""
+    from betbot.basketball_model import status
+    return status()
+
+
+@app.post("/basketball/refresh")
+@limiter.limit("2/minute")
+def basketball_refresh(
+    request: Request,
+    season: int | None = Query(default=None),
+    _: str = Depends(require_auth),
+) -> dict:
+    """Force a refresh of NBA team stats from basketball-reference."""
+    from betbot.basketball_bootstrap import refresh_stats
+    return refresh_stats(season_year=season)
+
+
+@app.get("/basketball/predict")
+def basketball_predict_endpoint(
+    home: str = Query(...),
+    away: str = Query(...),
+    league: str = Query(default="nba"),
+    _: str = Depends(require_auth),
+) -> dict:
+    """Quick preview of a pace-based basketball prediction."""
+    from betbot.basketball_model import predict
+    p = predict(home, away, league=league)
+    if p is None:
+        return {"error": "team not found"}
+    return p.__dict__
 
 
 @app.get("/agent/runs")
@@ -773,7 +996,9 @@ def bankroll_state(_: str = Depends(require_auth)) -> BankrollSnapshot:
 
 
 @app.post("/bankroll/deposit", response_model=BankrollSnapshot)
+@limiter.limit("10/minute")
 def bankroll_deposit(
+    request: Request,
     body: BankrollMutation,
     _: str = Depends(require_auth),
 ) -> BankrollSnapshot:
@@ -784,7 +1009,9 @@ def bankroll_deposit(
 
 
 @app.post("/bankroll/withdraw", response_model=BankrollSnapshot)
+@limiter.limit("10/minute")
 def bankroll_withdraw(
+    request: Request,
     body: BankrollMutation,
     _: str = Depends(require_auth),
 ) -> BankrollSnapshot:

@@ -193,9 +193,14 @@ def _append(
     return new_balance
 
 
+MAX_MUTATION_AMOUNT = 1_000_000.0  # sanity cap on a single deposit/withdraw
+
+
 def deposit(amount: float, note: str | None = None) -> BankrollState:
     if amount <= 0:
         raise ValueError("Deposit amount must be > 0")
+    if amount > MAX_MUTATION_AMOUNT:
+        raise ValueError(f"Deposit amount must be <= {MAX_MUTATION_AMOUNT}")
     with session_scope() as s:
         _append(s, "deposit", amount, note=note)
     state = get_state()
@@ -223,6 +228,8 @@ def _state_inside_lock(s) -> tuple[float, float]:
 def withdraw(amount: float, note: str | None = None) -> BankrollState:
     if amount <= 0:
         raise ValueError("Withdrawal amount must be > 0")
+    if amount > MAX_MUTATION_AMOUNT:
+        raise ValueError(f"Withdrawal amount must be <= {MAX_MUTATION_AMOUNT}")
     with session_scope() as s:
         _acquire_ledger_lock(s)
         balance, _ = _state_inside_lock(s)

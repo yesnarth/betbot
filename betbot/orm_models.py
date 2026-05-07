@@ -226,6 +226,11 @@ class BankrollEntry(Base):
     __table_args__ = (
         Index("ix_bankroll_ts", "ts"),
         Index("ix_bankroll_kind", "kind"),
+        # Explicit name matches the migration d1f4a8e7b3c0 that originally
+        # created this index. Using `index=True` on the column would cause
+        # SQLAlchemy to autogenerate `ix_bankroll_ledger_bookmaker_key`,
+        # producing a perpetual divergence flagged by `alembic check`.
+        Index("ix_bankroll_bookmaker", "bookmaker_key"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -240,6 +245,6 @@ class BankrollEntry(Base):
     # (before Phase A5) keep loading; new rows always specify the account.
     bookmaker_key: Mapped[Optional[str]] = mapped_column(
         String, ForeignKey("bookmakers.key", ondelete="SET NULL"),
-        nullable=True, index=True,
+        nullable=True,  # index defined explicitly in __table_args__ above
     )
     note: Mapped[Optional[str]] = mapped_column(String, nullable=True)

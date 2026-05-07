@@ -28,8 +28,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 logger = logging.getLogger("betbot.worker_health")
 
 # How long a job-less scheduler is allowed to run before we report unhealthy.
-GRACE_PERIOD_SECS = 30 * 60          # 30 min — first scheduled scan is at most ~hours away
-STALE_AFTER_SECS = 25 * 3600         # 25 hours — flag if no job fired in over a day
+GRACE_PERIOD_SECS = 30 * 60          # 30 min from cold start — first CLV snapshot fires within 10 min
+STALE_AFTER_SECS = 4 * 3600          # 4 hours — generous w.r.t. CLV (every 10 min) and scans (3/day)
+                                     # but still catches a wedged scheduler within ~half a workday.
+                                     # Was 25h previously — too relaxed: a job that hung for a day
+                                     # would still report healthy until the next morning.
 
 
 class WorkerHealthState:
