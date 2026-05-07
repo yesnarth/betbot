@@ -32,15 +32,24 @@ OUT_DIR.mkdir(exist_ok=True)
 (OUT_DIR / "screenshots").mkdir(exist_ok=True)
 
 TABS = [
-    ("scan",     "🎯 Scan manuel"),
-    ("local",    "🧠 Agent local"),
-    ("events",   "📅 Matchs disponibles"),
-    ("pending",  "⏳ Paris en attente"),
-    ("roi",      "📊 Performance"),
-    ("capital",  "💰 Capital"),
-    ("agent",    "🤖 Agent IA (Claude)"),
-    ("history",  "📜 Historique agent"),
-    ("sources",  "🔌 Sources"),
+    # New structure: top-level sections, then sub-tabs within Décision/Matchs/Performance.
+    # Each entry is (slug, [click_path]) — labels to click in order to reach the tab.
+    ("decision",       ["🎯 Décision"]),
+    ("scan",           ["🎯 Décision", "🎯 Scan manuel"]),
+    ("local",          ["🎯 Décision", "🧠 Agent local"]),
+    ("agent",          ["🎯 Décision", "🤖 Agent IA (Claude)"]),
+    ("matches",        ["📅 Matchs"]),
+    ("events",         ["📅 Matchs", "📅 Matchs disponibles"]),
+    ("pending",        ["📅 Matchs", "⏳ Paris en attente"]),
+    ("performance",    ["📊 Performance"]),
+    ("roi",            ["📊 Performance", "📊 ROI / Performance"]),
+    ("capital",        ["📊 Performance", "💰 Capital"]),
+    ("history",        ["📜 Historique"]),
+    ("system",         ["⚙️ Système"]),
+    ("sources",        ["⚙️ Système", "🔌 Sources"]),
+    ("calibrator",     ["⚙️ Système", "🎚️ Calibrateur ML"]),
+    ("tennis",         ["⚙️ Système", "🎾 Modèle tennis"]),
+    ("basketball",     ["⚙️ Système", "🏀 Modèle basket"]),
 ]
 
 
@@ -57,11 +66,24 @@ def audit() -> dict:
         )
         page = ctx.new_page()
 
+        # Vega-Lite emits transient "Infinite extent" warnings on Streamlit
+        # rerun edge cases (1-row dataframe between API state changes). They
+        # don't affect rendering — filter them from the count.
+        IGNORED_WARNING_PATTERNS = (
+            "Infinite extent for field",
+        )
+
         def _on_console(msg):
-            if msg.type in ("error", "warning"):
+            if msg.type == "error":
                 console_messages.append({
-                    "type": msg.type,
-                    "text": msg.text[:500],
+                    "type": msg.type, "text": msg.text[:500],
+                    "location": str(msg.location.get("url", "")) if msg.location else "",
+                })
+            elif msg.type == "warning":
+                if any(p in msg.text for p in IGNORED_WARNING_PATTERNS):
+                    return  # noise we've decided to ignore
+                console_messages.append({
+                    "type": msg.type, "text": msg.text[:500],
                     "location": str(msg.location.get("url", "")) if msg.location else "",
                 })
         page.on("console", _on_console)
@@ -85,20 +107,18 @@ def audit() -> dict:
         findings["global"]["sidebar_excerpt"] = sidebar_text[:1500]
 
         # Iterate tabs
-        for slug, label in TABS:
-            tab_findings = {"label": label, "ok": True, "issues": []}
+        for slug, click_path in TABS:
+            tab_findings = {"label": " > ".join(click_path), "ok": True, "issues": []}
             print(f"[tab] {slug}")
             try:
-                # Reset error counters per tab
-                tab_console_errors = []
-                tab_network_errors = []
                 start_console = len(console_messages)
                 start_network = len(network_errors)
 
-                # Click the tab
-                tab = page.get_by_role("tab", name=label)
-                tab.click(timeout=10000)
-                time.sleep(2)
+                # Walk the click path (top-level section first, then sub-tab if any)
+                for label in click_path:
+                    tab = page.get_by_role("tab", name=label).first
+                    tab.click(timeout=10000)
+                    time.sleep(1)
                 page.wait_for_load_state("networkidle", timeout=15000)
                 time.sleep(1)
 

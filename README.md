@@ -1,14 +1,16 @@
-# BetBot — AI-driven football pronosticator
+# BetBot — AI-driven multi-sport pronosticator
 
-Production-grade quantitative football betting system. Combines a Dixon-Coles
-Poisson model with xG, Club ELO, weather, web-search news and an AI agent
-(Claude Sonnet 4.6) that cross-checks every recommendation across multiple
-independent signals.
+Production-grade quantitative betting system covering football, tennis, and
+basketball. Combines a Dixon-Coles Poisson model (with xG + Club ELO + weather
++ live news) for football, a surface-aware ELO model for tennis (Sackmann
+data), and a pace + offensive/defensive rating model for basketball
+(basketball-reference). An AI agent (Claude Sonnet 4.6) cross-checks every
+recommendation across multiple independent signals.
 
 ## Stack
 
 ```
-Streamlit dashboard  →  FastAPI  →  Claude Agent SDK  →  MCP server (20+ tools)
+Streamlit dashboard  →  FastAPI  →  Claude Agent SDK  →  MCP server (36 tools)
                                                               ↓
                           PostgreSQL + Redis        external data sources
                                                     (Odds, FootData, ClubElo,
@@ -156,7 +158,7 @@ betbot/                         # core package
     understat.py                # xG scraping (free)
     weather.py                  # Open-Meteo (free)
 
-betbot_mcp/                     # MCP server — 20+ tools
+betbot_mcp/                     # MCP server — 36 tools
 betbot_api/                     # FastAPI REST + Claude agent
 betbot_dashboard/               # Streamlit UI
 
