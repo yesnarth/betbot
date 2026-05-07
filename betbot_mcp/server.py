@@ -67,23 +67,8 @@ def _parlay_to_dict(p: Parlay) -> dict:
     }
 
 
-def _filter_today(events: list[dict], min_before_kickoff: int) -> list[dict]:
-    from datetime import timedelta
-    now_utc = datetime.now(timezone.utc)
-    today_str = now_utc.strftime("%Y-%m-%d")
-    cutoff = now_utc + timedelta(minutes=min_before_kickoff)
-    out = []
-    for ev in events:
-        commence = ev.get("commence_time", "")
-        if not commence.startswith(today_str):
-            continue
-        try:
-            t = datetime.fromisoformat(commence.replace("Z", "+00:00"))
-            if t >= cutoff:
-                out.append(ev)
-        except (ValueError, TypeError):
-            pass
-    return out
+# Use the shared canonical implementation; alias to keep the local name.
+from betbot.shared import filter_upcoming_today as _filter_today  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +560,273 @@ def search_team_news(
         return {"ok": False, "reason": "tavily_not_configured", "hint": str(exc)}
     except Exception as exc:
         return {"ok": False, "reason": "search_failed", "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Tools — Multi-sport infrastructure
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_active_sports() -> dict:
+    """
+    List the sports currently in-season per The Odds API's free /v4/sports
+    endpoint, intersected with our wishlist (football leagues + tennis
+    Grand Slams + NBA / EuroLeague). Out-of-season sports are auto-skipped
+    by the scan to save quota.
+    """
+    from betbot.api import _enabled_sport_keys
+    client = odds_client()
+    active = client.get_active_sports()
+    wishlist = _enabled_sport_keys()
+    return {
+        "wishlist": wishlist,
+        "active": [k for k in wishlist if k in active],
+        "skipped_out_of_season": [k for k in wishlist if k not in active],
+        "quota_remaining": client.quota_remaining,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tools — Tennis ELO model
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def predict_tennis_match(
+    home_player: str,
+    away_player: str,
+    surface: str = "Hard",
+) -> dict:
+    """
+    Predict an ATP tennis match using surface-aware ELO ratings (Sackmann data).
+
+    Args:
+        home_player: e.g. "Carlos Alcaraz"
+        away_player: e.g. "Jannik Sinner"
+        surface:     "Hard" | "Clay" | "Grass"
+
+    Returns blended ratings (50% surface-specific + 50% overall) and the
+    logistic win probability for each player. Returns {"ok": false} if
+    either player is absent from the rating file.
+    """
+    from betbot.tennis_model import predict
+    p = predict(home_player, away_player, surface)
+    if p is None:
+        return {"ok": False, "reason": "player_not_found",
+                "hint": "Run refresh_tennis_ratings to ensure recent players are loaded."}
+    return {"ok": True, **p.__dict__}
+
+
+@mcp.tool()
+def get_tennis_status() -> dict:
+    """
+    Diagnostic on the tennis ELO file: how many players, top 5 by ELO,
+    most recent match analysed.
+    """
+    from betbot.tennis_model import status
+    return status()
+
+
+@mcp.tool()
+def refresh_tennis_ratings(tour: str = "atp", years: list[int] | None = None) -> dict:
+    """
+    Recompute ELO ratings from Jeff Sackmann's tennis_atp / tennis_wta CSV repos.
+
+    Args:
+        tour:  "atp" | "wta" | "both"
+        years: explicit year list (default: last 3 years)
+    """
+    from betbot.tennis_bootstrap import refresh_ratings
+    return refresh_ratings(years=years, tour=tour)
+
+
+# ---------------------------------------------------------------------------
+# Tools — Basketball model (NBA / EuroLeague)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def predict_basketball_match(
+    home_team: str,
+    away_team: str,
+    league: str = "nba",
+) -> dict:
+    """
+    Predict an NBA / EuroLeague match using pace + offensive / defensive rating.
+
+    Returns expected points for each side, total, margin, and the win prob
+    (CDF normale, σ=11). Home advantage is 2.7 pts (NBA) or 1.8 pts (EuroLeague).
+    """
+    from betbot.basketball_model import predict
+    p = predict(home_team, away_team, league=league)
+    if p is None:
+        return {"ok": False, "reason": "team_not_found",
+                "hint": "Run refresh_basketball_stats first."}
+    return {"ok": True, **p.__dict__}
+
+
+@mcp.tool()
+def get_basketball_status() -> dict:
+    """How many teams are in our basketball stats file, top 5 by net rating."""
+    from betbot.basketball_model import status
+    return status()
+
+
+@mcp.tool()
+def refresh_basketball_stats(season_year: int | None = None) -> dict:
+    """
+    Re-scrape basketball-reference.com for the current NBA season pace + ORtg/DRtg
+    per team. Pass `season_year` (e.g. 2026 = 2025-26 season) to override.
+    """
+    from betbot.basketball_bootstrap import refresh_stats
+    return refresh_stats(season_year=season_year)
+
+
+# ---------------------------------------------------------------------------
+# Tools — ML probability calibrator
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_calibrator_status() -> dict:
+    """
+    Inspect the Isotonic-regression calibrator: is it fitted, when, on how
+    many samples, and how many resolved bets are now available for retraining.
+    """
+    from betbot.ml import calibrator_status, _collect_training_data, MIN_SAMPLES_TO_TRUST
+    s = calibrator_status()
+    n_resolved = len(_collect_training_data())
+    return {
+        **s,
+        "n_resolved_bets": n_resolved,
+        "min_samples_to_trust": MIN_SAMPLES_TO_TRUST,
+        "ready_to_train": n_resolved >= MIN_SAMPLES_TO_TRUST,
+    }
+
+
+@mcp.tool()
+def train_ml_calibrator() -> dict:
+    """
+    Force a retrain of the Isotonic-regression probability calibrator using
+    every resolved bet currently in the predictions table. No-op if fewer
+    than 50 resolved bets exist (variance too high for reliable fit).
+    """
+    from betbot.ml import train_calibrator, reset_cache
+    result = train_calibrator()
+    reset_cache()
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Tools — Bankroll management
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_bankroll_state() -> dict:
+    """Current bankroll snapshot: balance, committed, available, P&L, totals."""
+    from betbot.bankroll import get_state
+    state = get_state()
+    return {
+        "balance": state.balance,
+        "committed": state.committed,
+        "available": state.available,
+        "total_deposits": state.total_deposits,
+        "total_withdrawals": state.total_withdrawals,
+        "total_won": state.total_won,
+        "total_lost_stakes": state.total_lost_stakes,
+        "pnl": state.pnl,
+        "n_entries": state.n_entries,
+    }
+
+
+@mcp.tool()
+def bankroll_deposit(amount: float, note: str | None = None) -> dict:
+    """Add a manual deposit to the bankroll. Amount must be > 0."""
+    from betbot.bankroll import deposit
+    if amount <= 0:
+        return {"ok": False, "reason": "amount_must_be_positive"}
+    deposit(amount, note=note)
+    return {"ok": True, "deposited": amount}
+
+
+@mcp.tool()
+def bankroll_withdraw(amount: float, note: str | None = None) -> dict:
+    """Record a manual withdrawal from the bankroll. Amount must be > 0."""
+    from betbot.bankroll import withdraw
+    if amount <= 0:
+        return {"ok": False, "reason": "amount_must_be_positive"}
+    withdraw(amount, note=note)
+    return {"ok": True, "withdrawn": amount}
+
+
+@mcp.tool()
+def get_bankroll_history(limit: int = 50) -> list[dict]:
+    """Recent ledger entries (deposits, withdrawals, bet placements, settlements)."""
+    from betbot.bankroll import get_history
+    return get_history(limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# Tools — Local deterministic agent (rule chain over picks)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def run_local_agent(
+    sport_key: str | None = None,
+    today_only: bool = True,
+    min_value_edge: float | None = None,
+    min_final_edge: float = 0.02,
+    fetch_news: bool = True,
+    fetch_weather: bool = True,
+) -> dict:
+    """
+    Run the deterministic local agent over a fresh scan: it pulls value bets,
+    enriches with Tavily news + Open-Meteo weather, applies the explicit rule
+    chain (huge-edge tiers, injury detection, ELO contradictions), then
+    returns accepted / flagged / rejected picks with full rationale.
+
+    Cheaper and more transparent than calling Claude — every rule is explicit.
+    """
+    from betbot.local_agent import evaluate_picks
+    from betbot.main import _filter_upcoming_today, _load_team_stats_from_db
+    from betbot.analysis import detect_value_bets, rank_value_bets
+
+    s = settings()
+    edge = s.min_value_edge if min_value_edge is None else min_value_edge
+
+    # Fetch events
+    if sport_key:
+        all_events = {sport_key: odds_client().get_events_with_odds(sport_key)}
+    else:
+        all_events = odds_client().fetch_all_sports()
+
+    events_by_sport = {}
+    for sk, ev in all_events.items():
+        kept = _filter_upcoming_today(ev, s.min_before_kickoff) if today_only else ev
+        if kept:
+            events_by_sport[sk] = kept
+
+    if not events_by_sport:
+        return {"n_picks_in": 0, "n_accepted": 0, "n_rejected": 0,
+                "picks": [], "rejected": [], "reason": "no_events"}
+
+    prebuilt = _load_team_stats_from_db(db(), events_by_sport.keys())
+    raw = detect_value_bets(
+        events_by_sport=events_by_sport, match_history_by_sport={},
+        bankroll=s.bankroll, kelly_fraction=s.kelly_fraction,
+        min_value_edge=edge, min_model_prob=s.min_model_prob,
+        min_book_odds=s.min_book_odds,
+        prebuilt_stats_by_sport=prebuilt,
+    )
+    raw = rank_value_bets(raw)[: s.top_bets]
+
+    return evaluate_picks(
+        picks=[_bet_to_dict(b) for b in raw],
+        fetch_news=fetch_news,
+        fetch_weather=fetch_weather,
+        min_final_edge=min_final_edge,
+        bankroll=s.bankroll,
+        kelly_fraction=s.kelly_fraction,
+        persist_run=False,  # MCP invocation is stateless
+        trigger="mcp",
+    )
 
 
 # ---------------------------------------------------------------------------

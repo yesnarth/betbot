@@ -1,0 +1,18 @@
+[theme]
+# Cohesive sport/finance palette: deep navy base + emerald accent
+base = "light"
+primaryColor = "#10b981"
+backgroundColor = "#fafbfc"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#0f172a"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
+showErrorDetails = true
+
+[browser]
+gatherUsageStats = false
+
+[server]
+runOnSave = false
