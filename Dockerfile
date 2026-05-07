@@ -42,6 +42,10 @@ COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
 COPY --chown=betbot:betbot . /app
 
+# Ensure /app/data exists and is owned by betbot — docker named volume mounted
+# here needs to be writable for tennis ELO ratings, ML calibrator, etc.
+RUN mkdir -p /app/data && chown -R betbot:betbot /app/data
+
 USER betbot
 
 # tini reaps zombies and forwards signals correctly

@@ -57,6 +57,8 @@ services:
       LOG_PATH: ""
       REDIS_URL: redis://redis:6379/0
       TZ: ${TZ:-Europe/Paris}
+    volumes:
+      - betbot_data:/app/data
     restart: unless-stopped
     command: ["python", "-m", "betbot.main"]
     stop_grace_period: 30s
@@ -89,6 +91,14 @@ services:
       DATABASE_URL: postgresql+psycopg2://betbot:${POSTGRES_PASSWORD:-betbot_dev_pwd}@db:5432/betbot
       LOG_PATH: ""
       REDIS_URL: redis://redis:6379/0
+    # NOTE: The API still needs to write here for the manual refresh endpoints
+    # (/tennis/refresh, /basketball/refresh, /ml/calibrator/train). The joblib
+    # pickle-RCE risk that motivated locking this down has been eliminated by
+    # switching the calibrator to JSON serialization (see betbot/ml.py).
+    # Tennis ELO and basketball stats are also JSON, so a malicious write here
+    # can only produce wrong predictions, never code execution.
+    volumes:
+      - betbot_data:/app/data
     restart: unless-stopped
     ports:
       - "127.0.0.1:8000:8000"
@@ -139,6 +149,9 @@ services:
     volumes:
       - ./scripts/backup_db.sh:/usr/local/bin/backup_db.sh:ro
       - ./backups:/backups
+      # Read-only mount of the shared data volume so we can tar tennis ELO,
+      # basketball stats, and the ML calibrator alongside the Postgres dump.
+      - betbot_data:/app/data:ro
     entrypoint: ["sh", "-c"]
     # Daily backup at 03:00 UTC (low-activity hour for European football)
     # Loop: sleep until next 03:00 UTC, run the script, repeat.
@@ -162,3 +175,4 @@ services:
 volumes:
   db_data:
   redis_data:
+  betbot_data:    # shared writable area for tennis ELO, ML calibrator, etc.
