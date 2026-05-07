@@ -64,7 +64,10 @@ class QuotaExhaustedError(Exception):
 class OddsAPIClient:
     def __init__(self, api_key: str):
         self._key = api_key
-        self.quota_remaining: int = 9999
+        # -1 = unknown until the first response with a x-requests-remaining
+        # header is observed. A misleading default like 9999 used to surface
+        # in the dashboard as "OK" even when the probe had failed.
+        self.quota_remaining: int = -1
         self.quota_exhausted: bool = False
         self._session = requests.Session()
 

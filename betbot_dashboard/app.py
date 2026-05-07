@@ -251,14 +251,17 @@ with st.sidebar:
 
     quota = int(health.get("odds_quota_remaining", -1))
     quota_min = int(health.get("odds_quota_minimum", 20))
-    if quota >= 0:
-        if health.get("odds_quota_exhausted"):
-            st.metric("Quota Odds API", f"{quota} req",
-                      delta=f"⚠ < {quota_min}", delta_color="inverse")
-        else:
-            delta_q = "OK" if quota >= 100 else f"min {quota_min}"
-            st.metric("Quota Odds API", f"{quota} req", delta=delta_q,
-                      delta_color="normal" if quota >= 100 else "off")
+    if quota < 0:
+        # Unknown — probe failed or no header observed yet. Surface explicitly
+        # rather than rendering a misleading "9999 req · OK".
+        st.metric("Quota Odds API", "—", delta="probe inconnu", delta_color="off")
+    elif health.get("odds_quota_exhausted"):
+        st.metric("Quota Odds API", f"{quota} req",
+                  delta=f"⚠ < {quota_min}", delta_color="inverse")
+    else:
+        delta_q = "OK" if quota >= 100 else f"min {quota_min}"
+        st.metric("Quota Odds API", f"{quota} req", delta=delta_q,
+                  delta_color="normal" if quota >= 100 else "off")
 
     st.metric("Équipes en DB", health["teams_in_db"])
     st.caption(f"Scans auto : {' · '.join(health['scan_hours'])}")
