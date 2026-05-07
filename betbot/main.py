@@ -55,64 +55,19 @@ def setup_logging(log_path: str) -> logging.Logger:
 # DB helpers
 # ---------------------------------------------------------------------------
 
-def _load_team_stats_from_db(
-    db: Database, sport_keys: object
-) -> dict[str, dict]:
-    """
-    Returns {sport_key: {"teams": {name: TeamStats}, "home_avg": float, "away_avg": float}}.
-    Falls back to default averages (1.35/1.10) if league_averages row is missing.
-    """
-    from betbot.models import DEFAULT_HOME_AVG, DEFAULT_AWAY_AVG
-    result: dict[str, dict] = {}
-    for sport_key in sport_keys:
-        rows = db.get_all_team_stats_for_league(sport_key)
-        if not rows:
-            continue
-        teams: dict[str, TeamStats] = {}
-        for row in rows:
-            teams[row["team_name"]] = TeamStats(
-                name=row["team_name"],
-                attack_home=row["attack_home"],
-                defense_home=row["defense_home"],
-                attack_away=row["attack_away"],
-                defense_away=row["defense_away"],
-                matches_analyzed=row["matches_analyzed"],
-                elo_rating=row.get("elo_rating"),
-                xg_for=row.get("xg_for"),
-                xg_against=row.get("xg_against"),
-            )
-        avgs = db.get_league_averages(sport_key)
-        home_avg, away_avg = avgs if avgs else (DEFAULT_HOME_AVG, DEFAULT_AWAY_AVG)
-        result[sport_key] = {"teams": teams, "home_avg": home_avg, "away_avg": away_avg}
-    return result
+# Backwards-compat re-exports. The canonical home for these helpers is
+# `betbot.shared`, but several callers (API, MCP server) historically imported
+# them from `betbot.main`. Aliasing keeps existing imports working while we
+# migrate them progressively.
+from betbot.shared import load_team_stats_from_db as _load_team_stats_from_db  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
 # Date filtering
 # ---------------------------------------------------------------------------
 
-def _filter_upcoming_today(events: list[dict], min_before_kickoff: int = 60) -> list[dict]:
-    """
-    Keep only events:
-    - scheduled for today (UTC date)
-    - starting at least min_before_kickoff minutes from now
-    """
-    now_utc = datetime.now(timezone.utc)
-    today_str = now_utc.strftime("%Y-%m-%d")
-    cutoff = now_utc + timedelta(minutes=min_before_kickoff)
-
-    result = []
-    for event in events:
-        commence = event.get("commence_time", "")
-        if not commence.startswith(today_str):
-            continue
-        try:
-            event_time = datetime.fromisoformat(commence.replace("Z", "+00:00"))
-            if event_time >= cutoff:
-                result.append(event)
-        except (ValueError, TypeError):
-            pass
-    return result
+# Re-export from betbot.shared for backwards-compat with API + MCP imports.
+from betbot.shared import filter_upcoming_today as _filter_upcoming_today  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
@@ -401,8 +356,48 @@ def main() -> None:
     scheduler = BlockingScheduler(timezone="Europe/Paris")
     health.scheduler = scheduler
 
+    # Per-job cooldown for failure alerts. We keep an in-memory dict mapping
+    # job name → timestamp of the last alert sent, and re-alert only if the
+    # previous alert is older than _ALERT_COOLDOWN_SEC. This prevents a job
+    # that fires every 10 min from spamming 144 emails per day if its
+    # underlying API stays down.
+    _last_alert_at: dict[str, float] = {}
+    _ALERT_COOLDOWN_SEC = 3600  # one alert per job per hour
+
+    def _alert_job_failure(name: str, err_msg: str) -> None:
+        import time
+        now = time.time()
+        last = _last_alert_at.get(name, 0)
+        if now - last < _ALERT_COOLDOWN_SEC:
+            return  # cooldown — already notified recently
+        _last_alert_at[name] = now
+
+        subject = f"[BetBot] Job failure : {name}"
+        body = (
+            f"Scheduled job '{name}' raised an exception.\n\n"
+            f"Error: {err_msg}\n\n"
+            f"Time: {datetime.now(timezone.utc).isoformat()}\n"
+            f"Next alerts for this job suppressed for {_ALERT_COOLDOWN_SEC // 60} min."
+        )
+        # Email — best effort, never raise
+        try:
+            from betbot.notifier import EmailNotifier
+            EmailNotifier(settings.gmail_user, settings.gmail_app_password,
+                          settings.gmail_recipient).send(
+                subject=subject, html=f"<pre>{body}</pre>",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failure-alert email could not be sent: %s", e)
+        # Telegram — best effort
+        try:
+            from betbot.telegram_notifier import notify_alert
+            notify_alert(subject, body)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Failure-alert telegram skipped: %s", e)
+
     def _wrap(name: str, fn, *args, **kwargs):
-        """Wrap a scheduled callable so success/failure is recorded in health."""
+        """Wrap a scheduled callable so success/failure is recorded in health
+        AND triggers an email/Telegram alert on raise."""
         def _runner():
             err = None
             try:
@@ -410,6 +405,7 @@ def main() -> None:
             except Exception as exc:  # noqa: BLE001
                 err = str(exc)[:200]
                 logger.exception("Job '%s' failed", name)
+                _alert_job_failure(name, err)
                 raise
             finally:
                 health.record_job_fired(name, error=err)
@@ -483,6 +479,49 @@ def main() -> None:
         trigger=CronTrigger(hour=4, minute=0),
         id="resolve_daily",
         name="resolve",
+        misfire_grace_time=3600,
+    )
+
+    # ML calibrator retrain — Sunday 03:30 UTC, AFTER the daily resolve job has
+    # had a chance to populate fresh resolved bets. Below MIN_SAMPLES_TO_TRUST
+    # the function is a no-op, so safe to schedule from day 1.
+    from betbot.ml import train_calibrator
+    def _train_calibrator_job():
+        result = train_calibrator()
+        logger.info("Calibrator retrain: %s", result)
+    scheduler.add_job(
+        _wrap("ml_calibrator_retrain", _train_calibrator_job),
+        trigger=CronTrigger(day_of_week="sun", hour=3, minute=30),
+        id="ml_calibrator_weekly",
+        name="ml-calibrator",
+        misfire_grace_time=3600,
+    )
+
+    # Tennis ELO refresh — every Monday 05:00 UTC. Pulls latest ATP/WTA matches
+    # from Sackmann and rebuilds player ratings. Fast (~6k matches in <1s).
+    from betbot.tennis_bootstrap import refresh_ratings as _refresh_tennis_ratings
+    def _tennis_refresh_job():
+        result = _refresh_tennis_ratings(tour="atp")
+        logger.info("Tennis ELO refresh : %s", result)
+    scheduler.add_job(
+        _wrap("tennis_elo_refresh", _tennis_refresh_job),
+        trigger=CronTrigger(day_of_week="mon", hour=5, minute=0),
+        id="tennis_elo_weekly",
+        name="tennis-elo",
+        misfire_grace_time=3600,
+    )
+
+    # Basketball stats refresh — every Tuesday 05:00 UTC. Scrapes basketball-
+    # reference for current-season pace + ORtg/DRtg per NBA team.
+    from betbot.basketball_bootstrap import refresh_stats as _refresh_basket
+    def _basket_refresh_job():
+        result = _refresh_basket()
+        logger.info("Basketball stats refresh : %s", result)
+    scheduler.add_job(
+        _wrap("basketball_stats_refresh", _basket_refresh_job),
+        trigger=CronTrigger(day_of_week="tue", hour=5, minute=0),
+        id="basketball_stats_weekly",
+        name="basketball-stats",
         misfire_grace_time=3600,
     )
 

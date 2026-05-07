@@ -1,4 +1,5 @@
 """The Odds API client with retry, quota guard, and all-bookmakers fetch."""
+import os
 import time
 import logging
 
@@ -14,7 +15,14 @@ from tenacity import (
 logger = logging.getLogger("betbot.api")
 
 BASE_URL = "https://api.the-odds-api.com/v4/sports"
-QUOTA_MINIMUM = 20  # stop if fewer than this many requests remain
+
+
+def _quota_minimum() -> int:
+    """Read the safety threshold each call so .env changes take effect at runtime."""
+    try:
+        return max(0, int(os.getenv("ODDS_QUOTA_MINIMUM", "20")))
+    except ValueError:
+        return 20
 
 SPORT_KEYS = [
     # Football — full Poisson model (xG/ELO/Tavily news/weather all wired)
@@ -57,6 +65,7 @@ class OddsAPIClient:
     def __init__(self, api_key: str):
         self._key = api_key
         self.quota_remaining: int = 9999
+        self.quota_exhausted: bool = False
         self._session = requests.Session()
 
     @retry(
@@ -82,14 +91,53 @@ class OddsAPIClient:
         try:
             remaining = int(resp.headers.get("x-requests-remaining", 9999))
             self.quota_remaining = remaining
-            if remaining < QUOTA_MINIMUM:
+            threshold = _quota_minimum()
+            if remaining < threshold:
+                self.quota_exhausted = True
                 raise QuotaExhaustedError(
-                    f"Quota insuffisant : {remaining} requêtes restantes (min {QUOTA_MINIMUM})"
+                    f"Quota insuffisant : {remaining} requêtes restantes (min {threshold})"
                 )
             if remaining < 50:
                 logger.warning("⚠️  Quota faible : %d requêtes restantes", remaining)
         except (ValueError, TypeError):
             pass
+
+    def get_active_sports(self) -> set[str]:
+        """Return the set of sport keys currently in-season.
+
+        Hits `/v4/sports?all=false` which The Odds API serves for FREE
+        (no `x-requests-used` increment). Used to skip out-of-season leagues
+        before burning quota on `/v4/sports/{key}/odds` requests.
+        """
+        try:
+            resp = self._session.get(BASE_URL, params={"apiKey": self._key, "all": "false"}, timeout=5)
+            try:
+                self.quota_remaining = int(resp.headers.get("x-requests-remaining", self.quota_remaining))
+            except (ValueError, TypeError):
+                pass
+            data = resp.json() if resp.status_code == 200 else []
+            return {item["key"] for item in data if isinstance(item, dict) and "key" in item}
+        except Exception as exc:
+            logger.debug("get_active_sports: %s", exc)
+            return set()
+
+    def probe_quota(self) -> int:
+        """Refresh quota_remaining without consuming a billed request.
+
+        Hits the `/v4/sports` listing endpoint, which is free on The Odds API
+        and still returns the `x-requests-remaining` header. Used by /health
+        to display live quota in the dashboard.
+        """
+        try:
+            resp = self._session.get(BASE_URL, params={"apiKey": self._key}, timeout=5)
+            try:
+                self.quota_remaining = int(resp.headers.get("x-requests-remaining", self.quota_remaining))
+            except (ValueError, TypeError):
+                pass
+            self.quota_exhausted = self.quota_remaining < _quota_minimum()
+        except Exception as exc:
+            logger.debug("probe_quota: %s", exc)
+        return self.quota_remaining
 
     def get_events_with_odds(self, sport: str, markets: str = "h2h,totals") -> list[dict]:
         """
@@ -136,10 +184,25 @@ class OddsAPIClient:
         return events
 
     def fetch_all_sports(self) -> dict[str, list[dict]]:
-        """Fetch odds for all enabled sport keys (filtered by feature flags).
-        Returns {sport_key: [events]}."""
+        """Fetch odds for the wishlist, INTERSECTED with currently-active sports.
+
+        Out-of-season leagues (e.g. Premier League in July) are silently
+        skipped — saves quota with no degradation in coverage.
+        """
+        wishlist = _enabled_sport_keys()
+        active = self.get_active_sports()  # free probe
+        if active:
+            to_query = [s for s in wishlist if s in active]
+            skipped = [s for s in wishlist if s not in active]
+            if skipped:
+                logger.info("Skipping out-of-season sports : %s", ", ".join(skipped))
+        else:
+            # Probe failed — fall back to wishlist (we'd rather over-query than miss data)
+            logger.warning("Active-sports probe returned empty; falling back to full wishlist")
+            to_query = wishlist
+
         results: dict[str, list[dict]] = {}
-        for sport in _enabled_sport_keys():
+        for sport in to_query:
             try:
                 events = self.get_events_with_odds(sport)
                 results[sport] = events
