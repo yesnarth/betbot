@@ -632,10 +632,12 @@ with tab_events:
 with tab_validate:
     st.subheader("🔔 Picks à valider — recommandations du worker")
     st.caption(
-        "Le worker a proposé ces picks lors des scans automatiques (09h, 15h, 20h). "
+        "Le worker a proposé ces picks lors des scans automatiques (09h00 / 20h00). "
         "**Aucun argent n'a été engagé** — c'est à toi de placer le pari chez ton "
         "bookmaker, puis de revenir cliquer **« J'ai placé »** pour que le solde "
-        "soit débité du stake Kelly. **« Skipper »** archive le pick sans débit."
+        "soit débité du stake Kelly. **« Skipper »** archive le pick sans débit. "
+        "Skip par erreur ? Va voir le pick dans la DB : un POST /predictions/{id}/unskip "
+        "le remet en 'proposed' (UI à venir)."
     )
 
     try:

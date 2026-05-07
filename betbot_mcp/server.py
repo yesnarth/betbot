@@ -353,8 +353,13 @@ def build_parlay(
 @mcp.tool()
 def save_predictions(picks: list[dict]) -> dict:
     """
-    Persist a list of picks (typically the agent's final selection) into the
-    predictions table for ROI tracking. Idempotent on (event_id, market, selection).
+    Persist a list of picks into the predictions table as **proposed** —
+    meaning the bot is recommending them but the user hasn't acted yet.
+    Bankroll is NOT debited at this stage. The user must explicitly confirm
+    each pick (via `confirm_prediction_placed`) once they've placed the bet
+    at their bookmaker site, or skip it (via `skip_prediction`).
+
+    Idempotent on (event_id, market, selection) — duplicates return False.
     """
     saved = 0
     duplicate = 0
@@ -384,8 +389,89 @@ def save_predictions(picks: list[dict]) -> dict:
 
 @mcp.tool()
 def get_pending_predictions() -> list[dict]:
-    """List all predictions where the match result hasn't been resolved yet."""
+    """Confirmed predictions awaiting match outcome — what the user is on
+    the hook for. Use `get_proposed_predictions` for the bot's pending
+    recommendations the user hasn't acted on yet."""
     return db().get_pending_predictions()
+
+
+@mcp.tool()
+def get_proposed_predictions() -> list[dict]:
+    """Picks the bot has recommended but the user hasn't confirmed or
+    skipped yet. These are the picks that should appear in the
+    'Picks à valider' validation queue on the dashboard."""
+    return db().get_proposed_predictions()
+
+
+@mcp.tool()
+def confirm_prediction_placed(
+    prediction_id: int,
+    bookmaker: str | None = None,
+    unconfirm: bool = False,
+) -> dict:
+    """
+    Confirm the user actually placed this proposed pick at their bookmaker.
+
+    THIS is when the bankroll is debited (atomically with the placement-status
+    flip). Pre-flight responsible-betting guards (stop-loss, daily cap,
+    exposure) apply here, NOT at scan time. The bot still cannot place
+    real bets — bookmakers don't expose APIs for that — so this tool just
+    records what the user did manually.
+
+    Args:
+        prediction_id: the row to confirm
+        bookmaker: optional name of the bookmaker the user placed at
+                   (stored for split-by-book ROI / CLV analytics)
+        unconfirm: set True to revert a previous confirmation (re-credits
+                   the stake and flips back to 'proposed')
+
+    Returns: dict with ok status, prediction_id, and the new placement_status.
+    """
+    try:
+        ok = db().confirm_prediction_placed(prediction_id, bookmaker, unconfirm=unconfirm)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)}
+    if not ok:
+        return {"ok": False, "reason": "not_found"}
+    return {
+        "ok": True,
+        "prediction_id": prediction_id,
+        "placement_status": "proposed" if unconfirm else "confirmed",
+        "bookmaker": bookmaker,
+    }
+
+
+@mcp.tool()
+def skip_prediction(prediction_id: int, reason: str = "user_skipped") -> dict:
+    """
+    Skip a proposed pick — user passes on the recommendation. No bankroll
+    movement. The row is kept in DB for analytics (would-have ROI on
+    skipped picks). Refused for picks already confirmed.
+    """
+    try:
+        ok = db().skip_prediction(prediction_id, reason=reason)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)}
+    if not ok:
+        return {"ok": False, "reason": "not_found"}
+    return {"ok": True, "prediction_id": prediction_id,
+            "placement_status": "skipped"}
+
+
+@mcp.tool()
+def unskip_prediction(prediction_id: int) -> dict:
+    """
+    Revert a skipped prediction back to 'proposed' — accident recovery.
+    Use when the user clicked Skip by mistake. Refused for confirmed picks.
+    """
+    try:
+        ok = db().unskip_prediction(prediction_id)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)}
+    if not ok:
+        return {"ok": False, "reason": "not_found"}
+    return {"ok": True, "prediction_id": prediction_id,
+            "placement_status": "proposed"}
 
 
 @mcp.tool()

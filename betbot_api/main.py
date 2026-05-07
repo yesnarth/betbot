@@ -299,6 +299,27 @@ def skip_prediction(
             "reason": reason}
 
 
+@app.post("/predictions/{prediction_id}/unskip")
+@limiter.limit("30/minute")
+def unskip_prediction(
+    request: Request,
+    prediction_id: int,
+    db: Database = Depends(get_db),
+    _: str = Depends(require_auth),
+) -> dict:
+    """
+    Revert a skipped pick back to 'proposed'. Useful when the user clicked
+    skip by mistake. Refused for picks already confirmed.
+    """
+    try:
+        ok = db.unskip_prediction(prediction_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Prediction {prediction_id} not found")
+    return {"prediction_id": prediction_id, "placement_status": "proposed"}
+
+
 @app.get("/predictions/proposed", response_model=list[PredictionRow])
 def proposed_predictions(
     db: Database = Depends(get_db),

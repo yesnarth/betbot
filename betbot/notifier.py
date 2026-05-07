@@ -103,9 +103,11 @@ def _build_html(
   <div style="background:#fff8e1;border-radius:10px;padding:16px;margin-bottom:16px;border-left:4px solid #ffa000;">
     <b style="color:#e65100;">Comment utiliser ces recommandations :</b>
     <ol style="margin:8px 0 0;padding-left:16px;color:#666;font-size:13px;line-height:1.8;">
-      <li>Chaque paris individuel est indépendant — tu peux jouer 1, 2 ou plusieurs</li>
+      <li>Va sur le <b>dashboard → onglet 🔔 Picks à valider</b> pour voir ces picks et :</li>
+      <li>Pour chaque pick : place-le manuellement chez ton bookmaker, puis click <b>« ✅ J'ai placé »</b> — ton solde est débité atomiquement</li>
+      <li>Ou click <b>« ❌ Skipper »</b> si tu passes — aucun mouvement de bankroll</li>
+      <li>Sinon, le pick s'auto-archive après 36h (kick-off dépassé)</li>
       <li>La mise recommandée (Kelly) est calculée pour ton capital de {bankroll:.0f}$</li>
-      <li>Pour les combinés : sélectionne les 3 matchs sur Betclic ou Bet365</li>
       <li>Vérifie toujours les cotes avant de parier (elles peuvent changer)</li>
     </ol>
   </div>
