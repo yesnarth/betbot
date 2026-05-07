@@ -274,6 +274,54 @@ def confirm_placed(
             "bookmaker": bookmaker}
 
 
+@app.post("/admin/save-pick-as-proposed")
+@limiter.limit("60/minute")
+def save_pick_as_proposed(
+    request: Request,
+    pick: dict,
+    db: Database = Depends(get_db),
+    _: str = Depends(require_auth),
+) -> dict:
+    """
+    Push a single pick (typically from /recommend/manual or /recommend/agent-local)
+    into the predictions table as 'proposed'. Same effect as if the worker
+    had generated it during a scheduled scan : the row appears in the
+    validation queue, awaiting user confirmation, with NO bankroll debit.
+
+    The pick dict must carry the keys produced by /recommend/manual :
+    event_id, sport_key, home_team, away_team, market, selection_code,
+    model_prob, best_odds, best_book, value_edge, kelly_stake.
+    Optional : lambda_home, lambda_away, model_type.
+    """
+    required = ("event_id", "sport_key", "home_team", "away_team", "market",
+                "selection_code", "model_prob", "best_odds", "best_book",
+                "value_edge", "kelly_stake")
+    missing = [k for k in required if k not in pick]
+    if missing:
+        raise HTTPException(status_code=400,
+                            detail=f"missing keys: {', '.join(missing)}")
+    ok = db.save_prediction(
+        event_id=pick["event_id"],
+        sport_key=pick["sport_key"],
+        home_team=pick["home_team"],
+        away_team=pick["away_team"],
+        market=pick["market"],
+        selection=pick["selection_code"],
+        model_prob=pick["model_prob"],
+        best_odds=pick["best_odds"],
+        best_book=pick["best_book"],
+        value_edge=pick["value_edge"],
+        kelly_stake=pick.get("kelly_stake", 0.0),
+        lambda_home=pick.get("lambda_home"),
+        lambda_away=pick.get("lambda_away"),
+        model_type=pick.get("model_type", "poisson"),
+    )
+    if not ok:
+        raise HTTPException(status_code=409, detail="duplicate (already in DB)")
+    return {"ok": True, "placement_status": "proposed",
+            "event": f"{pick['home_team']} vs {pick['away_team']}"}
+
+
 @app.post("/predictions/{prediction_id}/skip")
 @limiter.limit("30/minute")
 def skip_prediction(

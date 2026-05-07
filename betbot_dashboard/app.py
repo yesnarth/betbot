@@ -342,7 +342,12 @@ section_decision, section_matches, section_perf, section_history, section_system
 ])
 
 with section_decision:
-    st.caption("Génère des paris : scan déterministe, agent local avec règles, ou agent IA Claude.")
+    st.caption(
+        "**Aperçus de modèle** — utilise ces 3 outils pour explorer ce que le bot "
+        "trouverait MAINTENANT. Ces previews **ne sauvegardent rien par défaut**. "
+        "Pour la file de validation officielle alimentée par le worker auto, va "
+        "dans **📅 Matchs → 🔔 Picks à valider**."
+    )
     tab_scan, tab_local, tab_agent = st.tabs([
         "🎯 Scan manuel",
         "🧠 Agent local",
@@ -384,8 +389,11 @@ with section_system:
 with tab_scan:
     st.subheader("Scan manuel — modèle Dixon-Coles + xG + ELO")
     st.caption(
-        "Aucune IA. Reproductible. Gratuit (au-delà du quota Odds API). "
-        "C'est exactement le calcul que fait le worker au quotidien à 09h, 15h, 20h."
+        "Aperçu **read-only** du modèle Poisson. Le worker auto fait la même chose "
+        "à **09h00 et 20h00** (Europe/Paris) et **sauvegarde** les picks comme "
+        "« proposés » dans la file de validation. Ce bouton-ci ne sauvegarde "
+        "rien par défaut — utilise « 💾 Sauvegarder » sous le tableau si tu "
+        "veux pousser les picks vers la file de validation hors planning."
     )
 
     if st.button("▶️ Lancer le scan", type="primary", width='stretch'):
@@ -439,6 +447,45 @@ with tab_scan:
                     if res["parlays"]:
                         st.markdown("### Combinés")
                         render_parlays(res["parlays"])
+
+                    # Save-to-validation-queue : same effect as a worker scan
+                    # but on demand. Useful when the worker had no eligible
+                    # matches at 09h/20h (e.g. mid-afternoon scan after the
+                    # MIN_BEFORE_KICKOFF window has filtered everything out).
+                    st.markdown("---")
+                    st.markdown(
+                        "**💾 Pousser ces picks vers la file de validation ?** "
+                        "Ils apparaîtront dans **Matchs → 🔔 Picks à valider** "
+                        "comme s'ils venaient d'un scan worker. Le bankroll "
+                        "n'est pas débité — la confirmation reste à faire "
+                        "click-by-click sur chaque pick."
+                    )
+                    if st.button("💾 Sauvegarder ces picks comme proposés",
+                                 width='stretch'):
+                        from betbot.shared import filter_upcoming_today  # noqa: F401 — keep cohérent
+                        saved = 0
+                        already = 0
+                        errors = 0
+                        for pick in res["picks"]:
+                            try:
+                                # Use the MCP tool route via direct API call
+                                api_post("/admin/save-pick-as-proposed", json=pick)
+                                saved += 1
+                            except Exception as exc:
+                                msg = str(exc).lower()
+                                if "already" in msg or "duplicate" in msg or "409" in msg:
+                                    already += 1
+                                else:
+                                    errors += 1
+                        if saved:
+                            st.success(
+                                f"✅ {saved} pick(s) sauvegardés en 'proposed'. "
+                                f"Va dans **Matchs → 🔔 Picks à valider** pour les confirmer."
+                            )
+                        if already:
+                            st.info(f"ℹ️ {already} pick(s) déjà en DB (skipped).")
+                        if errors:
+                            st.error(f"❌ {errors} erreur(s) — voir logs API.")
 
 
 # ---------------------------------------------------------------------------
