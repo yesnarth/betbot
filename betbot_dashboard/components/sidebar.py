@@ -1,18 +1,44 @@
-"""Sidebar — KPIs, quick actions, and global filters.
+"""Sidebar — KPIs, quick actions, and scan filters.
 
-`render_sidebar(health, api_post)` returns a dict of filter values that the
-tab sections consume.
+`render_sidebar(health, agent_enabled, api_post, n_proposed)` returns the
+filter dict that the **Outils** sandbox tabs consume. The first KPI surfaces
+the actionable count of picks waiting on the user — clicking the validation
+queue tab is the natural next step.
 """
 from __future__ import annotations
 
 import streamlit as st
 
 
-def render_sidebar(health: dict, agent_enabled: bool, api_post) -> dict:
-    """Render the left-hand sidebar and return the filter selections."""
+def render_sidebar(
+    health: dict,
+    agent_enabled: bool,
+    api_post,
+    n_proposed: int = 0,
+) -> dict:
+    """Render the left-hand sidebar and return the scan filter selections."""
     with st.sidebar:
-        # ─── Section 1 : KPIs essentiels ──────────────────────────────────
-        st.header("KPIs")
+        # ─── Section 1 : Action — what to do NOW ─────────────────────────
+        st.header("Action")
+        if n_proposed > 0:
+            st.metric(
+                "Picks à valider",
+                str(n_proposed),
+                delta="action requise",
+                delta_color="inverse",
+            )
+            st.caption("Onglet **🔔 Mes picks → Picks à valider**.")
+        elif n_proposed == 0:
+            st.metric("Picks à valider", "0", delta="rien à faire")
+        else:
+            # n_proposed == -1 → API probe failed
+            st.metric("Picks à valider", "—", delta="API ?",
+                      delta_color="off")
+
+        st.divider()
+
+        # ─── Section 2 : Bankroll snapshot ───────────────────────────────
+        st.header("Bankroll")
         balance = float(health.get("balance", 0))
         available = float(health.get("available", 0))
         initial = float(health.get("bankroll_initial", 0))
@@ -74,8 +100,12 @@ def render_sidebar(health: dict, agent_enabled: bool, api_post) -> dict:
         st.divider()
 
         # ─── Section 3 : Filtres (collapsible) ──────────────────────────────
-        with st.expander("🎚️ Filtres de scan", expanded=False):
-            st.caption("S'appliquent à : **Scan manuel**, **Agent local**, **Agent IA**.")
+        with st.expander("🎚️ Filtres", expanded=False):
+            st.caption(
+                "S'appliquent **uniquement** aux outils sandbox de l'onglet "
+                "**🛠️ Outils** (Scan manuel, Agent local, Agent IA, "
+                "Matchs disponibles). Sans effet sur tes picks proposés par le worker."
+            )
             sport = st.selectbox(
                 "Ligue / Compétition",
                 options=[
