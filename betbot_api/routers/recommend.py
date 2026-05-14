@@ -102,6 +102,7 @@ def recommend_manual(
             "value_edge": b.value_edge,
             "kelly_stake": b.kelly_stake,
             "model_type": b.model_type,
+            "reliability": b.reliability,
         }
 
     picks_out = [bet_to_dict(b) for b in ranked]
@@ -228,6 +229,7 @@ def recommend_agent_local(
             "value_edge": b.value_edge,
             "kelly_stake": b.kelly_stake,
             "model_type": b.model_type,
+            "reliability": b.reliability,
             "commence_time": commence_by_id.get(b.event_id, ""),
         }
 

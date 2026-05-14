@@ -90,6 +90,7 @@ def save_pick_as_proposed(
         lambda_home=pick.lambda_home,
         lambda_away=pick.lambda_away,
         model_type=pick.model_type,
+        reliability=pick.reliability,
     )
     if not ok:
         raise HTTPException(status_code=409, detail="duplicate (already in DB)")

@@ -239,6 +239,7 @@ def run_daily_scan(
             lambda_home=bet.lambda_home,
             lambda_away=bet.lambda_away,
             model_type=bet.model_type,
+            reliability=bet.reliability,
         )
 
     # 6. Dry-run : afficher dans la console

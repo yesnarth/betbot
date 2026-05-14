@@ -452,26 +452,30 @@ def evaluate_picks(
 
         results.append(ev)
 
-    accepted = [
-        {
+    # Recompute reliability from the POST-calibration (final) edge so the
+    # score reflects the actually-recommended pick, not the raw detector
+    # output. n_matches is preserved from the raw pick (set upstream by
+    # detect_value_bets) when present.
+    from betbot.reliability import compute_reliability
+
+    def _enrich(r) -> dict:
+        rel = compute_reliability(
+            model_prob=r.final_prob,
+            value_edge=r.final_edge,
+            model_type=r.pick.get("model_type", "poisson"),
+            n_matches=r.pick.get("n_matches"),
+        )
+        return {
             **r.pick,
             "model_prob": round(r.final_prob, 4),
             "value_edge": r.final_edge,
+            "reliability": rel,
             "rationale": r.rationale,
             "status": r.status,
         }
-        for r in results if r.status in ("accepted", "flagged")
-    ]
-    rejected = [
-        {
-            **r.pick,
-            "model_prob": round(r.final_prob, 4),
-            "value_edge": r.final_edge,
-            "rationale": r.rationale,
-            "status": r.status,
-        }
-        for r in results if r.status == "rejected"
-    ]
+
+    accepted = [_enrich(r) for r in results if r.status in ("accepted", "flagged")]
+    rejected = [_enrich(r) for r in results if r.status == "rejected"]
 
     out = {
         "picks": accepted,

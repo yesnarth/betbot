@@ -47,6 +47,11 @@ class ValueBet:
     lambda_home: float | None
     lambda_away: float | None
     model_type: str      # "poisson" or "consensus"
+    # Reliability score in [0, 1] — qualifies the edge. Higher = more
+    # trustworthy. Default 1.0 so legacy callers that build ValueBet
+    # manually aren't broken; detect_value_bets populates it from
+    # betbot.reliability.compute_reliability.
+    reliability: float = 1.0
 
 
 @dataclass
@@ -337,6 +342,14 @@ def detect_value_bets(
                 if stake == 0.0:
                     continue
 
+                from betbot.reliability import compute_reliability
+                reliability = compute_reliability(
+                    model_prob=model_prob,
+                    value_edge=edge,
+                    model_type=probs.model,
+                    n_matches=probs.n_matches if probs.n_matches > 0 else None,
+                )
+
                 all_bets.append(ValueBet(
                     event_id=event_id,
                     sport_key=sport_key,
@@ -354,6 +367,7 @@ def detect_value_bets(
                     lambda_home=probs.lambda_home,
                     lambda_away=probs.lambda_away,
                     model_type=probs.model,
+                    reliability=reliability,
                 ))
 
     logger.info("Détection terminée : %d paris de valeur trouvés", len(all_bets))

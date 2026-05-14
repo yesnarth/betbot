@@ -378,6 +378,7 @@ def save_predictions(picks: list[dict]) -> dict:
             lambda_home=p.get("lambda_home"),
             lambda_away=p.get("lambda_away"),
             model_type=p.get("model_type", "poisson"),
+            reliability=p.get("reliability"),
         )
         if ok:
             saved += 1

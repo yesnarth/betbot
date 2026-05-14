@@ -194,6 +194,7 @@ class Database:
         lambda_home: float | None = None,
         lambda_away: float | None = None,
         model_type: str = "poisson",
+        reliability: float | None = None,
         enforce_funds: bool = True,  # noqa: ARG002 — kept for caller-API stability
     ) -> bool:
         """
@@ -242,6 +243,7 @@ class Database:
                     lambda_home=lambda_home,
                     lambda_away=lambda_away,
                     model_type=model_type,
+                    reliability=reliability,
                     placement_status="proposed",
                     placement_status_at=_utcnow_iso(),
                 )

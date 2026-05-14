@@ -81,6 +81,9 @@ class Prediction(Base):
     lambda_home: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     lambda_away: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     model_type: Mapped[str] = mapped_column(String, nullable=False, default="poisson")
+    # Per-pick reliability score in [0, 1] — qualifies the edge. NULL on legacy
+    # rows; new rows always set it via betbot.reliability.compute_reliability.
+    reliability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     result: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     closing_odds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     resolved_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)

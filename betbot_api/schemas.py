@@ -69,6 +69,8 @@ class ProposedPickInput(BaseModel):
     lambda_home: float | None = Field(default=None, ge=0.0, le=10.0)
     lambda_away: float | None = Field(default=None, ge=0.0, le=10.0)
     model_type: str = Field(default="poisson", max_length=32)
+    reliability: float | None = Field(default=None, ge=0.0, le=1.0,
+                                      description="0..1, qualifies value_edge")
 
 
 class PredictionRow(BaseModel):
@@ -86,6 +88,7 @@ class PredictionRow(BaseModel):
     value_edge: float
     kelly_stake: float
     model_type: str
+    reliability: float | None = None       # 0..1, qualifies value_edge
     result: str | None = None
     placement_status: str = "proposed"     # proposed | confirmed | skipped
     placement_status_at: str | None = None

@@ -94,6 +94,10 @@ class MatchProbs:
     lambda_home: float = 0.0
     lambda_away: float = 0.0
     model: str = "poisson"
+    # Min sample size across the two teams' stats — drives the reliability
+    # score on derived ValueBets. 0 when not applicable (e.g. consensus
+    # model without team-level history).
+    n_matches: int = 0
 
     def outcomes(self) -> list[tuple[str, str, float]]:
         """Return list of (code, label, prob) tuples for ALL exposed markets."""
@@ -587,4 +591,5 @@ def blended_match_probs(
         lambda_home=round(lambda_home, 4),
         lambda_away=round(lambda_away, 4),
         model="blended" if (has_xg or has_elo) else "poisson",
+        n_matches=min(home_stats.matches_analyzed, away_stats.matches_analyzed),
     )
