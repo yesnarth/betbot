@@ -146,29 +146,51 @@ services:
       PG_USER: betbot
       PG_DB: betbot
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      # Offsite backups (optional). Set BACKUP_REMOTE_TARGET to a valid rclone
+      # destination (e.g. "myremote:bucket/betbot") and mount a populated
+      # rclone.conf below to activate. Empty = local-only backups.
+      BACKUP_REMOTE_TARGET: ${BACKUP_REMOTE_TARGET:-}
+      BACKUP_REMOTE_RETENTION_DAYS: ${BACKUP_REMOTE_RETENTION_DAYS:-}
     volumes:
       - ./scripts/backup_db.sh:/usr/local/bin/backup_db.sh:ro
       - ./backups:/backups
       # Read-only mount of the shared data volume so we can tar tennis ELO,
       # basketball stats, and the ML calibrator alongside the Postgres dump.
       - betbot_data:/app/data:ro
+      # To enable offsite backups, create a docker-compose.override.yml with:
+      #   services:
+      #     backup:
+      #       volumes:
+      #         - ~/.config/rclone/rclone.conf:/root/.config/rclone/rclone.conf:ro
+      # and set BACKUP_REMOTE_TARGET in .env. See .env.example for details.
     entrypoint: ["sh", "-c"]
-    # Daily backup at 03:00 UTC (low-activity hour for European football)
-    # Loop: sleep until next 03:00 UTC, run the script, repeat.
+    # Daily backup at 03:00 UTC (low-activity hour for European football).
+    # Loop: compute seconds until next 03:00 UTC using pure busybox-portable
+    # shell arithmetic — `date -d "today 03:00"` is GNU-only and silently
+    # produces a negative sleep on Alpine, which causes a tight loop. The
+    # current approach is portable and verifiable.
     command:
       - |
+        # Install rclone for optional offsite backup (BACKUP_REMOTE_TARGET).
+        # ~14MB; idempotent — apk add --no-cache is fast on re-runs.
+        if [ -n "$$BACKUP_REMOTE_TARGET" ] && ! command -v rclone >/dev/null 2>&1; then
+          echo "[backup] Installing rclone for offsite backups…"
+          apk add --no-cache rclone >/dev/null 2>&1 || echo "[backup] rclone install failed — offsite disabled"
+        fi
         chmod +x /usr/local/bin/backup_db.sh
         echo "[backup] Daemon started — will run at 03:00 UTC daily"
+        target_hour=3
         while true; do
-          # Sleep until next 03:00 UTC
-          now_epoch=$$(date -u +%s)
-          target_epoch=$$(date -u -d "today 03:00" +%s 2>/dev/null || date -u +%s -d "1970-01-01 $$( $$(date -u +%s) / 86400 * 86400 + 10800) seconds")
-          if [ $$now_epoch -ge $$target_epoch ]; then
-            target_epoch=$$((target_epoch + 86400))
+          # Seconds since UTC midnight → seconds until next 03:00 UTC.
+          secs_today=$$(( $$(date -u +%H) * 3600 + $$(date -u +%M) * 60 + $$(date -u +%S) ))
+          target_secs=$$(( target_hour * 3600 ))
+          if [ "$$secs_today" -lt "$$target_secs" ]; then
+            sleep_for=$$(( target_secs - secs_today ))
+          else
+            sleep_for=$$(( 86400 - secs_today + target_secs ))
           fi
-          sleep_for=$$((target_epoch - now_epoch))
-          echo "[backup] Sleeping $${sleep_for}s until next run"
-          sleep $$sleep_for
+          echo "[backup] Sleeping $${sleep_for}s until next run (UTC $$(date -u +%Y-%m-%dT%H:%M:%S))"
+          sleep "$$sleep_for"
           /usr/local/bin/backup_db.sh || echo "[backup] Run failed — will retry tomorrow"
         done
 

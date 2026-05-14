@@ -113,9 +113,11 @@ def train_calibrator(min_samples: int = MIN_SAMPLES_TO_TRUST) -> dict:
         "n_samples": len(samples),
         "brier_before": round(brier_before, 4),
         "brier_after": round(brier_after, 4),
+        "source": "resolved_bets",
     }
     CALIBRATOR_PATH.parent.mkdir(parents=True, exist_ok=True)
     CALIBRATOR_PATH.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+    reset_cache()
     logger.info(
         "Calibrator trained on %d samples, Brier %.4f → %.4f, saved to %s",
         len(samples), brier_before, brier_after, CALIBRATOR_PATH,
@@ -126,6 +128,129 @@ def train_calibrator(min_samples: int = MIN_SAMPLES_TO_TRUST) -> dict:
         "path": str(CALIBRATOR_PATH),
         "brier_before": round(brier_before, 4),
         "brier_after": round(brier_after, 4),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cold-start training
+# ---------------------------------------------------------------------------
+
+# Default leagues to combine for cold-start. We pick the 5 biggest European
+# leagues — they share enough match dynamics that a combined isotonic fit
+# transfers reasonably well to other leagues, and they have plenty of
+# football-data.org history.
+DEFAULT_COLD_START_LEAGUES = (
+    "soccer_epl",
+    "soccer_spain_la_liga",
+    "soccer_germany_bundesliga",
+    "soccer_italy_serie_a",
+    "soccer_france_ligue1",
+)
+
+
+def cold_start_train(
+    fd_api_key: str,
+    sport_keys: tuple[str, ...] = DEFAULT_COLD_START_LEAGUES,
+    n_per_sport: int = 150,
+) -> dict:
+    """
+    Bootstrap the calibrator from synthetic predictions on historical matches.
+
+    Walk-forward backtest produces (model_prob, won) pairs that look exactly
+    like real resolved bets — feeds the same isotonic regression. Used on
+    fresh installs where the user hasn't placed enough real bets yet to
+    train the calibrator from live data.
+
+    Once the user accumulates >= MIN_SAMPLES_TO_TRUST real resolved bets,
+    the weekly scheduled `train_calibrator()` job takes over and overwrites
+    the cold-start file with a "real" fit.
+
+    Returns a status dict :
+      - trained         : bool — calibrator file written?
+      - n_samples       : total (model_prob, won) pairs from all leagues
+      - per_league      : dict {sport_key: n_samples}
+      - brier_before    : training Brier of the raw probabilities
+      - brier_after     : training Brier of the calibrated probabilities
+    """
+    from betbot.backtest import run_backtest
+
+    all_samples: list[tuple[float, int]] = []
+    per_league: dict[str, int] = {}
+    notes: list[str] = []
+
+    for sport in sport_keys:
+        try:
+            r = run_backtest(sport, fd_api_key, n_holdout=n_per_sport,
+                             use_enrichment=False)
+        except Exception as exc:
+            notes.append(f"{sport}: error {exc}")
+            per_league[sport] = 0
+            continue
+        if r.n_matches == 0:
+            notes.append(f"{sport}: skipped ({r.notes})")
+            per_league[sport] = 0
+            continue
+        all_samples.extend(r.samples)
+        per_league[sport] = len(r.samples)
+        notes.append(f"{sport}: {r.n_matches} matchs → {len(r.samples)} samples")
+
+    if len(all_samples) < MIN_SAMPLES_TO_TRUST:
+        return {
+            "trained": False,
+            "n_samples": len(all_samples),
+            "per_league": per_league,
+            "reason": f"only {len(all_samples)} samples after backtests across "
+                      f"{len(sport_keys)} leagues — need {MIN_SAMPLES_TO_TRUST}",
+            "notes": notes,
+        }
+
+    try:
+        from sklearn.isotonic import IsotonicRegression
+    except ImportError as exc:
+        return {
+            "trained": False, "n_samples": len(all_samples),
+            "per_league": per_league,
+            "reason": f"sklearn unavailable: {exc}",
+        }
+
+    probs = [s[0] for s in all_samples]
+    outcomes = [s[1] for s in all_samples]
+    brier_before = sum((p - y) ** 2 for p, y in all_samples) / len(all_samples)
+
+    iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+    iso.fit(probs, outcomes)
+    calibrated = iso.predict(probs)
+    brier_after = sum((c - y) ** 2 for c, y in zip(calibrated, outcomes)) / len(all_samples)
+
+    payload = {
+        "format": "isotonic-thresholds-v1",
+        "x_thresholds": iso.X_thresholds_.tolist(),
+        "y_thresholds": iso.y_thresholds_.tolist(),
+        "y_min": 0.0,
+        "y_max": 1.0,
+        "trained_at": datetime.now(timezone.utc).isoformat(),
+        "n_samples": len(all_samples),
+        "brier_before": round(brier_before, 4),
+        "brier_after": round(brier_after, 4),
+        "source": "cold_start_backtest",
+        "per_league": per_league,
+    }
+    CALIBRATOR_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CALIBRATOR_PATH.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+    reset_cache()
+    logger.info(
+        "Cold-start calibrator trained on %d samples across %d leagues, "
+        "Brier %.4f → %.4f",
+        len(all_samples), len(sport_keys), brier_before, brier_after,
+    )
+    return {
+        "trained": True,
+        "n_samples": len(all_samples),
+        "per_league": per_league,
+        "path": str(CALIBRATOR_PATH),
+        "brier_before": round(brier_before, 4),
+        "brier_after": round(brier_after, 4),
+        "notes": notes,
     }
 
 
@@ -153,6 +278,7 @@ def _load_calibrator():
             list(payload["x_thresholds"]),
             list(payload["y_thresholds"]),
             payload.get("trained_at", "?"),
+            payload.get("source", "resolved_bets"),
         )
         return _cached_calibrator
     except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
@@ -180,7 +306,7 @@ def calibrate(prob: float) -> float:
     cal = _load_calibrator()
     if cal is None:
         return prob
-    x_t, y_t, _ = cal
+    x_t, y_t, _, _ = cal
     if not x_t or not y_t:
         return prob
     try:
@@ -193,13 +319,14 @@ def calibrate(prob: float) -> float:
 
 
 def calibrator_status() -> dict:
-    """Diagnostic: is the calibrator present, and from when."""
+    """Diagnostic: is the calibrator present, from when, and its source."""
     cal = _load_calibrator()
     if cal is None:
         return {"available": False, "path": str(CALIBRATOR_PATH)}
-    _, _, trained_at = cal
+    _, _, trained_at, source = cal
     return {
         "available": True,
         "path": str(CALIBRATOR_PATH),
         "trained_at": trained_at,
+        "source": source,  # "resolved_bets" | "cold_start_backtest"
     }

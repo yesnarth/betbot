@@ -57,6 +57,46 @@ else
   echo "[backup] Data volume skipped (empty or missing)"
 fi
 
+# ── 3. Offsite copy (optional) ───────────────────────────────────────────
+# If BACKUP_REMOTE_TARGET is set, push fresh backups offsite via rclone. The
+# user picks any rclone-supported backend (S3, B2, GDrive, Dropbox, SFTP,
+# ...) by mounting their rclone.conf in /root/.config/rclone/rclone.conf
+# and setting BACKUP_REMOTE_TARGET=remote:bucket/path .
+#
+# Local backups remain authoritative — a failure here logs a warning but
+# never aborts the daily cycle. Disk-resident copies are still good.
+if [ -n "${BACKUP_REMOTE_TARGET:-}" ]; then
+  if command -v rclone >/dev/null 2>&1; then
+    echo "[backup] Offsite copy → ${BACKUP_REMOTE_TARGET}"
+    # Push only the two files we just created (not the full BACKUP_DIR) —
+    # the retention step below handles old-file pruning locally.
+    if rclone copy "$sql_file" "$BACKUP_REMOTE_TARGET" --no-traverse 2>&1; then
+      echo "[backup] Offsite Postgres OK"
+    else
+      echo "[backup] WARN — offsite Postgres upload failed (exit $?)"
+    fi
+    if [ -f "${data_file:-}" ]; then
+      if rclone copy "$data_file" "$BACKUP_REMOTE_TARGET" --no-traverse 2>&1; then
+        echo "[backup] Offsite data volume OK"
+      else
+        echo "[backup] WARN — offsite data volume upload failed (exit $?)"
+      fi
+    fi
+    # Optional remote retention: drop files older than BACKUP_REMOTE_RETENTION_DAYS.
+    # Use a slightly larger window than local retention so the remote is the
+    # belt-and-suspenders copy. Skip if unset.
+    if [ -n "${BACKUP_REMOTE_RETENTION_DAYS:-}" ]; then
+      echo "[backup] Pruning offsite copies older than ${BACKUP_REMOTE_RETENTION_DAYS}d"
+      rclone delete "$BACKUP_REMOTE_TARGET" \
+        --min-age "${BACKUP_REMOTE_RETENTION_DAYS}d" \
+        --include 'betbot_*.sql.gz' --include 'data_*.tar.gz' 2>&1 || \
+        echo "[backup] WARN — offsite prune failed (non-fatal)"
+    fi
+  else
+    echo "[backup] WARN — BACKUP_REMOTE_TARGET set but rclone not installed; skipping offsite"
+  fi
+fi
+
 # ── Retention: delete files older than RETENTION_DAYS ────────────────────
 find "$BACKUP_DIR" -maxdepth 1 -name 'betbot_*.sql.gz' -mtime "+${RETENTION_DAYS}" -delete
 find "$BACKUP_DIR" -maxdepth 1 -name 'data_*.tar.gz'   -mtime "+${RETENTION_DAYS}" -delete

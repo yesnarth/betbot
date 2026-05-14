@@ -179,6 +179,49 @@ def render_calibrator_tab() -> None:
             "En attendant, le système utilise les probabilités brutes du modèle.".format(min_samples),
         )
 
+    # Cold-start bootstrap — always available, useful on fresh installs
+    st.divider()
+    st.markdown("### 🚀 Démarrage à froid")
+    st.caption(
+        "Sur une installation fraîche tu n'as aucun pari résolu, donc le "
+        "calibrateur reste inactif pendant des semaines. Cette action lance "
+        "un backtest walk-forward sur les 5 grandes ligues européennes et "
+        "entraîne le calibrateur sur les prédictions synthétiques produites. "
+        "Le calibrateur sera **opérationnel immédiatement** ; le job hebdo "
+        "écrasera plus tard cette version avec un fit basé sur tes vrais paris."
+    )
+    if cal_status.get("available") and cal_status.get("source", "") != "cold_start_backtest":
+        st.info(
+            "✓ Un calibrateur est déjà fitté sur tes vrais paris — le cold-start "
+            "n'est pas recommandé (il remplacerait le fit réel par un fit synthétique).",
+            icon="ℹ️",
+        )
+    if st.button("🚀 Initialiser depuis l'historique (5 ligues, ~30-60 s)"):
+        with st.spinner("Backtests EPL/Liga/Bundesliga/Serie A/Ligue 1 + fit…"):
+            try:
+                result = api_post("/ml/calibrator/cold-start")
+            except Exception as exc:
+                st.error(f"Erreur : {exc}")
+                result = None
+        if result:
+            if result.get("trained"):
+                st.success(
+                    f"✅ Calibrateur initialisé sur {result['n_samples']} "
+                    f"prédictions synthétiques. "
+                    f"Brier : **{result['brier_before']} → {result['brier_after']}**"
+                )
+                per_league = result.get("per_league", {})
+                if per_league:
+                    st.markdown("**Échantillons par ligue :**")
+                    for sport, n in per_league.items():
+                        st.markdown(f"- `{sport}` : {n} samples")
+            else:
+                st.warning(f"Cold-start annulé : {result.get('reason')}")
+                if result.get("notes"):
+                    with st.expander("Détails par ligue"):
+                        for note in result["notes"]:
+                            st.text(note)
+
 
 def render_tennis_tab(health: dict) -> None:
     st.subheader("🎾 Modèle tennis — ELO surface-aware")

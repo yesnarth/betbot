@@ -30,6 +30,7 @@ from betbot_dashboard.sections.matches import (
     render_pending_tab,
     render_validate_tab,
 )
+from betbot_dashboard.sections.backtest import render_backtest_tab
 from betbot_dashboard.sections.performance import (
     render_capital_tab,
     render_roi_tab,
@@ -118,13 +119,16 @@ with section_matches:
         render_pending_tab()
 
 with section_perf:
-    st.caption("ROI, hit rate, CLV et gestion du bankroll.")
-    tab_roi, tab_capital = st.tabs([
+    st.caption("ROI live + qualité du modèle (backtest) + gestion du bankroll.")
+    tab_roi, tab_backtest, tab_capital = st.tabs([
         "📊 ROI / Performance",
+        "🧪 Backtest",
         "💰 Capital",
     ])
     with tab_roi:
         render_roi_tab()
+    with tab_backtest:
+        render_backtest_tab()
     with tab_capital:
         render_capital_tab()
 

@@ -1,0 +1,25 @@
+# docker-compose.override.yml.example
+# ------------------------------------------------------------------------
+# Copy this file to `docker-compose.override.yml` to enable offsite backups
+# via rclone. Docker Compose auto-loads `docker-compose.override.yml` on top
+# of `docker-compose.yml` — your secrets and per-host overrides live here.
+#
+# Workflow:
+#   1. Install rclone on your host: https://rclone.org/install/
+#   2. Configure your remote (interactive):  rclone config
+#      Picks an existing remote provider (B2, S3, Drive, ...) and stores the
+#      credentials in ~/.config/rclone/rclone.conf
+#   3. Copy this file:   cp docker-compose.override.yml.example docker-compose.override.yml
+#   4. Adjust the rclone.conf path below if yours lives elsewhere
+#   5. Set BACKUP_REMOTE_TARGET in .env (e.g. "b2-betbot:bucket/path/")
+#   6. Restart the backup container:   docker compose up -d backup
+#
+# The backup script is forgiving — local backups continue even if the
+# offsite push fails, so a misconfigured rclone won't lose you a backup.
+# ------------------------------------------------------------------------
+
+services:
+  backup:
+    volumes:
+      # Adjust the source path if your rclone.conf is somewhere else.
+      - ~/.config/rclone/rclone.conf:/root/.config/rclone/rclone.conf:ro

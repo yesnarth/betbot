@@ -207,6 +207,39 @@ class BankrollLedgerRow(BaseModel):
     note: str | None = None
 
 
+class BacktestRequest(BaseModel):
+    """POST body for /backtest/run.
+
+    Walk-forward backtest of the model on historical matches. Currently only
+    football leagues mapped in `LEAGUE_MAP` are supported.
+    """
+    sport_key: str = Field(..., min_length=1, max_length=64)
+    n_holdout: int = Field(default=100, ge=20, le=500,
+                           description="Number of most-recent matches to score (walk-forward).")
+    use_enrichment: bool = Field(
+        default=False,
+        description="Snapshot ELO/xG (look-ahead bias — gives optimistic bound).",
+    )
+
+
+class BacktestCalibrationBucket(BaseModel):
+    range: str
+    n_samples: int
+    predicted_avg: float
+    actual_avg: float
+    abs_error: float
+
+
+class BacktestResponse(BaseModel):
+    sport_key: str
+    n_matches: int
+    brier_score: float          # 0 = perfect, ~0.667 = baseline 1/3
+    log_loss: float
+    calibration: list[BacktestCalibrationBucket]
+    notes: str
+    duration_seconds: float
+
+
 class LocalAgentResponse(BaseModel):
     picks: list[dict[str, Any]]
     rejected: list[dict[str, Any]]

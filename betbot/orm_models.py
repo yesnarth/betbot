@@ -255,3 +255,29 @@ class BankrollEntry(Base):
         nullable=True,  # index defined explicitly in __table_args__ above
     )
     note: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
+class IdempotencyKey(Base):
+    """
+    Client-provided idempotency keys for mutating endpoints.
+
+    The key is supplied by the caller via the `Idempotency-Key` header. On
+    first request we record the response body + status code; subsequent
+    requests with the same key replay the cached response without re-running
+    the underlying mutation. Two different request bodies under the same key
+    are rejected (409 Conflict) — protects against accidental key reuse.
+
+    Used for bankroll deposit / withdraw where a network glitch + retry
+    could otherwise produce a double mutation.
+    """
+    __tablename__ = "idempotency_keys"
+    __table_args__ = (
+        Index("ix_idempotency_created_at", "created_at"),
+    )
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    endpoint: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    response_json: Mapped[str] = mapped_column(Text, nullable=False)
+    status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)

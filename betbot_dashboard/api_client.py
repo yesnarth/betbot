@@ -18,7 +18,19 @@ def api_get(path: str, **params: Any) -> Any:
     return r.json()
 
 
-def api_post(path: str, json: dict | None = None, **params: Any) -> Any:
-    r = httpx.post(f"{API_URL}{path}", params=params, json=json, auth=AUTH, timeout=180)
+def api_post(
+    path: str,
+    json: dict | None = None,
+    headers: dict[str, str] | None = None,
+    **params: Any,
+) -> Any:
+    r = httpx.post(
+        f"{API_URL}{path}",
+        params=params,
+        json=json,
+        headers=headers,
+        auth=AUTH,
+        timeout=180,
+    )
     r.raise_for_status()
     return r.json()

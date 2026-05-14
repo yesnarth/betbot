@@ -115,10 +115,28 @@ def render_capital_tab() -> None:
         else:
             st.line_chart(df["balance"], height=260)
 
-    # Deposit / withdraw
+    # Deposit / withdraw — idempotency-protected
     st.divider()
     st.markdown("### Mouvements manuels")
-    st.caption("Saisis un montant > 0 puis valide. Le solde est mis à jour immédiatement.")
+    st.caption(
+        "Saisis un montant > 0 puis valide. Un double-clic ou retry après glitch "
+        "réseau est neutralisé par une clé d'idempotency dérivée du formulaire — "
+        "le serveur replay sans rejouer la mutation. Pour redéposer le MÊME "
+        "montant dans la même session, recharge la page."
+    )
+    # Deterministic idempotency key per (session, endpoint, amount, note). Two
+    # clicks with the same form values reuse the same key → server replays.
+    # Page refresh = new salt = new key, so the user can legitimately re-do
+    # the same deposit in a later session.
+    import hashlib
+    import uuid
+    if "idem_salt" not in st.session_state:
+        st.session_state.idem_salt = uuid.uuid4().hex
+
+    def _idem_key(endpoint: str, amount: float, note: str | None) -> str:
+        material = f"{st.session_state.idem_salt}:{endpoint}:{amount:.2f}:{note or ''}"
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()[:64]
+
     c3 = st.columns([1, 1, 2])
     with c3[0]:
         dep_amt = st.number_input("Montant dépôt ($)", min_value=0.0,
@@ -126,8 +144,12 @@ def render_capital_tab() -> None:
         dep_note = st.text_input("Note dépôt", placeholder="ex : recharge mensuelle")
         if st.button("➕ Déposer", width='stretch', disabled=(dep_amt <= 0)):
             try:
-                api_post("/bankroll/deposit",
-                         json={"amount": dep_amt, "note": dep_note or None})
+                api_post(
+                    "/bankroll/deposit",
+                    json={"amount": dep_amt, "note": dep_note or None},
+                    headers={"Idempotency-Key": _idem_key(
+                        "bankroll/deposit", dep_amt, dep_note)},
+                )
                 st.success(f"+{dep_amt:.2f}$ déposés. Recharge la page.")
             except Exception as exc:
                 st.error(f"Erreur : {exc}")
@@ -137,8 +159,12 @@ def render_capital_tab() -> None:
         wd_note = st.text_input("Note retrait", placeholder="ex : retrait gains")
         if st.button("➖ Retirer", width='stretch', disabled=(wd_amt <= 0)):
             try:
-                api_post("/bankroll/withdraw",
-                         json={"amount": wd_amt, "note": wd_note or None})
+                api_post(
+                    "/bankroll/withdraw",
+                    json={"amount": wd_amt, "note": wd_note or None},
+                    headers={"Idempotency-Key": _idem_key(
+                        "bankroll/withdraw", wd_amt, wd_note)},
+                )
                 st.success(f"-{wd_amt:.2f}$ retirés. Recharge la page.")
             except Exception as exc:
                 st.error(f"Erreur : {exc}")

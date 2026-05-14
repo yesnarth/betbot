@@ -27,6 +27,9 @@ from betbot_api.auth import require_auth
 from betbot_api.schemas import (
     AgentFilters,
     AgentResponse,
+    BacktestCalibrationBucket,
+    BacktestRequest,
+    BacktestResponse,
     BankrollLedgerRow,
     BankrollMutation,
     BankrollSnapshot,
@@ -439,27 +442,45 @@ def ab_test(
     )
 
 
-@app.post("/stats/backtest")
+@app.post("/stats/backtest", response_model=BacktestResponse)
+@limiter.limit("5/minute")
 def backtest(
-    sport_key: str = Query(..., description="Sport key (e.g. soccer_epl)"),
-    n_holdout: int = Query(default=100, ge=20, le=500),
+    request: Request,
+    body: BacktestRequest,
     _: str = Depends(require_auth),
-) -> dict:
+) -> BacktestResponse:
     """
-    Run a Brier-score / log-loss / calibration backtest on recent matches.
-    Synchronous: takes 5-15 s depending on the league size.
+    Walk-forward backtest on the most-recent matches of the given league.
+
+    Returns Brier score, log-loss, and calibration buckets. Synchronous —
+    typically 5-15 s depending on league size. Rate-limited to 5/min to
+    protect the football-data.org quota.
+
+    `use_enrichment=True` snapshots today's ELO/xG and applies them to
+    historical predictions — gives an OPTIMISTIC upper bound but introduces
+    look-ahead bias. Default OFF (strict walk-forward).
     """
+    import time
     from betbot.backtest import run_backtest
+
     s = load_settings()
-    result = run_backtest(sport_key, s.football_data_api_key, n_holdout)
-    return {
-        "sport_key": result.sport_key,
-        "n_matches": result.n_matches,
-        "brier_score": result.brier_score,
-        "log_loss": result.log_loss,
-        "calibration": result.calibration,
-        "notes": result.notes,
-    }
+    t0 = time.monotonic()
+    result = run_backtest(
+        body.sport_key,
+        s.football_data_api_key,
+        n_holdout=body.n_holdout,
+        use_enrichment=body.use_enrichment,
+    )
+    duration = round(time.monotonic() - t0, 2)
+    return BacktestResponse(
+        sport_key=result.sport_key,
+        n_matches=result.n_matches,
+        brier_score=result.brier_score,
+        log_loss=result.log_loss,
+        calibration=[BacktestCalibrationBucket(**b) for b in result.calibration],
+        notes=result.notes,
+        duration_seconds=duration,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -942,6 +963,28 @@ def ml_calibrator_train(
     return result
 
 
+@app.post("/ml/calibrator/cold-start")
+@limiter.limit("2/minute")  # protects football-data.org quota
+def ml_calibrator_cold_start(
+    request: Request,
+    _: str = Depends(require_auth),
+) -> dict:
+    """
+    Bootstrap the calibrator from historical backtests on 5 major leagues.
+
+    Use this on fresh installs to skip the 50-bet warm-up : the calibrator
+    is fitted on synthetic (model_prob, won) pairs drawn from walk-forward
+    backtests instead of real placed bets. Once enough real bets accumulate,
+    the regular `train_calibrator()` job overwrites this cold-start fit.
+
+    Slow (~30-60 s) because it runs 5 backtests sequentially. Rate-limited
+    to 2/min.
+    """
+    from betbot.ml import cold_start_train
+    s = load_settings()
+    return cold_start_train(s.football_data_api_key)
+
+
 # ---------------------------------------------------------------------------
 # Tennis ELO ratings
 # ---------------------------------------------------------------------------
@@ -1137,10 +1180,27 @@ def bankroll_deposit(
     body: BankrollMutation,
     _: str = Depends(require_auth),
 ) -> BankrollSnapshot:
-    """Add capital. The amount is always positive."""
+    """Add capital. The amount is always positive.
+
+    Supports `Idempotency-Key` header: same key + same body within the
+    retention window returns the cached response without re-debiting.
+    """
     from betbot.bankroll import deposit
+    from betbot.idempotency import IdempotencyConflict, lookup, record
+
+    idem_key = request.headers.get("Idempotency-Key")
+    body_payload = body.model_dump()
+    try:
+        cached = lookup(idem_key, "bankroll/deposit", body_payload)
+    except IdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if cached is not None:
+        return BankrollSnapshot(**cached.response)
+
     s = deposit(body.amount, note=body.note)
-    return BankrollSnapshot(**s.__dict__)
+    response = s.__dict__
+    record(idem_key, "bankroll/deposit", body_payload, response, status_code=200)
+    return BankrollSnapshot(**response)
 
 
 @app.post("/bankroll/withdraw", response_model=BankrollSnapshot)
@@ -1150,13 +1210,29 @@ def bankroll_withdraw(
     body: BankrollMutation,
     _: str = Depends(require_auth),
 ) -> BankrollSnapshot:
-    """Remove capital. Refuses if the available balance is insufficient."""
+    """Remove capital. Refuses if the available balance is insufficient.
+
+    Supports `Idempotency-Key` header (see /bankroll/deposit).
+    """
     from betbot.bankroll import InsufficientFundsError, withdraw
+    from betbot.idempotency import IdempotencyConflict, lookup, record
+
+    idem_key = request.headers.get("Idempotency-Key")
+    body_payload = body.model_dump()
+    try:
+        cached = lookup(idem_key, "bankroll/withdraw", body_payload)
+    except IdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if cached is not None:
+        return BankrollSnapshot(**cached.response)
+
     try:
         s = withdraw(body.amount, note=body.note)
     except InsufficientFundsError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return BankrollSnapshot(**s.__dict__)
+    response = s.__dict__
+    record(idem_key, "bankroll/withdraw", body_payload, response, status_code=200)
+    return BankrollSnapshot(**response)
 
 
 @app.get("/bankroll/history", response_model=list[BankrollLedgerRow])

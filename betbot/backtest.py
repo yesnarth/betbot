@@ -64,6 +64,11 @@ class BacktestResult:
     log_loss: float
     calibration: list[CalibrationBucket] = field(default_factory=list)
     notes: str = ""
+    # Raw (model_prob, won_in_{0,1}) pairs across home/draw/away predictions.
+    # Excluded from the HTTP response schema; consumed internally by the
+    # cold-start calibration trainer. Empty for callers that only need
+    # aggregated metrics.
+    samples: list[tuple[float, int]] = field(default_factory=list)
 
 
 def _outcome_index(home_goals: int, away_goals: int) -> int:
@@ -258,6 +263,7 @@ def run_backtest(
         log_loss=round(log_loss_total / n_scored, 4),
         calibration=calibration,
         notes=notes,
+        samples=samples_home + samples_draw + samples_away,
     )
 
 
