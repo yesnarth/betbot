@@ -59,6 +59,9 @@ Caddy automatically:
 
 ## Operations
 
+For diagnostics, migration rollback, backup restore, and emergency recovery
+see [docs/RUNBOOK.md](docs/RUNBOOK.md).
+
 | Action | Command |
 |---|---|
 | Run scan + email | `make scan` |

@@ -53,6 +53,44 @@ def render_roi_tab() -> None:
             "moins de 30 min)."
         )
 
+    # CLV data-quality view — distinguishes 'pending snap window' from
+    # 'permanently missed' so the user can see when there's a real gap
+    # rather than a silent NaN
+    try:
+        cov = api_get("/stats/clv-coverage", days=period)
+    except Exception:
+        cov = None
+    if cov and cov.get("n_total_confirmed", 0) > 0:
+        st.divider()
+        st.markdown("#### Couverture CLV")
+        ccols = st.columns(4)
+        coverage = cov["coverage_pct"]
+        coverage_color = "normal" if coverage >= 80 else ("off" if coverage >= 50 else "inverse")
+        ccols[0].metric("Paris confirmés", cov["n_total_confirmed"])
+        ccols[1].metric(
+            "Couverture", f"{coverage:.0f}%",
+            delta=("OK" if coverage >= 80
+                   else "faible" if coverage >= 50
+                   else "trous"),
+            delta_color=coverage_color,
+        )
+        ccols[2].metric("En attente snap", cov["n_pending_clv"],
+                        help="Match à venir ou tout juste démarré — snap "
+                             "toujours possible.")
+        ccols[3].metric(
+            "Manqués",
+            cov["n_missed_clv"],
+            delta="OK" if cov["n_missed_clv"] == 0 else None,
+            delta_color="normal" if cov["n_missed_clv"] == 0 else "inverse",
+            help="Confirmé depuis > 7 jours, jamais snappé. "
+                 "Odds API indisponible au moment du kickoff.",
+        )
+        if cov["n_missed_clv"] > 0:
+            st.caption(
+                f"⚠ {cov['n_missed_clv']} pari(s) sans closing odds — "
+                f"vérifier la santé d'Odds API dans Système → Sources."
+            )
+
 
 def render_capital_tab() -> None:
     st.subheader("💰 Gestion du capital")

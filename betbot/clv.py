@@ -11,10 +11,22 @@ market corrects them — the most reliable indicator of a winning long-term bett
 even more than short-term ROI.
 
 Implementation:
-  - Pre-kickoff job (T-15 min) snapshots the best odds for each pending
-    prediction's outcome and writes it to `predictions.closing_odds`.
+  - Snapshot job runs every 10 min (scheduler). For each confirmed pending
+    prediction, snapshots the best odds if `now` is in
+      [kickoff - 30 min,  kickoff + 10 min]
+    The post-kickoff window catches the case where Odds API was down during
+    the entire pre-kickoff window — for sports where the API still serves
+    in-play odds, the immediate-post-start snap is a very good proxy.
+  - LATEST snap wins: a later (closer-to-kickoff) snap replaces an earlier
+    one, so we always store the most accurate available value.
   - At resolve time, CLV is derived directly from the column.
   - Aggregate CLV is exposed alongside ROI in /stats/roi.
+
+Data quality:
+  closing_odds=None can mean 3 things — still pending, kickoff window passed
+  without ever catching odds, or the match itself was filtered out by the
+  Odds API. The `missed_clv_count` helper distinguishes these for the
+  dashboard.
 """
 from __future__ import annotations
 
@@ -45,33 +57,51 @@ def _outcome_name(pred: Prediction) -> str:
     return pred.home_team if code == "1" else pred.away_team
 
 
+# Snap window relative to kickoff. The pre-window has to cover at least 3
+# cron firings (we run every 10 min) so a single API blip doesn't lose the
+# match. The post-window catches the "API was down the entire pre-window"
+# case for sports where in-play odds are still served.
+PRE_KICKOFF_WINDOW_MINUTES = 30
+POST_KICKOFF_GRACE_MINUTES = 10
+
+
 def snapshot_closing_odds(
     odds_client: OddsAPIClient,
-    minutes_window: int = 30,
+    pre_window_min: int = PRE_KICKOFF_WINDOW_MINUTES,
+    post_window_min: int = POST_KICKOFF_GRACE_MINUTES,
 ) -> dict[str, int]:
     """
-    For each pending prediction whose match starts within `minutes_window`
-    minutes, fetch the latest best odds and store as `closing_odds`.
+    For each confirmed pending prediction whose match is in the snap window
+    [kickoff - pre_window_min,  kickoff + post_window_min], fetch the latest
+    best odds and store as `closing_odds`.
 
-    Designed to run every 5-15 minutes from the scheduler — idempotent
-    (only writes when closing_odds is still NULL).
+    Designed to run every 5-15 minutes from the scheduler. Multiple snaps
+    per prediction are allowed: the LATEST one wins, so the closing_odds
+    column converges to the closest-to-kickoff value the API actually
+    served. Once the post-window expires the column is frozen.
     """
     now = datetime.now(timezone.utc)
-    horizon = now + timedelta(minutes=minutes_window)
-
-    counts = {"checked": 0, "snapped": 0, "missing_event": 0, "errors": 0}
+    counts = {
+        "checked": 0,
+        "snapped": 0,
+        "updated": 0,        # snap overwrote an earlier snap (closer to kickoff)
+        "missing_event": 0,  # Odds API didn't serve the event in this cycle
+        "errors": 0,
+    }
 
     with session_scope() as s:
         # CLV is the closing line value of an actually-placed bet vs the
         # final book price. It only makes sense for picks the user has
         # CONFIRMED at the bookmaker. Snapshotting odds for 'proposed'
         # (unconfirmed) or 'skipped' picks would burn Odds API quota for
-        # data we'll never use — at the rate of 1 req per sport_key per
-        # 10 min cycle. Filter to confirmed only.
+        # data we'll never use.
+        # Note: closing_odds may already be SET — we still pick up the row
+        # if we're still in the pre-window, because a later snap is closer
+        # to kickoff and therefore more accurate. Filter for "still pending
+        # result" only — once resolved, closing_odds is frozen.
         pending = s.execute(
             select(Prediction).where(
                 Prediction.result.is_(None),
-                Prediction.closing_odds.is_(None),
                 Prediction.placement_status == "confirmed",
             )
         ).scalars().all()
@@ -100,17 +130,26 @@ def snapshot_closing_odds(
 
         for pred in preds:
             counts["checked"] += 1
+            commence = ""
             event = events_by_id.get(pred.event_id)
-            if not event:
-                counts["missing_event"] += 1
-                continue
-            commence = event.get("commence_time", "")
+            if event:
+                commence = event.get("commence_time", "")
             try:
-                kickoff = datetime.fromisoformat(commence.replace("Z", "+00:00"))
+                kickoff = datetime.fromisoformat(commence.replace("Z", "+00:00")) if commence else None
             except (ValueError, TypeError):
+                kickoff = None
+
+            if not kickoff:
+                if not event:
+                    counts["missing_event"] += 1
                 continue
-            # Only snapshot when within the window
-            if not (now <= kickoff <= horizon):
+
+            mins_to_kickoff = (kickoff - now).total_seconds() / 60.0
+            # mins_to_kickoff > 0  → kickoff in the future
+            # mins_to_kickoff < 0  → kickoff already happened
+            in_pre_window = 0 <= mins_to_kickoff <= pre_window_min
+            in_post_window = -post_window_min <= mins_to_kickoff < 0
+            if not (in_pre_window or in_post_window):
                 continue
 
             best = extract_best_odds(event, _outcome_name(pred))
@@ -119,21 +158,90 @@ def snapshot_closing_odds(
 
             with session_scope() as s:
                 fresh = s.get(Prediction, pred.id)
-                if fresh is None or fresh.closing_odds is not None:
-                    continue  # already snapped by another run
+                if fresh is None:
+                    continue
+                # If we already have a closing_odds value and we're now in
+                # the POST-kickoff grace, only update when the new price
+                # differs significantly — avoid noisy mid-flight overwrites.
+                prior = fresh.closing_odds
+                if prior is not None and in_post_window:
+                    # Skip overwrite during post-window unless the prior
+                    # snap is missing or implausible.
+                    if prior > 1.0:
+                        continue
+                window_label = "pre" if in_pre_window else "post"
                 fresh.closing_odds = best.price
-                counts["snapped"] += 1
+                if prior is None:
+                    counts["snapped"] += 1
+                else:
+                    counts["updated"] += 1
                 logger.info(
-                    "CLV snapshot : %s vs %s [%s] entry=%.2f closing=%.2f",
+                    "CLV snap [%s-kickoff %+0.1fmin] : %s vs %s [%s] "
+                    "entry=%.2f closing=%.2f%s",
+                    window_label, mins_to_kickoff,
                     pred.home_team, pred.away_team, pred.selection,
                     pred.best_odds, best.price,
+                    f" (was {prior:.2f})" if prior is not None else "",
                 )
 
     logger.info(
-        "CLV snapshot : %d vérifié(s), %d capturé(s), %d sans event, %d erreur(s)",
-        counts["checked"], counts["snapped"], counts["missing_event"], counts["errors"],
+        "CLV snapshot : %d checked, %d new, %d updated, %d sans event, %d erreur(s)",
+        counts["checked"], counts["snapped"], counts["updated"],
+        counts["missing_event"], counts["errors"],
     )
     return counts
+
+
+def count_missed_clv_snapshots(days: int = 30) -> dict:
+    """
+    Distinguish 'still pending' vs 'permanently missed' CLV for the dashboard.
+
+    A bet's closing_odds is permanently missed when:
+      - the match has already kicked off > POST_KICKOFF_GRACE_MINUTES ago
+      - AND closing_odds is still NULL
+
+    For matches whose kickoff hasn't passed the grace window yet, NULL is
+    a normal in-progress state. We don't have kickoff times stored on the
+    Prediction row, so we approximate: a confirmed bet older than 7 days
+    that still has no closing_odds is almost certainly post-grace.
+
+    Returns counts useful for surfacing data-quality issues in the UI.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    grace_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    with session_scope() as s:
+        rows = s.execute(
+            select(
+                Prediction.closing_odds,
+                Prediction.result,
+                Prediction.created_at,
+            ).where(
+                Prediction.placement_status == "confirmed",
+                Prediction.created_at >= cutoff,
+            )
+        ).all()
+
+    n_total = len(rows)
+    n_with_clv = sum(1 for c, _, _ in rows if c is not None and c > 1.0)
+    # A snap is still possible when: no CLV yet AND result not in yet AND
+    # the bet is fresh enough that the snap window probably hasn't closed.
+    # Anything else with NULL closing_odds is permanently missed — including
+    # resolved bets without CLV (the match is over, we can't go back).
+    n_pending = sum(
+        1 for c, r, ts in rows
+        if c is None and r is None and ts >= grace_cutoff
+    )
+    n_missed = sum(
+        1 for c, r, ts in rows
+        if c is None and (ts < grace_cutoff or r is not None)
+    )
+    return {
+        "n_total_confirmed": n_total,
+        "n_with_clv": n_with_clv,
+        "n_pending_clv": n_pending,
+        "n_missed_clv": n_missed,
+        "coverage_pct": round(n_with_clv / max(1, n_total) * 100, 1),
+    }
 
 
 def compute_clv_pct(entry_odds: float, closing_odds: float) -> float:
