@@ -36,10 +36,25 @@ logger = logging.getLogger("betbot.basketball_model")
 
 NBA_HOME_ADVANTAGE = 2.7         # points; FiveThirtyEight 2019 estimate
 EUROLEAGUE_HOME_ADVANTAGE = 1.8  # smaller than NBA per Stein 2021
-MARGIN_STD = 11.0                # std-dev of margin in points (calibrated)
-TOTAL_STD = 14.0                 # std-dev of total points (calibrated)
+
+# Standard-deviation of the margin between two NBA teams. The constant 11 is
+# the league-wide empirical figure (Stein 2021, FiveThirtyEight Elo paper).
+# We adapt it slightly to the predicted pace of the game : fast games have
+# more possessions, hence more variance — adding ~0.04 pts of σ per
+# possession above the 99-pace baseline. Calibrated so that a 110-pace
+# match adds ~0.4 pts of σ vs a 95-pace match — a meaningful 3-5 % swing
+# on the win probability of slim-favorite matches.
+MARGIN_STD_BASE = 11.0
+MARGIN_STD_PACE_SLOPE = 0.04       # per-pace-unit deviation from baseline
 LEAGUE_AVG_PACE = 99.0
+
+TOTAL_STD = 14.0                   # std-dev of total points (similar but coarser)
 LEAGUE_AVG_RATING = 115.0
+
+
+def _margin_std(pace: float) -> float:
+    """Pace-adapted standard deviation of the margin. Fast games are noisier."""
+    return MARGIN_STD_BASE + MARGIN_STD_PACE_SLOPE * abs(pace - LEAGUE_AVG_PACE)
 
 STATS_PATH = Path(os.getenv("BASKETBALL_STATS_PATH", "data/basketball_teams.json"))
 
@@ -170,7 +185,9 @@ def predict(home_name: str, away_name: str, league: str = "nba") -> BasketballPr
     away_points -= hca / 2.0
 
     margin = home_points - away_points
-    p_home = _normal_cdf(margin / MARGIN_STD)
+    # Pace-adapted variance — fast NBA games are noisier than slow grindouts.
+    margin_std = _margin_std(pace)
+    p_home = _normal_cdf(margin / margin_std)
 
     return BasketballPrediction(
         home_win=round(p_home, 4),

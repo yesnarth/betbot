@@ -9,9 +9,8 @@ from typing import Optional
 
 from sqlalchemy import (
     Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint,
-    func,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from betbot.database import Base
 
@@ -34,7 +33,7 @@ class TeamStat(Base):
     defense_away: Mapped[float] = mapped_column(Float, nullable=False)
     matches_analyzed: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    # --- Enrichment columns (Phase 8) — nullable so legacy rows still load ---
+    # --- Enrichment columns — nullable so legacy rows still load ---
     elo_rating: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     xg_for: Mapped[Optional[float]] = mapped_column(Float, nullable=True)        # xG per match
     xg_against: Mapped[Optional[float]] = mapped_column(Float, nullable=True)    # xGA per match
@@ -61,6 +60,9 @@ class Prediction(Base):
         Index("ix_predictions_created_at", "created_at"),
         Index("ix_predictions_sport_key", "sport_key"),
         Index("ix_predictions_result", "result"),
+        # Created by migration g1a3b7d4e8f2 ; declared here so `alembic check`
+        # doesn't see drift between the ORM and the live schema.
+        Index("ix_predictions_placement_status", "placement_status"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -92,9 +94,6 @@ class Prediction(Base):
     placement_status: Mapped[str] = mapped_column(String(16), default="proposed", nullable=False)
     placement_status_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
-    # Legacy boolean kept in sync with placement_status for backwards-compat.
-    # Old code paths still read it; new code should prefer placement_status.
-    actually_placed: Mapped[bool] = mapped_column(default=False)
     placed_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     placed_bookmaker: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 

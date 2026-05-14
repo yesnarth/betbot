@@ -3,16 +3,8 @@ Smoke test for Alembic migrations: every revision must apply cleanly,
 then downgrade cleanly back to the previous one.
 
 ⚠ DESTRUCTIVE: this test runs `alembic downgrade base` which wipes EVERY
-table. It refuses to run against any DATABASE_URL that doesn't have a clear
-"test" marker, to prevent accidentally destroying production data. Set:
-
-    BETBOT_TEST_DATABASE_URL=postgresql://...test_db
-
-to opt in. We checked this against `BETBOT_TEST_DATABASE_URL` (NOT
-`DATABASE_URL`) — same env var format but a clearly-distinct name, so the
-prod credentials never trigger this path.
-
-When the env var is unset the tests are skipped — keeps CI fast and prod safe.
+table. Safety gate enforced by tests/e2e/conftest.py — requires
+BETBOT_TEST_DATABASE_URL containing 'test'.
 """
 from __future__ import annotations
 
@@ -22,30 +14,14 @@ from pathlib import Path
 
 import pytest
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Test file now lives in tests/e2e/, so PROJECT_ROOT needs one extra .parent
+# to walk up to the repo root where alembic.ini lives.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _test_db_url() -> str:
     """The dedicated test DB URL — NEVER falls back to DATABASE_URL."""
     return os.getenv("BETBOT_TEST_DATABASE_URL", "").strip()
-
-
-def _is_safe_test_db() -> bool:
-    url = _test_db_url()
-    if not url.startswith(("postgresql://", "postgresql+")):
-        return False
-    # Final safeguard: refuse if the URL doesn't have "test" in it. A test DB
-    # should always be named distinctively (e.g. "betbot_test", "test_db").
-    # This makes it physically impossible to point this test at prod by
-    # accident, no matter how the env vars are wired.
-    return "test" in url.lower()
-
-
-pytestmark = pytest.mark.skipif(
-    not _is_safe_test_db(),
-    reason="Migration roundtrip needs BETBOT_TEST_DATABASE_URL pointing at a "
-           "Postgres DB whose URL contains 'test' (NEVER use the prod DATABASE_URL).",
-)
 
 
 def _alembic(*args: str, env: dict | None = None) -> subprocess.CompletedProcess:

@@ -65,7 +65,7 @@ def _consecutive_losses_streak(s, max_check: int = 20) -> tuple[int, str | None]
     rows = s.execute(
         select(Prediction.result, Prediction.resolved_at)
         .where(Prediction.result.is_not(None),
-               Prediction.actually_placed.is_(True))
+               Prediction.placement_status == "confirmed")
         .order_by(Prediction.resolved_at.desc())
         .limit(max_check)
     ).all()
@@ -138,26 +138,37 @@ def check_can_place_bet(stake: float, config: GuardConfig | None = None) -> None
                 f"limit {config.max_exposure_pct*100:.0f}%."
             )
 
+    # Combine cool-off lookup and daily-stake lookup into a single DB session
+    # so we pay ONE Postgres round-trip instead of two. With pgbouncer in
+    # session-pooling mode this matters: each session checkout adds 0.5-2 ms.
+    needs_cool_off = config.cool_off_consecutive_losses > 0
+    needs_daily = config.max_daily_stake_pct > 0 or config.max_bets_per_day > 0
+    streak = 0
+    last_loss_ts: str | None = None
+    today_total = 0.0
+    n_today = 0
+    if needs_cool_off or needs_daily:
+        with session_scope() as s:
+            if needs_cool_off:
+                streak, last_loss_ts = _consecutive_losses_streak(s)
+            if needs_daily:
+                today_total, n_today = _today_stake_total(s)
+
     # Cool-off: after N consecutive losses, force a break. This breaks the
     # tilt-spiral that destroys bankrolls — the moment a strategy enters a
     # losing streak, the user often increases stakes to recover. We refuse.
-    if config.cool_off_consecutive_losses > 0:
-        with session_scope() as s:
-            streak, last_loss_ts = _consecutive_losses_streak(s)
-        if streak >= config.cool_off_consecutive_losses and last_loss_ts:
-            hours = _hours_since(last_loss_ts)
-            if hours < config.cool_off_hours:
-                hrs_left = config.cool_off_hours - hours
-                raise GuardViolation(
-                    f"Cool-off active: {streak} pertes consécutives, "
-                    f"reprise dans {hrs_left:.1f}h "
-                    f"(défini par COOL_OFF_HOURS={config.cool_off_hours})."
-                )
+    if needs_cool_off and streak >= config.cool_off_consecutive_losses and last_loss_ts:
+        hours = _hours_since(last_loss_ts)
+        if hours < config.cool_off_hours:
+            hrs_left = config.cool_off_hours - hours
+            raise GuardViolation(
+                f"Cool-off active: {streak} pertes consécutives, "
+                f"reprise dans {hrs_left:.1f}h "
+                f"(défini par COOL_OFF_HOURS={config.cool_off_hours})."
+            )
 
     # Daily stake cap + count
-    if config.max_daily_stake_pct > 0 or config.max_bets_per_day > 0:
-        with session_scope() as s:
-            today_total, n_today = _today_stake_total(s)
+    if needs_daily:
         if config.max_daily_stake_pct > 0 and state.balance > 0:
             cap = state.balance * config.max_daily_stake_pct
             if today_total + stake > cap:

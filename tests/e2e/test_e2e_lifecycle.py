@@ -2,10 +2,7 @@
 End-to-end lifecycle test — bet placement → resolution → bankroll updated.
 
 ⚠ DESTRUCTIVE: an autouse fixture wipes BankrollEntry and Prediction tables
-between tests for clean isolation. To make sure this CAN NEVER hit the
-production DB, the test only runs when BETBOT_TEST_DATABASE_URL points at
-a database whose name contains "test". Without that, all tests in this
-module are skipped.
+between tests for clean isolation. Safety gate enforced by tests/e2e/conftest.py.
 
 Validates the full sequence the user actually goes through:
   1. deposit initial bankroll
@@ -16,20 +13,6 @@ Validates the full sequence the user actually goes through:
 """
 import os
 import pytest
-
-
-def _is_safe_test_db() -> bool:
-    url = os.getenv("BETBOT_TEST_DATABASE_URL", "").strip()
-    if not url.startswith(("postgresql://", "postgresql+")):
-        return False
-    return "test" in url.lower()
-
-
-pytestmark = pytest.mark.skipif(
-    not _is_safe_test_db(),
-    reason="E2E lifecycle tests need BETBOT_TEST_DATABASE_URL pointing at a "
-           "Postgres DB whose URL contains 'test' (autouse fixture is destructive).",
-)
 
 
 @pytest.fixture(autouse=True)

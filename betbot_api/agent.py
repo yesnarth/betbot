@@ -142,7 +142,7 @@ async def run_agent(filters: dict[str, Any], trigger: str = "api") -> dict:
             "mcp__betbot__find_value_bets",
             "mcp__betbot__build_parlay",
             "mcp__betbot__get_roi_stats",
-            # Phase 8 — external signals
+            # External signals
             "mcp__betbot__get_elo_rating",
             "mcp__betbot__compare_elo",
             "mcp__betbot__get_xg_stats",

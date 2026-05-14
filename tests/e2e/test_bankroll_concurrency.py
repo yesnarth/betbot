@@ -2,8 +2,7 @@
 Concurrency test for the bankroll ledger.
 
 ⚠ DESTRUCTIVE: autouse fixture wipes the ledger and predictions tables
-between tests. Refuses to run unless BETBOT_TEST_DATABASE_URL points at
-a Postgres DB whose URL contains "test".
+between tests. Safety gate enforced by tests/e2e/conftest.py.
 
 Validates that the advisory-lock-protected `_append()` cannot be tricked
 by simultaneous threads into reading the same balance and double-spending.
@@ -11,20 +10,6 @@ by simultaneous threads into reading the same balance and double-spending.
 import os
 import threading
 import pytest
-
-
-def _is_safe_test_db() -> bool:
-    url = os.getenv("BETBOT_TEST_DATABASE_URL", "").strip()
-    if not url.startswith(("postgresql://", "postgresql+")):
-        return False
-    return "test" in url.lower()
-
-
-pytestmark = pytest.mark.skipif(
-    not _is_safe_test_db(),
-    reason="bankroll concurrency tests need BETBOT_TEST_DATABASE_URL pointing "
-           "at a Postgres DB whose URL contains 'test' (autouse fixture is destructive).",
-)
 
 
 @pytest.fixture(autouse=True)

@@ -36,6 +36,41 @@ class EventsResponse(BaseModel):
     today_only: bool
 
 
+class ConfirmPlacedRequest(BaseModel):
+    """POST body for /predictions/{id}/confirm-placed.
+
+    Validates types up-front so callers can't send `unconfirm: "false"` (string)
+    and have it silently coerced to True by Python truthiness.
+    """
+    bookmaker: str | None = Field(default=None, max_length=64)
+    unconfirm: bool = False
+
+
+class SkipRequest(BaseModel):
+    """POST body for /predictions/{id}/skip."""
+    reason: str | None = Field(default="user_skipped", max_length=120)
+
+
+class ProposedPickInput(BaseModel):
+    """POST body for /admin/save-pick-as-proposed — same shape as the picks
+    returned by /recommend/manual, validated strictly so a malformed pick
+    can't slip through and corrupt the prediction table."""
+    event_id: str = Field(..., min_length=1, max_length=128)
+    sport_key: str = Field(..., min_length=1, max_length=64)
+    home_team: str = Field(..., min_length=1, max_length=128)
+    away_team: str = Field(..., min_length=1, max_length=128)
+    market: str = Field(..., min_length=1, max_length=32)
+    selection_code: str = Field(..., min_length=1, max_length=8)
+    model_prob: float = Field(..., ge=0.0, le=1.0)
+    best_odds: float = Field(..., ge=1.0, le=1000.0)
+    best_book: str = Field(..., min_length=1, max_length=64)
+    value_edge: float = Field(..., ge=-1.0, le=10.0)
+    kelly_stake: float = Field(default=0.0, ge=0.0, le=1_000_000.0)
+    lambda_home: float | None = Field(default=None, ge=0.0, le=10.0)
+    lambda_away: float | None = Field(default=None, ge=0.0, le=10.0)
+    model_type: str = Field(default="poisson", max_length=32)
+
+
 class PredictionRow(BaseModel):
     id: int
     created_at: str

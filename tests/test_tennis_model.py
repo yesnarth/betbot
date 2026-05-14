@@ -11,7 +11,8 @@ from betbot import tennis_model
 from betbot.tennis_model import (
     DEFAULT_RATING,
     PlayerRating,
-    SURFACE_BLEND_WEIGHT,
+    SURFACE_BLEND_MAX,
+    SURFACE_BLEND_FULL_AT,
     _expected,
     _name_lookup,
     _update_match,
@@ -57,13 +58,44 @@ def test_expected_favors_higher_rating():
     assert _expected(1500, 1700) == pytest.approx(1 - high)
 
 
-def test_player_rating_blends_surface_with_overall():
-    p = PlayerRating(name="X", overall=2000.0, hard=2200.0, clay=1800.0, grass=1900.0)
-    # 50/50 blend: clay rating = 0.5 * 1800 + 0.5 * 2000 = 1900
+def test_player_rating_with_enough_surface_matches_uses_max_blend():
+    """Player with 20+ matches on the queried surface gets the full
+    SURFACE_BLEND_MAX (currently 0.5) weighting on the surface rating."""
+    p = PlayerRating(
+        name="X", overall=2000.0, hard=2200.0, clay=1800.0, grass=1900.0,
+        matches_clay=25, matches_grass=30, matches_hard=50,
+    )
+    # 0.5 * 1800 + 0.5 * 2000 = 1900
     assert p.rating_for("Clay") == pytest.approx(1900.0)
-    assert p.rating_for("Grass") == pytest.approx(0.5 * 1900.0 + 0.5 * 2000.0)
+    # 0.5 * 1900 + 0.5 * 2000 = 1950
+    assert p.rating_for("Grass") == pytest.approx(1950.0)
     # Unknown surface defaults to hard
     assert p.rating_for("Unknown") == p.rating_for("Hard")
+
+
+def test_player_rating_adaptive_blend_scales_with_matches():
+    """Player with few surface matches gets reduced surface weighting —
+    prevents trusting noisy default-1500 ratings on unfamiliar surfaces."""
+    p = PlayerRating(name="X", overall=2000.0, clay=1500.0, matches_clay=0)
+    # 0 clay matches → 0% surface weight → pure overall
+    assert p.rating_for("Clay") == pytest.approx(2000.0)
+
+    # Half-way to full trust (10 matches → 25% weight on clay)
+    p.matches_clay = 10
+    expected_weight = (10 / SURFACE_BLEND_FULL_AT) * SURFACE_BLEND_MAX
+    expected_rating = expected_weight * 1500.0 + (1 - expected_weight) * 2000.0
+    assert p.rating_for("Clay") == pytest.approx(expected_rating)
+
+
+def test_player_rating_rookie_uses_overall_not_default():
+    """A rookie with no matches on the predicted surface relies entirely on
+    overall rating — the default 1500 surface_rating shouldn't drag down
+    a strong overall."""
+    rookie = PlayerRating(name="Rookie", overall=1700.0,
+                          hard=1500.0, clay=1500.0, grass=1500.0)
+    # 0 surface matches everywhere → all queries return overall
+    for s in ("Hard", "Clay", "Grass"):
+        assert rookie.rating_for(s) == pytest.approx(1700.0)
 
 
 def test_k_factor_decays_with_experience():
@@ -220,9 +252,15 @@ def test_predict_returns_none_when_player_missing(isolated_cache_and_path):
 
 
 def test_predict_higher_rated_player_is_favored(isolated_cache_and_path):
+    # Need at least SURFACE_BLEND_FULL_AT (20) hard matches each to trust
+    # the surface ratings beyond pure overall.
     ratings = {
-        "Strong": PlayerRating(name="Strong", overall=2100, hard=2150, clay=2050, grass=2000),
-        "Weak":   PlayerRating(name="Weak",   overall=1500, hard=1500, clay=1500, grass=1500),
+        "Strong": PlayerRating(name="Strong", overall=2100, hard=2150,
+                               clay=2050, grass=2000,
+                               matches_hard=30, matches_clay=25, matches_grass=20),
+        "Weak":   PlayerRating(name="Weak", overall=1500, hard=1500,
+                               clay=1500, grass=1500,
+                               matches_hard=30, matches_clay=25, matches_grass=20),
     }
     tennis_model.save_ratings(ratings, path=isolated_cache_and_path)
     tennis_model.reset_cache()
@@ -234,12 +272,16 @@ def test_predict_higher_rated_player_is_favored(isolated_cache_and_path):
 
 
 def test_predict_surface_swap_changes_outcome(isolated_cache_and_path):
-    """A clay specialist beats a hard-court specialist on clay, vice-versa on hard."""
+    """A clay specialist beats a hard-court specialist on clay, vice-versa on hard.
+    Requires both players to have enough surface matches for the surface rating
+    to actually carry weight in the blend."""
     ratings = {
         "ClayKing": PlayerRating(name="ClayKing", overall=1900,
-                                 hard=1750, clay=2100, grass=1700),
+                                 hard=1750, clay=2100, grass=1700,
+                                 matches_hard=25, matches_clay=40, matches_grass=15),
         "HardKing": PlayerRating(name="HardKing", overall=1900,
-                                 hard=2100, clay=1750, grass=1700),
+                                 hard=2100, clay=1750, grass=1700,
+                                 matches_hard=40, matches_clay=25, matches_grass=15),
     }
     tennis_model.save_ratings(ratings, path=isolated_cache_and_path)
     tennis_model.reset_cache()

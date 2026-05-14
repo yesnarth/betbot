@@ -30,6 +30,7 @@ from betbot_api.schemas import (
     BankrollLedgerRow,
     BankrollMutation,
     BankrollSnapshot,
+    ConfirmPlacedRequest,
     EventBrief,
     EventsResponse,
     HealthResponse,
@@ -38,7 +39,9 @@ from betbot_api.schemas import (
     ManualScanFilters,
     ManualScanResponse,
     PredictionRow,
+    ProposedPickInput,
     ROIStats,
+    SkipRequest,
 )
 
 logger = logging.getLogger("betbot_api")
@@ -212,10 +215,10 @@ def list_events(
     else:
         all_events = client.fetch_all_sports()
 
-    from betbot_mcp.server import _filter_today
+    from betbot.shared import filter_upcoming_today
     by_sport: dict[str, list[EventBrief]] = {}
     for sk, events in all_events.items():
-        kept = _filter_today(events, s.min_before_kickoff) if today_only else events
+        kept = filter_upcoming_today(events, s.min_before_kickoff) if today_only else events
         if kept:
             by_sport[sk] = [
                 EventBrief(
@@ -242,7 +245,7 @@ def list_events(
 def confirm_placed(
     request: Request,
     prediction_id: int,
-    body: dict | None = None,
+    body: ConfirmPlacedRequest = ConfirmPlacedRequest(),
     db: Database = Depends(get_db),
     _: str = Depends(require_auth),
 ) -> dict:
@@ -252,16 +255,15 @@ def confirm_placed(
     update). Pre-flight guard checks (stop-loss, daily cap, exposure)
     apply here, NOT at scan time.
 
-    Body (optional): {"bookmaker": "pinnacle", "unconfirm": false}.
-    Set unconfirm=true to revert (re-credits the stake).
+    Body fields are validated by ConfirmPlacedRequest — `unconfirm: "false"`
+    (string) is rejected with a 422 instead of being silently coerced.
     """
     from betbot.bankroll import InsufficientFundsError
     from betbot.guards import GuardViolation
-    body = body or {}
-    bookmaker = body.get("bookmaker")
-    unconfirm = bool(body.get("unconfirm", False))
     try:
-        ok = db.confirm_prediction_placed(prediction_id, bookmaker, unconfirm=unconfirm)
+        ok = db.confirm_prediction_placed(
+            prediction_id, body.bookmaker, unconfirm=body.unconfirm,
+        )
     except InsufficientFundsError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except GuardViolation as exc:
@@ -270,15 +272,16 @@ def confirm_placed(
         raise HTTPException(status_code=400, detail=str(exc))
     if not ok:
         raise HTTPException(status_code=404, detail=f"Prediction {prediction_id} not found")
-    return {"prediction_id": prediction_id, "actually_placed": not unconfirm,
-            "bookmaker": bookmaker}
+    return {"prediction_id": prediction_id,
+            "placement_status": "proposed" if body.unconfirm else "confirmed",
+            "bookmaker": body.bookmaker}
 
 
 @app.post("/admin/save-pick-as-proposed")
 @limiter.limit("60/minute")
 def save_pick_as_proposed(
     request: Request,
-    pick: dict,
+    pick: ProposedPickInput,
     db: Database = Depends(get_db),
     _: str = Depends(require_auth),
 ) -> dict:
@@ -288,38 +291,29 @@ def save_pick_as_proposed(
     had generated it during a scheduled scan : the row appears in the
     validation queue, awaiting user confirmation, with NO bankroll debit.
 
-    The pick dict must carry the keys produced by /recommend/manual :
-    event_id, sport_key, home_team, away_team, market, selection_code,
-    model_prob, best_odds, best_book, value_edge, kelly_stake.
-    Optional : lambda_home, lambda_away, model_type.
+    Body is strictly validated via ProposedPickInput — wrong types or missing
+    keys return 422 instead of silently corrupting a prediction row.
     """
-    required = ("event_id", "sport_key", "home_team", "away_team", "market",
-                "selection_code", "model_prob", "best_odds", "best_book",
-                "value_edge", "kelly_stake")
-    missing = [k for k in required if k not in pick]
-    if missing:
-        raise HTTPException(status_code=400,
-                            detail=f"missing keys: {', '.join(missing)}")
     ok = db.save_prediction(
-        event_id=pick["event_id"],
-        sport_key=pick["sport_key"],
-        home_team=pick["home_team"],
-        away_team=pick["away_team"],
-        market=pick["market"],
-        selection=pick["selection_code"],
-        model_prob=pick["model_prob"],
-        best_odds=pick["best_odds"],
-        best_book=pick["best_book"],
-        value_edge=pick["value_edge"],
-        kelly_stake=pick.get("kelly_stake", 0.0),
-        lambda_home=pick.get("lambda_home"),
-        lambda_away=pick.get("lambda_away"),
-        model_type=pick.get("model_type", "poisson"),
+        event_id=pick.event_id,
+        sport_key=pick.sport_key,
+        home_team=pick.home_team,
+        away_team=pick.away_team,
+        market=pick.market,
+        selection=pick.selection_code,
+        model_prob=pick.model_prob,
+        best_odds=pick.best_odds,
+        best_book=pick.best_book,
+        value_edge=pick.value_edge,
+        kelly_stake=pick.kelly_stake,
+        lambda_home=pick.lambda_home,
+        lambda_away=pick.lambda_away,
+        model_type=pick.model_type,
     )
     if not ok:
         raise HTTPException(status_code=409, detail="duplicate (already in DB)")
     return {"ok": True, "placement_status": "proposed",
-            "event": f"{pick['home_team']} vs {pick['away_team']}"}
+            "event": f"{pick.home_team} vs {pick.away_team}"}
 
 
 @app.post("/predictions/{prediction_id}/skip")
@@ -327,7 +321,7 @@ def save_pick_as_proposed(
 def skip_prediction(
     request: Request,
     prediction_id: int,
-    body: dict | None = None,
+    body: SkipRequest = SkipRequest(),
     db: Database = Depends(get_db),
     _: str = Depends(require_auth),
 ) -> dict:
@@ -335,16 +329,14 @@ def skip_prediction(
     Skip a proposed pick — the user passed on the recommendation.
     No bankroll movement. Kept in DB for analytics (would-have ROI).
     """
-    body = body or {}
-    reason = body.get("reason", "user_skipped")
     try:
-        ok = db.skip_prediction(prediction_id, reason=reason)
+        ok = db.skip_prediction(prediction_id, reason=body.reason or "user_skipped")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not ok:
         raise HTTPException(status_code=404, detail=f"Prediction {prediction_id} not found")
     return {"prediction_id": prediction_id, "placement_status": "skipped",
-            "reason": reason}
+            "reason": body.reason}
 
 
 @app.post("/predictions/{prediction_id}/unskip")
@@ -493,7 +485,7 @@ def recommend_manual(
       - you want a deterministic baseline to compare against the AI agent
     """
     from betbot.analysis import build_parlays, detect_value_bets, rank_value_bets
-    from betbot.main import _filter_upcoming_today, _load_team_stats_from_db
+    from betbot.shared import filter_upcoming_today, load_team_stats_from_db
     from betbot_api.main import get_db as _get_db  # avoid circular import flicker
 
     s = load_settings()
@@ -513,7 +505,7 @@ def recommend_manual(
     # Filter today vs upcoming
     events_by_sport: dict[str, list[dict]] = {}
     for sk, ev in all_events.items():
-        kept = _filter_upcoming_today(ev, s.min_before_kickoff) if filters.today_only else ev
+        kept = filter_upcoming_today(ev, s.min_before_kickoff) if filters.today_only else ev
         if kept:
             events_by_sport[sk] = kept
 
@@ -529,7 +521,7 @@ def recommend_manual(
 
     # Run the blended Poisson + ELO model
     db = Database(s.database_url)
-    prebuilt = _load_team_stats_from_db(db, events_by_sport.keys())
+    prebuilt = load_team_stats_from_db(db, events_by_sport.keys())
     raw = detect_value_bets(
         events_by_sport=events_by_sport,
         match_history_by_sport={},
@@ -621,7 +613,7 @@ def recommend_agent_local(
     """
     from betbot.analysis import build_parlays, ValueBet
     from betbot.local_agent import evaluate_picks
-    from betbot.main import _filter_upcoming_today, _load_team_stats_from_db
+    from betbot.shared import filter_upcoming_today, load_team_stats_from_db
 
     s = load_settings()
     odds_client = OddsAPIClient(s.odds_api_key)
@@ -639,7 +631,7 @@ def recommend_agent_local(
     events_by_sport: dict[str, list[dict]] = {}
     commence_by_id: dict[str, str] = {}
     for sk, ev in all_events.items():
-        kept = _filter_upcoming_today(ev, s.min_before_kickoff) if filters.today_only else ev
+        kept = filter_upcoming_today(ev, s.min_before_kickoff) if filters.today_only else ev
         if kept:
             events_by_sport[sk] = kept
             for e in kept:
@@ -659,7 +651,7 @@ def recommend_agent_local(
     # 2. Run the blended model to produce raw picks
     from betbot.analysis import detect_value_bets, rank_value_bets
     db = Database(s.database_url)
-    prebuilt = _load_team_stats_from_db(db, events_by_sport.keys())
+    prebuilt = load_team_stats_from_db(db, events_by_sport.keys())
     raw_bets = detect_value_bets(
         events_by_sport=events_by_sport,
         match_history_by_sport={},
@@ -786,7 +778,7 @@ async def agent_recommend(
 
 
 # ---------------------------------------------------------------------------
-# Bankroll — real capital tracking (Phase 9)
+# Bankroll — real capital tracking
 # ---------------------------------------------------------------------------
 
 @app.get("/arbitrage")
@@ -804,7 +796,7 @@ def arbitrage_scan(
     (~1 in 200-1000 events) and usually < 1% profit.
     """
     from betbot.arbitrage import scan_arbs, arb_to_dict
-    from betbot.main import _filter_upcoming_today
+    from betbot.shared import filter_upcoming_today
     s = load_settings()
     odds_client = OddsAPIClient(s.odds_api_key)
 
@@ -815,7 +807,7 @@ def arbitrage_scan(
 
     events_by_sport: dict[str, list[dict]] = {}
     for sk, ev in all_events.items():
-        kept = _filter_upcoming_today(ev, s.min_before_kickoff) if today_only else ev
+        kept = filter_upcoming_today(ev, s.min_before_kickoff) if today_only else ev
         if kept:
             events_by_sport[sk] = kept
 

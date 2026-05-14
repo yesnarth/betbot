@@ -67,8 +67,8 @@ def _parlay_to_dict(p: Parlay) -> dict:
     }
 
 
-# Use the shared canonical implementation; alias to keep the local name.
-from betbot.shared import filter_upcoming_today as _filter_today  # noqa: E402
+# Use the shared canonical implementations.
+from betbot.shared import filter_upcoming_today, load_team_stats_from_db  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +133,7 @@ def fetch_events(
 
     by_sport: dict[str, list[dict]] = {}
     for sk, events in all_events.items():
-        kept = _filter_today(events, cutoff) if today_only else events
+        kept = filter_upcoming_today(events, cutoff) if today_only else events
         if kept:
             by_sport[sk] = [
                 {
@@ -282,13 +282,12 @@ def find_value_bets(
 
     events_by_sport: dict[str, list[dict]] = {}
     for sk, ev in events_raw.items():
-        kept = _filter_today(ev, s.min_before_kickoff) if today_only else ev
+        kept = filter_upcoming_today(ev, s.min_before_kickoff) if today_only else ev
         if kept:
             events_by_sport[sk] = kept
 
     # Load Poisson stats from DB in the new {teams, home_avg, away_avg} shape
-    from betbot.main import _load_team_stats_from_db
-    prebuilt = _load_team_stats_from_db(db(), events_by_sport.keys())
+    prebuilt = load_team_stats_from_db(db(), events_by_sport.keys())
 
     bets = detect_value_bets(
         events_by_sport=events_by_sport,
@@ -490,7 +489,7 @@ def get_roi_stats(days: int = 30) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Tools — external data sources (Phase 8)
+# Tools — external data sources
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -871,7 +870,6 @@ def run_local_agent(
     Cheaper and more transparent than calling Claude — every rule is explicit.
     """
     from betbot.local_agent import evaluate_picks
-    from betbot.main import _filter_upcoming_today, _load_team_stats_from_db
     from betbot.analysis import detect_value_bets, rank_value_bets
 
     s = settings()
@@ -885,7 +883,7 @@ def run_local_agent(
 
     events_by_sport = {}
     for sk, ev in all_events.items():
-        kept = _filter_upcoming_today(ev, s.min_before_kickoff) if today_only else ev
+        kept = filter_upcoming_today(ev, s.min_before_kickoff) if today_only else ev
         if kept:
             events_by_sport[sk] = kept
 
@@ -893,7 +891,7 @@ def run_local_agent(
         return {"n_picks_in": 0, "n_accepted": 0, "n_rejected": 0,
                 "picks": [], "rejected": [], "reason": "no_events"}
 
-    prebuilt = _load_team_stats_from_db(db(), events_by_sport.keys())
+    prebuilt = load_team_stats_from_db(db(), events_by_sport.keys())
     raw = detect_value_bets(
         events_by_sport=events_by_sport, match_history_by_sport={},
         bankroll=s.bankroll, kelly_fraction=s.kelly_fraction,

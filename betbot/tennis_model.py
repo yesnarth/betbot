@@ -31,7 +31,14 @@ from pathlib import Path
 logger = logging.getLogger("betbot.tennis_model")
 
 DEFAULT_RATING = 1500.0
-SURFACE_BLEND_WEIGHT = 0.50  # overall vs. surface-specific
+# Maximum weight of the surface-specific rating in the blend. The actual
+# weight scales linearly with how many matches the player has played on
+# that surface — a player with 3 clay matches shouldn't get 50% clay
+# weighting (the sample is pure noise). FiveThirtyEight's tennis Elo
+# methodology recommends ≥ 20 surface matches before trusting the
+# surface signal fully.
+SURFACE_BLEND_MAX = 0.50
+SURFACE_BLEND_FULL_AT = 20   # # surface matches needed to reach SURFACE_BLEND_MAX
 ELO_SCALE = 400.0            # standard logistic divisor
 
 LEVEL_WEIGHT = {
@@ -66,15 +73,29 @@ class PlayerRating:
         return 250.0 / (n + 5) ** 0.4
 
     def rating_for(self, surface: str) -> float:
-        """Blended rating used at prediction time."""
+        """Blended rating used at prediction time.
+
+        The surface-specific weight scales with how many matches we have on
+        that surface: a player with 0 matches on clay gets 0% weighting on
+        the (still-default-1500) clay rating; a player with 20+ clay
+        matches gets the full SURFACE_BLEND_MAX. This prevents the bug
+        where a hard-court specialist with 3 clay matches got 50%
+        weighting on a noisy clay rating, inflating predicted edge.
+        """
         s = (surface or "").lower()
         if s == "clay":
             surface_rating = self.clay
+            surface_n = self.matches_clay
         elif s == "grass":
             surface_rating = self.grass
+            surface_n = self.matches_grass
         else:
-            surface_rating = self.hard  # default to hard
-        return SURFACE_BLEND_WEIGHT * surface_rating + (1 - SURFACE_BLEND_WEIGHT) * self.overall
+            surface_rating = self.hard
+            surface_n = self.matches_hard
+        # Adaptive blend: 0 surface matches → 0% surface weight (pure overall);
+        # 20+ surface matches → SURFACE_BLEND_MAX. Linear ramp in between.
+        surface_weight = min(surface_n / SURFACE_BLEND_FULL_AT, 1.0) * SURFACE_BLEND_MAX
+        return surface_weight * surface_rating + (1 - surface_weight) * self.overall
 
 
 # ---------------------------------------------------------------------------

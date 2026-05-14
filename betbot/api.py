@@ -61,6 +61,13 @@ class QuotaExhaustedError(Exception):
     pass
 
 
+class OddsAPIServerError(Exception):
+    """Raised on HTTP 5xx from The Odds API — distinguishes real upstream
+    failure from successful-but-empty responses. Callers should treat this
+    as a transient outage and let it surface, not silently swallow it."""
+    pass
+
+
 class OddsAPIClient:
     def __init__(self, api_key: str):
         self._key = api_key
@@ -85,8 +92,25 @@ class OddsAPIClient:
             raise ValueError("Clé API invalide (401). Vérifie ODDS_API_KEY dans .env")
         if resp.status_code == 422:
             raise ValueError(f"Paramètres invalides pour {url}")
+        if resp.status_code == 404:
+            # 404 typically means a sport key that doesn't exist any more on
+            # The Odds API (e.g. discontinued tournament). Skip silently —
+            # the wishlist filter via get_active_sports should prevent this
+            # but we are defensive against stale config.
+            logger.warning("HTTP 404 pour %s", url)
+            return []
+        if 500 <= resp.status_code < 600:
+            # Upstream outage : raise loudly so the caller (worker scan,
+            # resolver, CLV snapshot) treats it as a real failure rather
+            # than silently believing "no events". Returning [] used to
+            # leave resolver stuck for hours and burn quota on retries.
+            raise OddsAPIServerError(
+                f"Odds API returned HTTP {resp.status_code} for {url}"
+            )
         if resp.status_code != 200:
-            logger.warning("HTTP %s pour %s", resp.status_code, url)
+            # Other 4xx (rate-limit etc.) — log and bail, but don't pretend success.
+            logger.warning("HTTP %s pour %s (treating as empty response)",
+                           resp.status_code, url)
             return []
         return resp.json()
 
@@ -211,8 +235,16 @@ class OddsAPIClient:
                 results[sport] = events
                 time.sleep(0.4)
             except QuotaExhaustedError:
+                # Stop the loop entirely — every subsequent call would fail
+                # the same way and just burn the buffer below QUOTA_MINIMUM.
                 logger.error("Quota épuisé — arrêt du fetch à %s", sport)
                 break
+            except OddsAPIServerError as exc:
+                # Upstream 5xx for THIS sport. Log it visibly but keep
+                # fetching the other sports — the worker shouldn't lose
+                # an entire scan because one league is having issues.
+                logger.error("Odds API 5xx pour %s : %s — autre(s) sport(s) suivent",
+                             sport, exc)
             except (requests.Timeout, requests.ConnectionError) as exc:
                 logger.error("Erreur réseau pour %s : %s", sport, exc)
             except Exception as exc:

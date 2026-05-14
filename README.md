@@ -10,7 +10,7 @@ recommendation across multiple independent signals.
 ## Stack
 
 ```
-Streamlit dashboard  →  FastAPI  →  Claude Agent SDK  →  MCP server (36 tools)
+Streamlit dashboard  →  FastAPI  →  Claude Agent SDK  →  MCP server (40 tools)
                                                               ↓
                           PostgreSQL + Redis        external data sources
                                                     (Odds, FootData, ClubElo,
@@ -158,7 +158,7 @@ betbot/                         # core package
     understat.py                # xG scraping (free)
     weather.py                  # Open-Meteo (free)
 
-betbot_mcp/                     # MCP server — 36 tools
+betbot_mcp/                     # MCP server — 40 tools
 betbot_api/                     # FastAPI REST + Claude agent
 betbot_dashboard/               # Streamlit UI
 

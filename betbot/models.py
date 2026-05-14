@@ -32,8 +32,17 @@ DECAY_RATE = 0.1
 DEFAULT_HOME_AVG = 1.35
 DEFAULT_AWAY_AVG = 1.10
 
-# Minimum matches needed to trust team-level Poisson model
+# Minimum matches needed to trust team-level Poisson model AT ALL.
+# Below this, build_team_stats returns None → consensus fallback.
 MIN_MATCHES = 4
+
+# Bayesian shrinkage toward league average : a team needs SHRINK_FULL_AT home
+# matches (and same for away) before its attack/defense stats are taken at
+# face value. Below that we blend with 1.0 (the league-average ratio),
+# proportional to sample size. Without this, a team with 5 matches and
+# attack_home=2.1 (luck spike) gets credit for 2.1 → predictions overshoot.
+# With shrinkage : 5/12 ≈ 42% trust, value becomes 0.42*2.1 + 0.58*1.0 = 1.46.
+SHRINK_FULL_AT = 12
 
 # Per-league Dixon-Coles ρ (tau parameter) for the bivariate correction.
 # Empirically calibrated values from academic literature (Goddard 2005,
@@ -107,7 +116,7 @@ class TeamStats:
     attack_away: float    # avg goals scored away / league_away_avg
     defense_away: float   # avg goals conceded away / league_home_avg
     matches_analyzed: int
-    # Phase 8 enrichment — all optional to keep legacy callers working
+    # Enrichment fields — all optional to keep legacy callers working
     elo_rating: float | None = None
     xg_for: float | None = None       # xG per match
     xg_against: float | None = None   # xGA per match
@@ -169,13 +178,25 @@ def build_team_stats(
         [(m["home_goals"], _exp_weight(k)) for k, m in enumerate(away_games)]
     )
 
-    # Strengths relative to league average (1.0 = average team)
-    attack_home  = home_scored   / league_home_avg if league_home_avg > 0 else 1.0
-    defense_home = home_conceded / league_away_avg if league_away_avg > 0 else 1.0
-    attack_away  = away_scored   / league_away_avg if league_away_avg > 0 else 1.0
-    defense_away = away_conceded / league_home_avg if league_home_avg > 0 else 1.0
+    # Raw strengths relative to league average (1.0 = average team)
+    raw_attack_home  = home_scored   / league_home_avg if league_home_avg > 0 else 1.0
+    raw_defense_home = home_conceded / league_away_avg if league_away_avg > 0 else 1.0
+    raw_attack_away  = away_scored   / league_away_avg if league_away_avg > 0 else 1.0
+    raw_defense_away = away_conceded / league_home_avg if league_home_avg > 0 else 1.0
 
-    # Clamp strengths to sensible range
+    # Shrink toward league average (1.0) for small samples — see SHRINK_FULL_AT.
+    # Home stats shrink based on n_home (#games played at home), away on n_away.
+    n_home = len(home_games)
+    n_away = len(away_games)
+    w_home = min(n_home / SHRINK_FULL_AT, 1.0)
+    w_away = min(n_away / SHRINK_FULL_AT, 1.0)
+
+    attack_home  = w_home * raw_attack_home  + (1 - w_home) * 1.0
+    defense_home = w_home * raw_defense_home + (1 - w_home) * 1.0
+    attack_away  = w_away * raw_attack_away  + (1 - w_away) * 1.0
+    defense_away = w_away * raw_defense_away + (1 - w_away) * 1.0
+
+    # Clamp strengths to sensible range (defends against pathological data)
     attack_home  = max(0.1, min(attack_home, 4.0))
     defense_home = max(0.1, min(defense_home, 4.0))
     attack_away  = max(0.1, min(attack_away, 4.0))

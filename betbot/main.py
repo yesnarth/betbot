@@ -52,22 +52,10 @@ def setup_logging(log_path: str) -> logging.Logger:
 
 
 # ---------------------------------------------------------------------------
-# DB helpers
+# Shared helpers (canonical home: betbot.shared)
 # ---------------------------------------------------------------------------
 
-# Backwards-compat re-exports. The canonical home for these helpers is
-# `betbot.shared`, but several callers (API, MCP server) historically imported
-# them from `betbot.main`. Aliasing keeps existing imports working while we
-# migrate them progressively.
-from betbot.shared import load_team_stats_from_db as _load_team_stats_from_db  # noqa: E402,F401
-
-
-# ---------------------------------------------------------------------------
-# Date filtering
-# ---------------------------------------------------------------------------
-
-# Re-export from betbot.shared for backwards-compat with API + MCP imports.
-from betbot.shared import filter_upcoming_today as _filter_upcoming_today  # noqa: E402,F401
+from betbot.shared import filter_upcoming_today, load_team_stats_from_db  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +188,7 @@ def run_daily_scan(
     total_before = sum(len(v) for v in all_events.values())
 
     for sport, events in all_events.items():
-        upcoming = _filter_upcoming_today(events, settings.min_before_kickoff)
+        upcoming = filter_upcoming_today(events, settings.min_before_kickoff)
         if upcoming:
             events_by_sport[sport] = upcoming
 
@@ -220,7 +208,7 @@ def run_daily_scan(
         return
 
     # 3. Load Poisson stats from DB
-    prebuilt_stats = _load_team_stats_from_db(db, events_by_sport.keys())
+    prebuilt_stats = load_team_stats_from_db(db, events_by_sport.keys())
     n_teams = sum(len(v) for v in prebuilt_stats.values())
     logger.info("Stats Poisson : %d équipes chargées", n_teams)
 

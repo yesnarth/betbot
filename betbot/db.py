@@ -244,7 +244,6 @@ class Database:
                     model_type=model_type,
                     placement_status="proposed",
                     placement_status_at=_utcnow_iso(),
-                    actually_placed=False,
                 )
                 s.add(pred)
                 return True
@@ -364,19 +363,29 @@ class Database:
         from betbot.bankroll import _acquire_ledger_lock, _append
 
         with session_scope() as s:
+            # Acquire a row-level lock with SELECT ... FOR UPDATE so we cannot
+            # see this prediction's NULL result twice from two concurrent
+            # resolver runs (e.g. the daily 04h cron firing while a user
+            # clicks "Résoudre les paris terminés" in the dashboard). Without
+            # the lock, both transactions would observe result IS NULL,
+            # both would INSERT a bet_won ledger entry, double-crediting
+            # the bankroll.
             row = s.execute(
-                select(Prediction).where(
+                select(Prediction)
+                .where(
                     Prediction.event_id == event_id,
                     Prediction.market == market,
                     Prediction.selection == selection,
                 )
+                .with_for_update()
             ).scalar_one_or_none()
             if row is None:
                 logger.debug("update_result: no prediction matching %s/%s/%s",
                              event_id, market, selection)
                 return
 
-            # Idempotency: don't double-credit
+            # Idempotency: don't double-credit — checked AFTER acquiring the
+            # row lock so the test is atomic vs concurrent writers.
             if row.result is not None:
                 return
 
@@ -532,7 +541,6 @@ class Database:
                     )
                 row.placement_status = "proposed"
                 row.placement_status_at = _utcnow_iso()
-                row.actually_placed = False
                 row.placed_at = None
                 row.placed_bookmaker = None
                 return True
@@ -569,7 +577,6 @@ class Database:
 
             row.placement_status = "confirmed"
             row.placement_status_at = _utcnow_iso()
-            row.actually_placed = True
             row.placed_at = _utcnow_iso()
             row.placed_bookmaker = bookmaker
             return True
@@ -602,9 +609,6 @@ class Database:
                 )
             row.placement_status = "skipped"
             row.placement_status_at = _utcnow_iso()
-            # Symmetric with confirm_prediction_placed which sets both. Keeps
-            # the legacy `actually_placed` flag aligned with `placement_status`.
-            row.actually_placed = False
             return True
 
     def unskip_prediction(self, prediction_id: int) -> bool:
@@ -629,7 +633,6 @@ class Database:
                 )
             row.placement_status = "proposed"
             row.placement_status_at = _utcnow_iso()
-            row.actually_placed = False
             return True
 
     def list_agent_runs(self, limit: int = 50, offset: int = 0,

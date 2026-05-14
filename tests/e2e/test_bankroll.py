@@ -2,9 +2,7 @@
 Unit tests for the bankroll module.
 
 ⚠ DESTRUCTIVE: an autouse fixture wipes the ledger and predictions tables
-between tests. To make sure this CAN NEVER hit production, the test only
-runs when BETBOT_TEST_DATABASE_URL points at a database whose name
-contains "test". Without that, all tests in this module are skipped.
+between tests. Safety gate enforced by tests/e2e/conftest.py.
 """
 import os
 import pytest
@@ -19,20 +17,6 @@ from betbot.bankroll import (
     record_bet_placed,
     record_bet_won,
     withdraw,
-)
-
-
-def _is_safe_test_db() -> bool:
-    url = os.getenv("BETBOT_TEST_DATABASE_URL", "").strip()
-    if not url.startswith(("postgresql://", "postgresql+")):
-        return False
-    return "test" in url.lower()
-
-
-pytestmark = pytest.mark.skipif(
-    not _is_safe_test_db(),
-    reason="bankroll tests need BETBOT_TEST_DATABASE_URL pointing at a Postgres "
-           "DB whose URL contains 'test' (autouse fixture is destructive).",
 )
 
 

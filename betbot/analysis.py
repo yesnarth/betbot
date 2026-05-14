@@ -99,18 +99,48 @@ def _normalize_name(name: str) -> str:
     return ' '.join(words)
 
 
+# Module-level memoization of (norm_index, token_index) keyed by id(cache).
+# A single `detect_value_bets` call invokes _fuzzy_lookup hundreds of times
+# (2 lookups per event × ~100 events × 5 sports), and rebuilding the
+# normalized index every call is pure waste — the team_stats_cache is
+# immutable during a scan. We use id(cache) since dicts aren't weakref-able;
+# entries are evicted by `_invalidate_norm_cache(cache)` when callers know
+# the cache has changed (typically not, since a scan reuses the same dict).
+_NORM_INDEX_CACHE: dict[int, tuple[dict[str, str], dict[str, frozenset]]] = {}
+
+
+def _norm_indexes_for(cache: dict) -> tuple[dict[str, str], dict[str, frozenset]]:
+    """Return (norm_index, token_index) for a team-stats cache, memoized.
+
+    norm_index : {normalized_name: original_name}
+    token_index: {normalized_name: frozenset(tokens)}
+    """
+    cache_id = id(cache)
+    cached = _NORM_INDEX_CACHE.get(cache_id)
+    # Cheap freshness check: if cache size changed, invalidate.
+    if cached is not None and len(cached[0]) == len(cache):
+        return cached
+    norm_index = {_normalize_name(k): k for k in cache}
+    token_index = {n: frozenset(n.split()) for n in norm_index}
+    _NORM_INDEX_CACHE[cache_id] = (norm_index, token_index)
+    return norm_index, token_index
+
+
 def _fuzzy_lookup(name: str, cache: dict):
     """Look up a team in cache: exact → normalized → alias → token-set → fuzzy.
 
     Token-set matching beats substring because it requires the discriminating
     tokens (city/united/hotspur) to match — preventing the historical bug
     where 'Manchester United' would silently get 'Manchester City' stats.
+
+    Performance: norm_index + token_index are memoized per-cache (see above),
+    so this is O(n) on tokens not O(n × normalize_cost) per call.
     """
     if name in cache:
         return cache[name], name
 
     norm_query = _normalize_name(name)
-    norm_index: dict[str, str] = {_normalize_name(k): k for k in cache}
+    norm_index, token_index = _norm_indexes_for(cache)
 
     # 1. Exact normalized match
     if norm_query in norm_index:
@@ -120,19 +150,19 @@ def _fuzzy_lookup(name: str, cache: dict):
     alias_fragment = _KNOWN_ALIASES.get(norm_query)
     if alias_fragment:
         for norm_key, orig_key in norm_index.items():
-            if alias_fragment in norm_key.split():
+            if alias_fragment in token_index[norm_key]:
                 return cache[orig_key], orig_key
 
     # 3. Token-set match — every token of the shorter name must appear in the
     #    longer name. Example: "manchester united" tokens {manchester, united}
     #    must ALL be present in candidate's tokens. This rejects the buggy case
     #    where "manchester united" silently matched "manchester city".
-    query_tokens = set(norm_query.split())
+    query_tokens = frozenset(norm_query.split())
     if query_tokens:
         best_match: tuple[str, str] | None = None
         best_overlap = 0
         for norm_key, orig_key in norm_index.items():
-            key_tokens = set(norm_key.split())
+            key_tokens = token_index[norm_key]
             shorter, longer = (
                 (query_tokens, key_tokens) if len(query_tokens) <= len(key_tokens)
                 else (key_tokens, query_tokens)

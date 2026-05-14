@@ -149,10 +149,6 @@ def compare_variants(
             Prediction.created_at >= cutoff,
         )
         if only_placed:
-            # Use placement_status as the canonical "did the user bet?" flag.
-            # Same semantic as actually_placed but kept in sync with the
-            # proposed/confirmed/skipped lifecycle (skipped picks were
-            # reviewed but never confirmed, so they shouldn't count here).
             stmt = stmt.where(Prediction.placement_status == "confirmed")
         rows = s.execute(stmt).all()
 

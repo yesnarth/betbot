@@ -155,11 +155,14 @@ def _acquire_ledger_lock(s) -> None:
     On other dialects: no-op (we still rely on `session_scope`'s commit
     semantics, but the application is Postgres-only in production).
     """
-    try:
-        if s.bind.dialect.name == "postgresql":
-            s.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _ADVISORY_LOCK_KEY})
-    except Exception as exc:
-        logger.warning("Could not acquire advisory lock (%s) — proceeding without", exc)
+    # We DO NOT silently degrade if the lock fails. If Postgres is in
+    # read-only failover or the connection has lost its session, proceeding
+    # without the lock would allow two concurrent _append() calls to read
+    # the same balance and write inconsistent balance_after values. Raise
+    # loudly so the caller's transaction rolls back instead of corrupting
+    # the ledger.
+    if s.bind.dialect.name == "postgresql":
+        s.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _ADVISORY_LOCK_KEY})
 
 
 def _append(

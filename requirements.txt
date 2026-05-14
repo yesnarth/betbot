@@ -5,15 +5,15 @@ python-dotenv>=1.0.0
 scipy>=1.11.0
 tenacity>=8.2.0
 
-# DB / ORM (Phase 1)
+# DB / ORM
 sqlalchemy>=2.0.25
 alembic>=1.13.0
 psycopg2-binary>=2.9.9     ; sys_platform != "darwin" or platform_machine != "arm64"
 
-# MCP server (Phase 3)
+# MCP server
 mcp[cli]>=1.27.0
 
-# REST API + AI agent (Phase 4)
+# REST API + AI agent
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 httpx>=0.27.0
@@ -23,12 +23,12 @@ python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
 python-multipart>=0.0.9
 
-# Dashboard (Phase 5)
+# Dashboard
 streamlit>=1.40.0
 pandas>=2.0.0
 lxml>=5.0.0          # required by pandas.read_html for basketball-reference scraping
 
-# ML calibration (Phase B2)
+# ML calibration
 scikit-learn>=1.4.0
 joblib>=1.3.0
 
