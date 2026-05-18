@@ -253,15 +253,17 @@ def detect_value_bets(
         probs_cache = {}
 
     for sport_key, events in events_by_sport.items():
-        # Resolve team-stats cache + league averages for this sport
+        # Resolve team-stats cache + league averages + H2H lookup for this sport
+        h2h_lookup: dict = {}
         if prebuilt_stats_by_sport and sport_key in prebuilt_stats_by_sport:
             entry = prebuilt_stats_by_sport[sport_key]
             team_stats_cache = entry.get("teams", {})
             home_avg = entry.get("home_avg", DEFAULT_HOME_AVG)
             away_avg = entry.get("away_avg", DEFAULT_AWAY_AVG)
+            h2h_lookup = entry.get("h2h", {})
             logger.info(
-                "  %s : Poisson (%d équipes, ligue %.2f/%.2f buts)",
-                sport_key, len(team_stats_cache), home_avg, away_avg,
+                "  %s : Poisson (%d équipes, %d paires H2H, ligue %.2f/%.2f buts)",
+                sport_key, len(team_stats_cache), len(h2h_lookup), home_avg, away_avg,
             )
         else:
             raw_matches = match_history_by_sport.get(sport_key, [])
@@ -287,7 +289,8 @@ def detect_value_bets(
             probs = probs_cache.get(event_id)
             if probs is None:
                 probs = _compute_probs(home, away, event, team_stats_cache,
-                                       home_avg, away_avg, sport_key=sport_key)
+                                       home_avg, away_avg, sport_key=sport_key,
+                                       h2h_lookup=h2h_lookup)
                 if probs is not None:
                     probs_cache[event_id] = probs
             if probs is None:
@@ -450,6 +453,37 @@ def _basketball_event_to_probs(home: str, away: str, sport_key: str) -> MatchPro
     )
 
 
+def _orient_h2h(h2h_lookup: dict, home: str, away: str) -> dict | None:
+    """
+    Return H2H stats oriented from the home_team's perspective, given an
+    alphabetically-keyed pair dict (keys = (team_a, team_b) with team_a < team_b).
+    Returns None when the pair has no recorded history.
+    """
+    if not h2h_lookup:
+        return None
+    a, b = (home, away) if home < away else (away, home)
+    row = h2h_lookup.get((a, b))
+    if not row:
+        return None
+    if home == a:
+        return {
+            "n_matches": row["team_a_wins"] + row["draws"] + row["team_b_wins"],
+            "home_wins": row["team_a_wins"],
+            "draws":     row["draws"],
+            "away_wins": row["team_b_wins"],
+            "home_goals_avg": row["team_a_goals_avg"],
+            "away_goals_avg": row["team_b_goals_avg"],
+        }
+    return {
+        "n_matches": row["team_a_wins"] + row["draws"] + row["team_b_wins"],
+        "home_wins": row["team_b_wins"],
+        "draws":     row["draws"],
+        "away_wins": row["team_a_wins"],
+        "home_goals_avg": row["team_b_goals_avg"],
+        "away_goals_avg": row["team_a_goals_avg"],
+    }
+
+
 def _compute_probs(
     home: str,
     away: str,
@@ -458,6 +492,7 @@ def _compute_probs(
     league_home_avg: float,
     league_away_avg: float,
     sport_key: str | None = None,
+    h2h_lookup: dict | None = None,
 ) -> MatchProbs | None:
     """
     Compute match probabilities using Dixon-Coles-style independent Poisson.
@@ -511,8 +546,11 @@ def _compute_probs(
 
     if home_stats and away_stats:
         try:
-            # Use blended model (Dixon-Coles + xG + ELO) — auto-degrades to plain
-            # Dixon-Coles when xG/ELO are missing (legacy team_stats rows).
+            # Orient H2H by home_team for this fixture (lookup is alphabetical).
+            h2h_oriented = _orient_h2h(h2h_lookup or {}, home, away)
+            # Use blended model (Dixon-Coles + xG + ELO + H2H) — auto-degrades
+            # when any signal is missing (legacy rows / fresh install / no past
+            # matchup between these two teams).
             result = blended_match_probs(
                 home_stats=home_stats,
                 away_stats=away_stats,
@@ -520,6 +558,7 @@ def _compute_probs(
                 league_away_avg=league_away_avg,
                 weather_modifier=1.0,
                 sport_key=sport_key,   # propagates to per-league Dixon-Coles τ
+                h2h=h2h_oriented,
             )
             match_info = f"({home_matched} / {away_matched})" if (home_matched != home or away_matched != away) else ""
             logger.debug("%s %s vs %s %s: λH=%.2f λA=%.2f → H=%.1f%% D=%.1f%% A=%.1f%%",

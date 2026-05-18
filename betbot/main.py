@@ -116,6 +116,59 @@ def _ensure_min_combos(
 # Team stats update
 # ---------------------------------------------------------------------------
 
+def _compute_h2h_for_league(parsed: list[dict]) -> dict[tuple[str, str], dict]:
+    """
+    Aggregate per-pair head-to-head stats from the parsed match list.
+
+    Returns {(team_a, team_b): {team_a_wins, draws, team_b_wins,
+    team_a_goals_avg, team_b_goals_avg}} with team_a < team_b alphabetically.
+    """
+    from collections import defaultdict
+
+    pair_acc: dict[tuple[str, str], dict] = defaultdict(
+        lambda: {"team_a_wins": 0, "draws": 0, "team_b_wins": 0,
+                 "team_a_goals_total": 0, "team_b_goals_total": 0,
+                 "n_matches": 0}
+    )
+    for m in parsed:
+        home = m.get("home_team")
+        away = m.get("away_team")
+        if not (home and away):
+            continue
+        team_a, team_b = (home, away) if home < away else (away, home)
+        home_goals = int(m.get("home_goals", 0) or 0)
+        away_goals = int(m.get("away_goals", 0) or 0)
+        # Orient goals to team_a's perspective.
+        if home == team_a:
+            a_goals, b_goals = home_goals, away_goals
+        else:
+            a_goals, b_goals = away_goals, home_goals
+        acc = pair_acc[(team_a, team_b)]
+        acc["n_matches"] += 1
+        acc["team_a_goals_total"] += a_goals
+        acc["team_b_goals_total"] += b_goals
+        if a_goals > b_goals:
+            acc["team_a_wins"] += 1
+        elif a_goals == b_goals:
+            acc["draws"] += 1
+        else:
+            acc["team_b_wins"] += 1
+
+    out: dict[tuple[str, str], dict] = {}
+    for pair, acc in pair_acc.items():
+        n = acc["n_matches"]
+        if n == 0:
+            continue
+        out[pair] = {
+            "team_a_wins":      acc["team_a_wins"],
+            "draws":            acc["draws"],
+            "team_b_wins":      acc["team_b_wins"],
+            "team_a_goals_avg": round(acc["team_a_goals_total"] / n, 3),
+            "team_b_goals_avg": round(acc["team_b_goals_total"] / n, 3),
+        }
+    return out
+
+
 def update_team_stats(settings, db: Database, logger: logging.Logger) -> None:
     logger.info("=== Mise à jour des stats d'équipes ===")
     if not settings.football_data_api_key or "REMPLACE" in settings.football_data_api_key:
@@ -156,7 +209,26 @@ def update_team_stats(settings, db: Database, logger: logging.Logger) -> None:
                     matches_analyzed=stats.matches_analyzed,
                 )
                 saved += 1
-        logger.info("  %s : %d équipes, moyennes ligue %.2f/%.2f buts", sport_key, saved, home_avg, away_avg)
+
+        # H2H per pair — cheap derivative of the same match list, persisted
+        # for the blended model to apply a Bayesian H2H nudge at scan time.
+        h2h_pairs = _compute_h2h_for_league(parsed)
+        for (team_a, team_b), stats in h2h_pairs.items():
+            db.upsert_head_to_head(
+                sport_key=sport_key,
+                team_a=team_a,
+                team_b=team_b,
+                team_a_wins=stats["team_a_wins"],
+                draws=stats["draws"],
+                team_b_wins=stats["team_b_wins"],
+                team_a_goals_avg=stats["team_a_goals_avg"],
+                team_b_goals_avg=stats["team_b_goals_avg"],
+            )
+
+        logger.info(
+            "  %s : %d équipes, %d paires H2H, moyennes ligue %.2f/%.2f buts",
+            sport_key, saved, len(h2h_pairs), home_avg, away_avg,
+        )
 
     logger.info("Mise à jour stats terminée.")
 

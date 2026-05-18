@@ -53,6 +53,33 @@ class LeagueAverage(Base):
     updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)
 
 
+class HeadToHead(Base):
+    """
+    Per-pair head-to-head history within a competition.
+
+    Stored alphabetically as (team_a, team_b) with team_a < team_b, so each
+    pair occupies exactly one row regardless of who plays home in a future
+    fixture. Populated by the weekly update_team_stats worker job (which
+    already fetches all parsed matches), used by blended_match_probs to
+    apply a small Bayesian H2H nudge to predictions.
+    """
+    __tablename__ = "head_to_head"
+    __table_args__ = (
+        Index("ix_head_to_head_sport_key", "sport_key"),
+    )
+
+    sport_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    team_a: Mapped[str] = mapped_column(String(128), primary_key=True)
+    team_b: Mapped[str] = mapped_column(String(128), primary_key=True)
+    n_matches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    team_a_wins: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    draws: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    team_b_wins: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    team_a_goals_avg: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    team_b_goals_avg: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)
+
+
 class Prediction(Base):
     __tablename__ = "predictions"
     __table_args__ = (

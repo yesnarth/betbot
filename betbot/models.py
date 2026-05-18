@@ -499,6 +499,53 @@ def extract_best_odds(
 # Blended model — Dixon-Coles + xG + ELO with optional weather modifier
 # ---------------------------------------------------------------------------
 
+H2H_WEIGHT = 0.10           # default Bayesian weight for the H2H signal
+H2H_FULL_AT = 6             # n past confrontations that count as a "full" sample
+H2H_MIN_MATCHES = 3         # below this we skip H2H entirely
+
+
+def _h2h_adjustment(
+    h2h: dict | None,
+    poisson_home: float,
+    poisson_draw: float,
+    poisson_away: float,
+) -> tuple[float, float, float]:
+    """
+    Apply a small Bayesian H2H nudge on top of the Poisson H2H probabilities.
+
+    h2h carries the home_team-oriented stats :
+        {n_matches, home_wins, draws, away_wins, home_goals_avg, away_goals_avg}
+
+    Strategy : compute the empirical (W, D, L) rate of the home team in past
+    confrontations and blend it into the Poisson prediction with a weight
+    scaled by sample size :
+
+        weight = min(n_matches / H2H_FULL_AT, 1.0) × H2H_WEIGHT
+
+    n < H2H_MIN_MATCHES → no adjustment. Returns the input probabilities
+    unchanged when h2h is None or too small.
+    """
+    if not h2h:
+        return poisson_home, poisson_draw, poisson_away
+    n = int(h2h.get("n_matches", 0))
+    if n < H2H_MIN_MATCHES:
+        return poisson_home, poisson_draw, poisson_away
+
+    w = min(n / H2H_FULL_AT, 1.0) * H2H_WEIGHT
+    h2h_home = h2h["home_wins"] / n
+    h2h_draw = h2h["draws"] / n
+    h2h_away = h2h["away_wins"] / n
+    home = (1 - w) * poisson_home + w * h2h_home
+    draw = (1 - w) * poisson_draw + w * h2h_draw
+    away = (1 - w) * poisson_away + w * h2h_away
+    # Renormalize defensively — rounding plus the (1-w)+w identity should keep
+    # this at 1.0 but float drift can shift it by ~1e-12.
+    total = home + draw + away
+    if total > 0:
+        home, draw, away = home / total, draw / total, away / total
+    return home, draw, away
+
+
 def blended_match_probs(
     home_stats: "TeamStats",
     away_stats: "TeamStats",
@@ -509,9 +556,10 @@ def blended_match_probs(
     xg_weight: float = 0.35,
     weights_sum_check: bool = True,
     sport_key: str | None = None,
+    h2h: dict | None = None,
 ) -> "MatchProbs":
     """
-    Production-grade prediction blending three independent signals:
+    Production-grade prediction blending four independent signals:
 
       1. **Dixon-Coles** on goals (the base λ)
       2. **xG** when available — overrides the λ-from-goals with λ-from-xG,
@@ -519,11 +567,17 @@ def blended_match_probs(
          calibration error vs. raw goals).
       3. **ELO** — used as a Bayesian prior to nudge probabilities toward
          the long-term club strength rating.
+      4. **H2H** — small Bayesian nudge using the home team's historical
+         win rate in past direct matchups. Weight scales with sample size.
 
     Weights:
       - Dixon-Coles weight = 1.0 - elo_weight - xg_weight
       - elo_weight: 0.30   (literature converges on 0.25-0.35)
       - xg_weight:  0.35   (when xG data available; otherwise re-weighted to 0)
+      - h2h weight: 0.10 × min(n/6, 1)  (capped — noisy on small samples)
+
+    `h2h` if provided must be home-team-oriented:
+        {n_matches, home_wins, draws, away_wins, home_goals_avg, away_goals_avg}
 
     weather_modifier: multiplicative factor on λ (≈ 0.85-1.05). Applied at the
     very end on both sides equally — it lowers expected goals on both teams
@@ -603,6 +657,14 @@ def blended_match_probs(
             home_win, draw, away_win = poisson_probs.home_win, poisson_probs.draw, poisson_probs.away_win
     else:
         home_win, draw, away_win = poisson_probs.home_win, poisson_probs.draw, poisson_probs.away_win
+
+    # ---- Apply H2H Bayesian nudge -----------------------------------------
+    # Weight scales with sample size so a single past confrontation barely
+    # moves the prediction, while a consistent dominance over 6+ matches
+    # gets the full H2H_WEIGHT (default 10%) blended in.
+    home_win, draw, away_win = _h2h_adjustment(
+        h2h, home_win, draw, away_win,
+    )
 
     return MatchProbs(
         home_win=round(home_win, 6),

@@ -42,13 +42,23 @@ def filter_upcoming_today(events: list[dict], min_before_kickoff: int = 60) -> l
 
 def load_team_stats_from_db(db: Database, sport_keys: object) -> dict[str, dict]:
     """
-    Load football team stats from Postgres into the shape consumed by
-    `detect_value_bets` and the model layer:
+    Load football team stats + H2H pair history from Postgres into the shape
+    consumed by `detect_value_bets` and the model layer:
 
-        {sport_key: {"teams": {name: TeamStats}, "home_avg": float, "away_avg": float}}
+        {sport_key: {
+            "teams":    {name: TeamStats},
+            "home_avg": float,
+            "away_avg": float,
+            "h2h":      {(team_a, team_b): {team_a_wins, draws, team_b_wins,
+                                             team_a_goals_avg, team_b_goals_avg}},
+        }}
+
+    H2H keys are alphabetical (team_a < team_b) — callers must orient when
+    looking up.
 
     Falls back to default league averages (1.35 / 1.10) if `league_averages`
-    row is missing for a given league.
+    row is missing for a given league. H2H section is `{}` when no pairs
+    are stored yet (fresh install or before the first stats refresh).
     """
     from betbot.models import DEFAULT_HOME_AVG, DEFAULT_AWAY_AVG
 
@@ -72,5 +82,11 @@ def load_team_stats_from_db(db: Database, sport_keys: object) -> dict[str, dict]
             )
         avgs = db.get_league_averages(sport_key)
         home_avg, away_avg = avgs if avgs else (DEFAULT_HOME_AVG, DEFAULT_AWAY_AVG)
-        result[sport_key] = {"teams": teams, "home_avg": home_avg, "away_avg": away_avg}
+        h2h = db.get_all_h2h_for_league(sport_key)
+        result[sport_key] = {
+            "teams": teams,
+            "home_avg": home_avg,
+            "away_avg": away_avg,
+            "h2h": h2h,
+        }
     return result

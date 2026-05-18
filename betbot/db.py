@@ -17,6 +17,7 @@ from sqlalchemy.engine import Engine
 from betbot.database import Base, get_engine, reset_engine, session_scope
 from betbot.orm_models import (
     AgentRun,
+    HeadToHead,
     LeagueAverage,
     Prediction,
     TeamStat,
@@ -173,6 +174,108 @@ class Database:
         with session_scope() as s:
             row = s.get(LeagueAverage, sport_key)
             return (row.home_avg, row.away_avg) if row else None
+
+    # ------------------------------------------------------------------
+    # Head-to-head pair history
+    # ------------------------------------------------------------------
+
+    def upsert_head_to_head(
+        self,
+        sport_key: str,
+        team_a: str,
+        team_b: str,
+        team_a_wins: int,
+        draws: int,
+        team_b_wins: int,
+        team_a_goals_avg: float,
+        team_b_goals_avg: float,
+    ) -> None:
+        """
+        Persist H2H stats for an unordered pair. `team_a` and `team_b` must
+        be the alphabetical orientation — callers normalize before calling.
+        """
+        assert team_a < team_b, "H2H rows must be stored alphabetically (team_a < team_b)"
+        n_matches = team_a_wins + draws + team_b_wins
+        with session_scope() as s:
+            existing = s.get(HeadToHead, (sport_key, team_a, team_b))
+            if existing:
+                existing.n_matches = n_matches
+                existing.team_a_wins = team_a_wins
+                existing.draws = draws
+                existing.team_b_wins = team_b_wins
+                existing.team_a_goals_avg = team_a_goals_avg
+                existing.team_b_goals_avg = team_b_goals_avg
+                existing.updated_at = _utcnow_iso()
+            else:
+                s.add(HeadToHead(
+                    sport_key=sport_key,
+                    team_a=team_a,
+                    team_b=team_b,
+                    n_matches=n_matches,
+                    team_a_wins=team_a_wins,
+                    draws=draws,
+                    team_b_wins=team_b_wins,
+                    team_a_goals_avg=team_a_goals_avg,
+                    team_b_goals_avg=team_b_goals_avg,
+                    updated_at=_utcnow_iso(),
+                ))
+
+    def get_head_to_head(
+        self, sport_key: str, home_team: str, away_team: str,
+    ) -> dict | None:
+        """
+        Return H2H stats oriented from the home_team's perspective :
+            {n_matches, home_wins, draws, away_wins, home_goals_avg, away_goals_avg}
+        Storage is alphabetical ; this method swaps the columns when needed
+        so callers don't have to think about which team is team_a.
+        """
+        a, b = (home_team, away_team) if home_team < away_team else (away_team, home_team)
+        home_is_a = home_team == a
+        with session_scope() as s:
+            row = s.get(HeadToHead, (sport_key, a, b))
+            if row is None:
+                return None
+            if home_is_a:
+                return {
+                    "n_matches": row.n_matches,
+                    "home_wins": row.team_a_wins,
+                    "draws": row.draws,
+                    "away_wins": row.team_b_wins,
+                    "home_goals_avg": row.team_a_goals_avg,
+                    "away_goals_avg": row.team_b_goals_avg,
+                }
+            return {
+                "n_matches": row.n_matches,
+                "home_wins": row.team_b_wins,
+                "draws": row.draws,
+                "away_wins": row.team_a_wins,
+                "home_goals_avg": row.team_b_goals_avg,
+                "away_goals_avg": row.team_a_goals_avg,
+            }
+
+    def get_all_h2h_for_league(self, sport_key: str) -> dict[tuple[str, str], dict]:
+        """
+        Return a {(team_a, team_b): {…stats…}} dict for every pair stored in
+        a league. Pre-loaded once per scan to avoid 200+ point lookups.
+        Keys are always alphabetical (team_a < team_b) — callers must
+        respect that orientation OR use get_head_to_head() for a single
+        oriented lookup.
+        """
+        with session_scope() as s:
+            rows = s.execute(
+                select(HeadToHead).where(HeadToHead.sport_key == sport_key)
+            ).scalars().all()
+            return {
+                (r.team_a, r.team_b): {
+                    "n_matches": r.n_matches,
+                    "team_a_wins": r.team_a_wins,
+                    "draws": r.draws,
+                    "team_b_wins": r.team_b_wins,
+                    "team_a_goals_avg": r.team_a_goals_avg,
+                    "team_b_goals_avg": r.team_b_goals_avg,
+                }
+                for r in rows
+            }
 
     # ------------------------------------------------------------------
     # Predictions
