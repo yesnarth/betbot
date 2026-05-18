@@ -198,11 +198,19 @@ def kelly_stake(
     bankroll: float,
     kelly_fraction: float = 0.25,
     max_fraction: float = 0.05,
+    reliability: float = 1.0,
 ) -> float:
     """
-    Fractional Kelly stake.
-    Returns 0.0 if edge is negative (do not bet).
-    Never exceeds max_fraction * bankroll.
+    Fractional Kelly stake, optionally down-weighted by reliability.
+
+    Returns 0.0 if edge is negative (do not bet). Never exceeds
+    max_fraction * bankroll.
+
+    `reliability` ∈ [0, 1] qualifies how trustworthy the edge estimate is
+    (see betbot.reliability.compute_reliability). It linearly scales the
+    fractional Kelly so a reliability=0.3 pick gets ~30% of the stake a
+    reliability=1.0 pick would. Protects the bankroll from acting on
+    low-sample / huge-edge / extreme-prob signals at full conviction.
     """
     b = decimal_odds - 1.0
     p = model_prob
@@ -212,7 +220,9 @@ def kelly_stake(
     full_kelly = (b * p - q) / b
     if full_kelly <= 0:
         return 0.0
-    fraction = min(full_kelly * kelly_fraction, max_fraction)
+    # Clamp reliability defensively; callers should already pass a [0, 1] value.
+    rel = max(0.0, min(reliability, 1.0))
+    fraction = min(full_kelly * kelly_fraction * rel, max_fraction)
     return round(fraction * bankroll, 2)
 
 
@@ -311,8 +321,16 @@ def detect_value_bets(
                     ("1",   "Victoire domicile",   home,    "h2h",    None, probs.home_win),
                     ("X",   "Match nul",           "Draw",  "h2h",    None, probs.draw),
                     ("2",   "Victoire extérieur",  away,    "h2h",    None, probs.away_win),
+                    # Totals — the `totals` market in Odds API returns multiple
+                    # points (typically 1.5, 2.5, 3.5). extract_best_odds
+                    # silently returns None when a bookmaker doesn't quote the
+                    # specific point, so the loop just skips those legs.
+                    ("O15", "Plus de 1.5 buts",    "Over",  "totals", 1.5,  probs.over_15),
+                    ("U15", "Moins de 1.5 buts",   "Under", "totals", 1.5,  probs.under_15),
                     ("O25", "Plus de 2.5 buts",    "Over",  "totals", 2.5,  probs.over_25),
                     ("U25", "Moins de 2.5 buts",   "Under", "totals", 2.5,  probs.under_25),
+                    ("O35", "Plus de 3.5 buts",    "Over",  "totals", 3.5,  probs.over_35),
+                    ("U35", "Moins de 3.5 buts",   "Under", "totals", 3.5,  probs.under_35),
                 ]
 
             for code, label, outcome_name, market_key, point, raw_model_prob in outcome_map:
@@ -338,10 +356,11 @@ def detect_value_bets(
                 if edge < min_value_edge:
                     continue
 
-                stake = kelly_stake(model_prob, best.price, bankroll, kelly_fraction)
-                if stake == 0.0:
-                    continue
-
+                # Reliability is computed BEFORE Kelly so we can down-weight
+                # the stake for low-confidence picks. A pick with reliability
+                # 0.3 commits ~30% of what a 1.0 pick would — protects the
+                # bankroll from acting on huge-edge / small-sample artifacts
+                # at full conviction.
                 from betbot.reliability import compute_reliability
                 reliability = compute_reliability(
                     model_prob=model_prob,
@@ -349,6 +368,11 @@ def detect_value_bets(
                     model_type=probs.model,
                     n_matches=probs.n_matches if probs.n_matches > 0 else None,
                 )
+
+                stake = kelly_stake(model_prob, best.price, bankroll,
+                                    kelly_fraction, reliability=reliability)
+                if stake == 0.0:
+                    continue
 
                 all_bets.append(ValueBet(
                     event_id=event_id,
@@ -535,18 +559,30 @@ def build_parlays(
     n_legs: int = 3,
     top_n: int = 3,
     min_combined_odds: float = 2.0,
+    diversify_across_parlays: bool = True,
 ) -> list[Parlay]:
     """
     Generate n-leg parlays from ranked value bets.
-    Constraints:
-    - No two legs from the same match
-    - Combined odds >= min_combined_odds
-    - Ranked by combined expected value
+
+    Constraints applied in order :
+      - Within a parlay : no two legs from the same match (always).
+      - Combined odds ≥ min_combined_odds (filter out low-payout combos).
+      - When `diversify_across_parlays=True` (default) : ACROSS all returned
+        parlays, each event appears in at most ONE parlay. Prevents a single
+        upset from killing multiple parlays — the most common complaint when
+        the same high-edge pick gets stamped into every top-EV combo.
+
+    Ranking : combined expected value, descending. With diversification on,
+    we walk the sorted list and greedy-pick the next parlay whose events
+    are all disjoint from any already-selected parlay.
+
+    Returns up to `top_n` parlays (may return fewer if the diversification
+    constraint exhausts the disjoint pool — preferred to silent overlap).
     """
     parlays: list[Parlay] = []
 
     for combo in itertools.combinations(bets, n_legs):
-        # Check: no two bets on the same event
+        # Within-parlay constraint : no two legs on the same event.
         event_ids = [b.event_id for b in combo]
         if len(event_ids) != len(set(event_ids)):
             continue
@@ -571,7 +607,26 @@ def build_parlays(
         ))
 
     parlays.sort(key=lambda p: p.combined_ev, reverse=True)
-    return parlays[:top_n]
+
+    if not diversify_across_parlays:
+        return parlays[:top_n]
+
+    # Greedy event-disjoint selection. Walking the sorted list and skipping
+    # any parlay whose events overlap with already-chosen parlays guarantees
+    # the top_n returned share no match — a single failing match can take
+    # down at most ONE of the parlays. We trade EV for diversification : a
+    # slightly lower-EV parlay can supplant a higher-EV one that overlaps.
+    selected: list[Parlay] = []
+    used_events: set[str] = set()
+    for parlay in parlays:
+        parlay_events = {bet.event_id for bet in parlay.bets}
+        if parlay_events & used_events:
+            continue
+        selected.append(parlay)
+        used_events.update(parlay_events)
+        if len(selected) >= top_n:
+            break
+    return selected
 
 
 # ---------------------------------------------------------------------------

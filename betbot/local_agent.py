@@ -426,11 +426,21 @@ def evaluate_picks(
         # would leave a stake size that doesn't match the calibrated prob.
         ev.final_prob = max(0.0, min(ev.final_prob, 1.0))
         ev.final_edge = round(ev.final_prob * pick["best_odds"] - 1.0, 4)
+        # Recompute reliability on the post-calibration edge so Kelly is
+        # weighted by the score the user will actually see in the table.
         from betbot.analysis import kelly_stake
+        from betbot.reliability import compute_reliability
+        post_reliability = compute_reliability(
+            model_prob=ev.final_prob,
+            value_edge=ev.final_edge,
+            model_type=pick.get("model_type", "poisson"),
+            n_matches=pick.get("n_matches"),
+        )
         ev.pick = {
             **pick,
             "kelly_stake": kelly_stake(
-                ev.final_prob, pick["best_odds"], bankroll, kelly_fraction
+                ev.final_prob, pick["best_odds"], bankroll, kelly_fraction,
+                reliability=post_reliability,
             ),
         }
 

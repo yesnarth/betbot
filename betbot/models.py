@@ -91,6 +91,13 @@ class MatchProbs:
     under_25: float = 0.0     # complement of over_25
     btts_yes: float = 0.0      # Both Teams To Score = Yes
     btts_no: float = 0.0       # complement
+    # Additional totals lines — same Poisson score matrix, different cuts.
+    # Bookmakers don't always quote 1.5 / 3.5 ; extract_best_odds returns
+    # None silently when missing, so value detection naturally skips them.
+    over_15: float = 0.0
+    under_15: float = 0.0
+    over_35: float = 0.0
+    under_35: float = 0.0
     lambda_home: float = 0.0
     lambda_away: float = 0.0
     model: str = "poisson"
@@ -275,7 +282,9 @@ def poisson_match_probs(lambda_home: float, lambda_away: float,
     prob_home = 0.0
     prob_draw = 0.0
     prob_away = 0.0
+    prob_over15 = 0.0
     prob_over25 = 0.0
+    prob_over35 = 0.0
     prob_btts_yes = 0.0
     total_mass = 0.0
 
@@ -291,8 +300,13 @@ def poisson_match_probs(lambda_home: float, lambda_away: float,
                 prob_draw += p
             else:
                 prob_away += p
-            if i + j > 2:
+            total_goals = i + j
+            if total_goals > 1:
+                prob_over15 += p
+            if total_goals > 2:
                 prob_over25 += p
+            if total_goals > 3:
+                prob_over35 += p
             if i >= 1 and j >= 1:
                 prob_btts_yes += p
 
@@ -303,7 +317,9 @@ def poisson_match_probs(lambda_home: float, lambda_away: float,
         prob_home    /= total_mass
         prob_draw    /= total_mass
         prob_away    /= total_mass
+        prob_over15  /= total_mass
         prob_over25  /= total_mass
+        prob_over35  /= total_mass
         prob_btts_yes /= total_mass
 
     return MatchProbs(
@@ -314,6 +330,10 @@ def poisson_match_probs(lambda_home: float, lambda_away: float,
         under_25=round(1.0 - prob_over25, 6),
         btts_yes=round(prob_btts_yes, 6),
         btts_no=round(1.0 - prob_btts_yes, 6),
+        over_15=round(prob_over15, 6),
+        under_15=round(1.0 - prob_over15, 6),
+        over_35=round(prob_over35, 6),
+        under_35=round(1.0 - prob_over35, 6),
         lambda_home=round(lambda_home, 4),
         lambda_away=round(lambda_away, 4),
         model="poisson",
@@ -402,6 +422,10 @@ def consensus_match_probs(event: dict) -> MatchProbs | None:
         under_25=probs.under_25,
         btts_yes=probs.btts_yes,
         btts_no=probs.btts_no,
+        over_15=probs.over_15,
+        under_15=probs.under_15,
+        over_35=probs.over_35,
+        under_35=probs.under_35,
         lambda_home=lh,
         lambda_away=la,
         model="consensus",
@@ -588,6 +612,10 @@ def blended_match_probs(
         under_25=poisson_probs.under_25,
         btts_yes=poisson_probs.btts_yes,
         btts_no=poisson_probs.btts_no,
+        over_15=poisson_probs.over_15,
+        under_15=poisson_probs.under_15,
+        over_35=poisson_probs.over_35,
+        under_35=poisson_probs.under_35,
         lambda_home=round(lambda_home, 4),
         lambda_away=round(lambda_away, 4),
         model="blended" if (has_xg or has_elo) else "poisson",
