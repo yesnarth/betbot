@@ -18,6 +18,15 @@ def api_get(path: str, **params: Any) -> Any:
     return r.json()
 
 
+# Some POST endpoints can run for 8+ minutes (Claude agent with ambitious
+# "5 parlays of 5 legs" requests, cold-start calibration running 5 backtests
+# back-to-back, etc.). Picking 900s as the default keeps the dashboard from
+# giving up before the backend does. The agent_run row is persisted whether
+# or not the HTTP response makes it back, so a frontend timeout only loses
+# the live response — the result is always recoverable from Historique IA.
+LONG_RUNNING_TIMEOUT = 900
+
+
 def api_post(
     path: str,
     json: dict | None = None,
@@ -30,7 +39,7 @@ def api_post(
         json=json,
         headers=headers,
         auth=AUTH,
-        timeout=180,
+        timeout=LONG_RUNNING_TIMEOUT,
     )
     r.raise_for_status()
     return r.json()
