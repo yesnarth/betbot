@@ -15,12 +15,15 @@ from betbot_dashboard.styles import empty_state
 
 
 SUPPORTED_LEAGUES = {
-    "soccer_epl":                "⚽ Premier League",
-    "soccer_spain_la_liga":      "⚽ La Liga",
-    "soccer_germany_bundesliga": "⚽ Bundesliga",
-    "soccer_italy_serie_a":      "⚽ Serie A",
-    "soccer_france_ligue1":      "⚽ Ligue 1",
-    "soccer_uefa_champs_league": "⚽ Champions League",
+    "soccer_epl":                    "⚽ Premier League",
+    "soccer_spain_la_liga":          "⚽ La Liga",
+    "soccer_germany_bundesliga":     "⚽ Bundesliga",
+    "soccer_italy_serie_a":          "⚽ Serie A",
+    "soccer_france_ligue1":          "⚽ Ligue 1",
+    "soccer_uefa_champs_league":     "⚽ Champions League",
+    "soccer_efl_champ":              "⚽ Championship 🇬🇧",
+    "soccer_netherlands_eredivisie": "⚽ Eredivisie 🇳🇱",
+    "soccer_portugal_primeira_liga": "⚽ Primeira Liga 🇵🇹",
 }
 
 

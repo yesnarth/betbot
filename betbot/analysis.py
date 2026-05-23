@@ -681,5 +681,8 @@ def _sport_key_to_label(sport_key: str) -> str:
         "soccer_germany_bundesliga": "Bundesliga",
         "soccer_uefa_champs_league": "Champions League",
         "soccer_africa_cup_of_nations": "CAN",
+        "soccer_efl_champ": "Championship",
+        "soccer_netherlands_eredivisie": "Eredivisie",
+        "soccer_portugal_primeira_liga": "Primeira Liga",
     }
     return labels.get(sport_key, sport_key.replace("soccer_", "").replace("_", " ").title())

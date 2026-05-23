@@ -27,12 +27,19 @@ LEAGUE_URL = "https://understat.com/league/{league}/{year}"
 
 # Map our internal sport keys → Understat's URL slug
 SPORT_TO_UNDERSTAT: dict[str, str] = {
-    "soccer_epl":                "EPL",
-    "soccer_spain_la_liga":      "La_Liga",
-    "soccer_germany_bundesliga": "Bundesliga",
-    "soccer_italy_serie_a":      "Serie_A",
-    "soccer_france_ligue1":      "Ligue_1",
-    "soccer_uefa_champs_league": None,   # Understat doesn't cover CL stand-alone
+    "soccer_epl":                    "EPL",
+    "soccer_spain_la_liga":          "La_Liga",
+    "soccer_germany_bundesliga":     "Bundesliga",
+    "soccer_italy_serie_a":          "Serie_A",
+    "soccer_france_ligue1":          "Ligue_1",
+    "soccer_uefa_champs_league":     None,   # Understat doesn't cover CL stand-alone
+    # Extended coverage — only Eredivisie has Understat xG. Championship
+    # (D2 EN) and Primeira Liga aren't covered, so their picks fall back to
+    # the Dixon-Coles + ELO + H2H blend without xG. Setting them to None
+    # keeps the enrichment job from making 404-prone requests.
+    "soccer_efl_champ":              None,
+    "soccer_netherlands_eredivisie": "Eredivisie",
+    "soccer_portugal_primeira_liga": None,
 }
 
 _CACHE: dict[tuple[str, int], dict] = {}

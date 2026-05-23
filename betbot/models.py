@@ -57,12 +57,19 @@ SHRINK_FULL_AT = 12
 # inflation per outcome — this is *correct EV* (you'd bet at the best price)
 # but should not be confused with "the model thinks draws are too likely".
 DIXON_COLES_RHO_BY_LEAGUE: dict[str, float] = {
-    "soccer_epl":                -0.10,   # Premier League (~standard)
-    "soccer_spain_la_liga":      -0.13,   # La Liga (more low-scoring draws)
-    "soccer_germany_bundesliga": -0.05,   # Bundesliga (offensive)
-    "soccer_italy_serie_a":      -0.15,   # Serie A (very defensive)
-    "soccer_france_ligue1":      -0.10,   # Ligue 1
-    "soccer_uefa_champs_league": -0.08,   # Champions League
+    "soccer_epl":                    -0.10,  # Premier League (~standard)
+    "soccer_spain_la_liga":          -0.13,  # La Liga (more low-scoring draws)
+    "soccer_germany_bundesliga":     -0.05,  # Bundesliga (offensive)
+    "soccer_italy_serie_a":          -0.15,  # Serie A (very defensive)
+    "soccer_france_ligue1":          -0.10,  # Ligue 1
+    "soccer_uefa_champs_league":     -0.08,  # Champions League
+    # Extended coverage — initial guesses, can be tuned after a backtest
+    # cycle on each league. Championship is similar in scoring rhythm to PL;
+    # Eredivisie is famously offensive (>3 goals/match avg) like the Bundesliga;
+    # Primeira Liga sits between PL and Serie A on draw frequency.
+    "soccer_efl_champ":              -0.10,
+    "soccer_netherlands_eredivisie": -0.05,
+    "soccer_portugal_primeira_liga": -0.12,
 }
 
 DEFAULT_DIXON_COLES_RHO = -0.10

@@ -24,6 +24,11 @@ LEAGUE_MAP: dict[str, str | None] = {
     "soccer_france_ligue1": "FL1",
     "soccer_uefa_champs_league": "CL",
     "soccer_africa_cup_of_nations": None,  # non disponible sur free tier
+    # Extended coverage — all three live in the football-data.org free tier
+    # so the Poisson model gets full team-level stats without a paid plan.
+    "soccer_efl_champ": "ELC",                  # English Championship (D2 anglaise)
+    "soccer_netherlands_eredivisie": "DED",     # Eredivisie (D1 néerlandaise)
+    "soccer_portugal_primeira_liga": "PPL",     # Primeira Liga (D1 portugaise)
 }
 
 

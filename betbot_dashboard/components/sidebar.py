@@ -110,10 +110,14 @@ def render_sidebar(
                 "Ligue / Compétition",
                 options=[
                     "Toutes",
-                    # Football
+                    # Football — D1 grandes ligues européennes + CL
                     "soccer_epl", "soccer_spain_la_liga",
                     "soccer_germany_bundesliga", "soccer_italy_serie_a",
                     "soccer_france_ligue1", "soccer_uefa_champs_league",
+                    # Football — couverture étendue
+                    "soccer_efl_champ",
+                    "soccer_netherlands_eredivisie",
+                    "soccer_portugal_primeira_liga",
                     # Tennis (auto-skipped si Grand Slam pas en cours)
                     "tennis_atp_aus_open", "tennis_atp_french_open",
                     "tennis_atp_wimbledon", "tennis_atp_us_open",

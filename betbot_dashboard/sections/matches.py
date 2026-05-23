@@ -9,7 +9,7 @@ from betbot_dashboard.styles import empty_state
 
 
 LEAGUE_LABELS = {
-    # Football
+    # Football — D1 grandes ligues européennes + CL
     "soccer_epl": "⚽ Premier League",
     "soccer_spain_la_liga": "⚽ La Liga",
     "soccer_germany_bundesliga": "⚽ Bundesliga",
@@ -17,6 +17,10 @@ LEAGUE_LABELS = {
     "soccer_france_ligue1": "⚽ Ligue 1",
     "soccer_uefa_champs_league": "⚽ Champions League",
     "soccer_africa_cup_of_nations": "⚽ CAN",
+    # Football — couverture étendue
+    "soccer_efl_champ": "⚽ Championship 🇬🇧",
+    "soccer_netherlands_eredivisie": "⚽ Eredivisie 🇳🇱",
+    "soccer_portugal_primeira_liga": "⚽ Primeira Liga 🇵🇹",
     # Tennis
     "tennis_atp_aus_open": "🎾 Australian Open",
     "tennis_atp_french_open": "🎾 Roland Garros",

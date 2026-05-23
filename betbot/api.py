@@ -33,6 +33,21 @@ SPORT_KEYS = [
     "soccer_germany_bundesliga",
     "soccer_uefa_champs_league",
     "soccer_africa_cup_of_nations",
+    # English Championship — D2 anglaise. football-data.org free tier (ELC).
+    # ~24 équipes, ~46 matchs/an chacune. Marchés Pinnacle / Bet365 / Unibet
+    # quotent quasi tous les matchs. Bonne profondeur statistique pour le
+    # Poisson, légèrement moins liquide que la PL (édges souvent +1-2%
+    # plus larges).
+    "soccer_efl_champ",
+    # Eredivisie 🇳🇱 — D1 néerlandaise. football-data.org free tier (DED).
+    # 18 équipes, marchés serrés. Calendrier qui complète bien les fenêtres
+    # samedi soir / dimanche après-midi déjà couvertes par PL/Liga/Serie A.
+    "soccer_netherlands_eredivisie",
+    # Primeira Liga 🇵🇹 — D1 portugaise. football-data.org free tier (PPL).
+    # 18 équipes, dont l'axe Porto / Sporting / Benfica qui draine la liquidité.
+    # Marchés bookmakers très complets, dont O/U 1.5/3.5 que la phase 10
+    # essaie de capturer.
+    "soccer_portugal_primeira_liga",
     # Tennis — uses the consensus model only (no per-player Poisson stats yet).
     # Markets are h2h only ("Player 1 vs Player 2"). Set MULTI_SPORT_TENNIS=1
     # in .env to actually scan these (default: off, to save Odds API quota).
