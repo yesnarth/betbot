@@ -54,6 +54,10 @@ def _bet_to_dict(b: ValueBet) -> dict:
         "value_edge": b.value_edge,
         "kelly_stake": b.kelly_stake,
         "model_type": b.model_type,
+        # Reliability 0..1 — Claude should down-weight low-reliability picks
+        # in its rationale and prefer 🟢 haute (≥0.70) over 🔴 faible (<0.40)
+        # when building parlays.
+        "reliability": b.reliability,
     }
 
 
@@ -912,6 +916,294 @@ def run_local_agent(
         persist_run=False,  # MCP invocation is stateless
         trigger="mcp",
     )
+
+
+# ---------------------------------------------------------------------------
+# Tools — contextual / synthesis (the "smarter Claude" tier)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_head_to_head(sport_key: str, home_team: str, away_team: str) -> dict:
+    """
+    Past head-to-head record between two teams in a competition, oriented
+    from the home_team's perspective.
+
+    Returns {n_matches, home_wins, draws, away_wins, home_goals_avg,
+    away_goals_avg, dominance_score} where dominance_score is a -1..+1
+    measure of home_team's edge in the H2H sample (+1 = wins all,
+    -1 = loses all, 0 = balanced or no data).
+
+    Use this to justify a pick when the H2H tells a story the Poisson
+    can't see ("Liverpool has lost their last 4 visits to Old Trafford
+    despite being statistically stronger").
+
+    Returns {n_matches: 0} when no past matchup is recorded. The blended
+    model already applies a small H2H nudge automatically — this tool is
+    for narrative + sanity-checking, not for changing the prediction.
+    """
+    row = db().get_head_to_head(sport_key, home_team, away_team)
+    if row is None or row["n_matches"] == 0:
+        return {
+            "sport_key": sport_key, "home_team": home_team, "away_team": away_team,
+            "n_matches": 0, "ok": True, "narrative": "no recorded head-to-head",
+        }
+    n = row["n_matches"]
+    dominance = (row["home_wins"] - row["away_wins"]) / n
+    return {
+        "sport_key": sport_key,
+        "home_team": home_team,
+        "away_team": away_team,
+        "n_matches": n,
+        "home_wins": row["home_wins"],
+        "draws": row["draws"],
+        "away_wins": row["away_wins"],
+        "home_goals_avg": round(row["home_goals_avg"], 2),
+        "away_goals_avg": round(row["away_goals_avg"], 2),
+        "dominance_score": round(dominance, 2),
+        "narrative": (
+            f"{home_team} record vs {away_team} ({n} match(s)): "
+            f"{row['home_wins']}W-{row['draws']}D-{row['away_wins']}L "
+            f"(avg {row['home_goals_avg']:.1f}-{row['away_goals_avg']:.1f})"
+        ),
+        "ok": True,
+    }
+
+
+@mcp.tool()
+def get_pick_reliability(
+    model_prob: float,
+    value_edge: float,
+    model_type: str = "blended",
+    n_matches: int | None = None,
+) -> dict:
+    """
+    Return the 0..1 reliability score qualifying a value-bet estimate.
+
+    Lower = the edge is more likely a model artifact (small sample,
+    huge edge magnitude, extreme probability, weak model type).
+    Higher = the edge is in well-supported territory.
+
+    Call this when you've just identified a candidate pick and want to
+    decide whether to commit it. As a rule of thumb :
+       ≥ 0.70 → 🟢 propose it confidently
+      0.40-0.70 → 🟡 propose with a "to verify" caveat
+       < 0.40 → 🔴 skip or downsize the stake heavily
+
+    `n_matches` is the min team-sample size that fed the prediction
+    (typically from MatchProbs.n_matches on the blended model). Pass
+    None when not applicable (tennis ELO, basketball pace, consensus).
+    """
+    from betbot.reliability import compute_reliability, reliability_label
+    score = compute_reliability(
+        model_prob=model_prob,
+        value_edge=value_edge,
+        model_type=model_type,
+        n_matches=n_matches,
+    )
+    return {
+        "reliability": score,
+        "label": reliability_label(score),
+        "interpretation": {
+            "haute":   "edge well-supported, commit normally",
+            "moyenne": "edge plausible but verify with news/H2H before placing",
+            "faible":  "edge suspect — model artifact more likely than real value",
+        }[reliability_label(score)],
+    }
+
+
+@mcp.tool()
+def find_arbitrage_opportunities(
+    sport_key: str | None = None,
+    today_only: bool = True,
+) -> dict:
+    """
+    Scan for cross-bookmaker arbitrage opportunities — guaranteed profit
+    when one bookmaker's price on outcome A and another's price on the
+    opposite outcome jointly imply > 100% bankroll return.
+
+    Real arbs are rare in liquid markets (~1 per 200-1000 events) and
+    usually < 1% profit, but they cost zero variance. Worth surfacing
+    when present.
+
+    Costs 1 Odds API request per scanned sport (use sport_key to focus
+    on one league rather than blanket-scanning).
+    """
+    from betbot.arbitrage import scan_arbs, arb_to_dict
+    s = settings()
+    if sport_key:
+        all_events = {sport_key: odds_client().get_events_with_odds(sport_key)}
+    else:
+        all_events = odds_client().fetch_all_sports()
+    events_by_sport: dict[str, list[dict]] = {}
+    for sk, ev in all_events.items():
+        kept = filter_upcoming_today(ev, s.min_before_kickoff) if today_only else ev
+        if kept:
+            events_by_sport[sk] = kept
+    arbs = scan_arbs(events_by_sport, market_key="h2h")
+    return {
+        "n_opportunities": len(arbs),
+        "arbs": [arb_to_dict(a) for a in arbs],
+        "notes": [
+            "Arbs need fast execution — odds move within minutes.",
+            "Bookmakers limit accounts that arb regularly.",
+            "Always re-verify on the bookmaker site before placing.",
+        ],
+    }
+
+
+@mcp.tool()
+def compare_two_teams(
+    home_team: str,
+    away_team: str,
+    sport_key: str | None = None,
+) -> dict:
+    """
+    360° synthesis on a fixture in ONE call — replaces the chain
+    predict_match + get_team_stats × 2 + compare_elo + get_xg_stats × 2
+    + get_head_to_head + get_active_sports that would otherwise cost
+    6-8 separate tool calls.
+
+    Returns everything needed to write an analytical rationale :
+      - blended model probabilities (H/D/A, O/U, BTTS, reliability)
+      - per-team Poisson strengths (attack/defense home/away)
+      - ELO ratings + ELO-implied home no-loss probability
+      - xG / xGA per match for both teams (when Understat covers them)
+      - head-to-head record (W/D/L + goals avg)
+      - matching diagnostics (which fuzzy team names were resolved)
+
+    Pass sport_key to pull the right team stats DB partition ; without
+    it the function attempts a heuristic lookup across known leagues.
+    """
+    from betbot.analysis import _fuzzy_lookup, _normalize_name
+    from betbot.data_sources.club_elo import get_team_elo, elo_win_probability
+    from betbot.data_sources import understat
+    from betbot.models import blended_match_probs
+    from betbot.shared import load_team_stats_from_db
+    from betbot.api import SPORT_KEYS
+
+    out: dict[str, Any] = {
+        "home_team": home_team,
+        "away_team": away_team,
+        "sport_key": sport_key,
+        "ok": True,
+    }
+
+    # 1. Sport key resolution — find which league each team belongs to if not given
+    candidate_keys = [sport_key] if sport_key else [k for k in SPORT_KEYS if k.startswith("soccer_")]
+    prebuilt = load_team_stats_from_db(db(), candidate_keys)
+    found_key, home_stats, away_stats, home_matched, away_matched = None, None, None, None, None
+    for sk in candidate_keys:
+        if sk not in prebuilt:
+            continue
+        teams = prebuilt[sk]["teams"]
+        h_stats, h_matched = _fuzzy_lookup(home_team, teams)
+        a_stats, a_matched = _fuzzy_lookup(away_team, teams)
+        if h_stats and a_stats:
+            found_key = sk
+            home_stats, away_stats = h_stats, a_stats
+            home_matched, away_matched = h_matched, a_matched
+            break
+
+    out["matched_sport_key"] = found_key
+    out["matched_home_team"] = home_matched
+    out["matched_away_team"] = away_matched
+
+    # 2. Blended model prediction
+    if home_stats and away_stats and found_key:
+        h2h = db().get_head_to_head(found_key, home_matched, away_matched)
+        # Orient already done by get_head_to_head
+        entry = prebuilt[found_key]
+        try:
+            probs = blended_match_probs(
+                home_stats=home_stats, away_stats=away_stats,
+                league_home_avg=entry["home_avg"], league_away_avg=entry["away_avg"],
+                sport_key=found_key,
+                h2h=h2h,
+            )
+            out["blended_prediction"] = {
+                "model":     probs.model,
+                "home_win":  round(probs.home_win, 4),
+                "draw":      round(probs.draw, 4),
+                "away_win":  round(probs.away_win, 4),
+                "over_25":   round(probs.over_25, 4),
+                "btts_yes":  round(probs.btts_yes, 4),
+                "over_15":   round(probs.over_15, 4),
+                "over_35":   round(probs.over_35, 4),
+                "lambda_home": round(probs.lambda_home, 3),
+                "lambda_away": round(probs.lambda_away, 3),
+                "n_matches": probs.n_matches,
+            }
+        except Exception as exc:
+            out["blended_prediction"] = {"error": str(exc)[:200]}
+    else:
+        out["blended_prediction"] = {"error": "team(s) not in DB stats — only consensus / Elo signals available"}
+
+    # 3. Per-team Poisson strengths
+    if home_stats:
+        out["home_strength"] = {
+            "attack_home":  home_stats.attack_home,
+            "defense_home": home_stats.defense_home,
+            "attack_away":  home_stats.attack_away,
+            "defense_away": home_stats.defense_away,
+            "matches_analyzed": home_stats.matches_analyzed,
+            "xg_for":        home_stats.xg_for,
+            "xg_against":    home_stats.xg_against,
+        }
+    if away_stats:
+        out["away_strength"] = {
+            "attack_home":  away_stats.attack_home,
+            "defense_home": away_stats.defense_home,
+            "attack_away":  away_stats.attack_away,
+            "defense_away": away_stats.defense_away,
+            "matches_analyzed": away_stats.matches_analyzed,
+            "xg_for":        away_stats.xg_for,
+            "xg_against":    away_stats.xg_against,
+        }
+
+    # 4. ELO comparison
+    elo_h = get_team_elo(home_matched or home_team)
+    elo_a = get_team_elo(away_matched or away_team)
+    out["elo"] = {
+        "home":  round(elo_h, 1) if elo_h is not None else None,
+        "away":  round(elo_a, 1) if elo_a is not None else None,
+        "diff":  round((elo_h - elo_a), 1) if (elo_h is not None and elo_a is not None) else None,
+        "home_no_loss_prob": (
+            round(elo_win_probability(elo_h, elo_a), 4)
+            if (elo_h is not None and elo_a is not None) else None
+        ),
+    }
+
+    # 5. Understat xG snapshot (when available — falls back silently)
+    xg_h, xg_a = None, None
+    try:
+        if found_key:
+            league_xg = understat.get_league_xg(found_key)
+            xg_by_norm = {_normalize_name(t["title"]): t for t in league_xg}
+            xg_h = xg_by_norm.get(_normalize_name(home_matched or home_team))
+            xg_a = xg_by_norm.get(_normalize_name(away_matched or away_team))
+    except Exception:
+        pass
+    out["xg_understat"] = {
+        "home": xg_h,
+        "away": xg_a,
+    }
+
+    # 6. Head-to-head
+    if found_key:
+        h2h = db().get_head_to_head(found_key, home_matched or home_team, away_matched or away_team)
+        if h2h and h2h["n_matches"] > 0:
+            out["head_to_head"] = {
+                "n_matches":       h2h["n_matches"],
+                "home_wins":       h2h["home_wins"],
+                "draws":           h2h["draws"],
+                "away_wins":       h2h["away_wins"],
+                "home_goals_avg":  round(h2h["home_goals_avg"], 2),
+                "away_goals_avg":  round(h2h["away_goals_avg"], 2),
+            }
+        else:
+            out["head_to_head"] = {"n_matches": 0}
+
+    return out
 
 
 # ---------------------------------------------------------------------------
