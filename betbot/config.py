@@ -60,17 +60,22 @@ def load_settings() -> Settings:
     top_combos        = int(os.getenv("TOP_COMBOS", "3"))
     min_before_kickoff = int(os.getenv("MIN_BEFORE_KICKOFF", "60"))
 
-    # SCAN_HOURS : liste séparée par des virgules, ex "09:00,15:00,20:00"
+    # SCAN_HOURS : liste séparée par des virgules, ex "09:00,15:00,20:00".
+    # Empty (SCAN_HOURS= or missing entirely) disables the auto-scan job — the
+    # worker still runs (CLV snapshots, stats refresh, resolver, ...) but the
+    # user triggers scans manually via the dashboard or the /recommend/manual
+    # API endpoint. Useful for users who want strict control over Odds API
+    # quota consumption.
     raw_hours = os.getenv("SCAN_HOURS", "09:00,15:00,20:00")
     scan_hours = [h.strip() for h in raw_hours.split(",") if h.strip()]
     invalid_hours = [h for h in scan_hours if not _HOUR_RE.match(h)]
     if invalid_hours:
         raise EnvironmentError(
             f"SCAN_HOURS invalide : {', '.join(invalid_hours)} — "
-            "format attendu HH:MM 24h (ex: 09:00,15:00,20:00)"
+            "format attendu HH:MM 24h (ex: 09:00,15:00,20:00) "
+            "ou vide (SCAN_HOURS=) pour désactiver l'auto-scan."
         )
-    if not scan_hours:
-        raise EnvironmentError("SCAN_HOURS vide — au moins une heure requise (ex: 09:00)")
+    # Empty scan_hours is now allowed — see comment above.
 
     if missing:
         raise EnvironmentError(

@@ -411,8 +411,13 @@ def main() -> None:
 
     update_team_stats(settings, db, logger)
     health.record_job_fired("update_team_stats:boot")
-    run_daily_scan(settings, db, notifier, logger, scan_label="Démarrage")
-    health.record_job_fired("scan:boot")
+    # Skip the boot scan when auto-scan is disabled (SCAN_HOURS=) — the user
+    # explicitly wants to control when Odds API requests happen.
+    if settings.scan_hours:
+        run_daily_scan(settings, db, notifier, logger, scan_label="Démarrage")
+        health.record_job_fired("scan:boot")
+    else:
+        logger.info("Boot scan skippé (SCAN_HOURS vide, mode manuel uniquement)")
 
     scheduler = BlockingScheduler(timezone="Europe/Paris")
     health.scheduler = scheduler
@@ -489,6 +494,14 @@ def main() -> None:
     # `coalesce=True` means if multiple firings were missed (e.g. both 09h
     # and 20h), only ONE catch-up scan runs at boot — not two in a row.
     SCAN_MISFIRE_GRACE = 4 * 3600   # 4h
+    if not settings.scan_hours:
+        logger.info(
+            "SCAN_HOURS vide → auto-scan DÉSACTIVÉ. "
+            "Le worker continue (CLV snapshots, stats refresh, resolver) mais "
+            "ne déclenchera jamais de scan auto. Tu peux scanner manuellement "
+            "via le dashboard (🛠️ Outils → Scan manuel) ou l'endpoint "
+            "/recommend/manual."
+        )
     for hour in settings.scan_hours:
         h, m = hour.split(":")
         label = labels.get(hour, hour)

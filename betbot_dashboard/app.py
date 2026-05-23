@@ -100,11 +100,21 @@ section_picks, section_perf, section_capital, section_model, section_tools = st.
 ])
 
 with section_picks:
+    _scan_hours = health.get("scan_hours") or []
+    if _scan_hours:
+        _intro = (
+            f"**Ton action quotidienne.** Le worker propose ces picks à "
+            f"**{' et '.join(_scan_hours)}** (Europe/Paris) ; "
+        )
+    else:
+        _intro = (
+            "**Ton action.** Auto-scan désactivé — les picks ici viennent "
+            "des scans manuels que tu sauvegardes depuis 🛠️ Outils. "
+        )
     st.caption(
-        "**Ton action quotidienne.** Le worker propose ces picks à 09h00 et 20h00 "
-        "(Europe/Paris) ; à toi de confirmer ceux que tu as réellement placés "
-        "chez ton bookmaker, ou de skipper. Le solde est débité uniquement à la "
-        "confirmation."
+        _intro +
+        "à toi de confirmer ceux que tu as réellement placés chez ton bookmaker, "
+        "ou de skipper. Le solde est débité uniquement à la confirmation."
     )
     tab_validate, tab_pending = st.tabs([
         f"🔔 Picks à valider{f' ({n_proposed})' if n_proposed > 0 else ''}",

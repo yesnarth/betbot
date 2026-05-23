@@ -25,12 +25,24 @@ def _payload_from_filters(filters: dict, extras: dict | None = None) -> dict:
 
 def render_scan_tab(filters: dict, health: dict) -> None:
     st.subheader("Scan manuel — modèle Dixon-Coles + xG + ELO")
+    scan_hours = health.get("scan_hours") or []
+    if scan_hours:
+        scan_caption = (
+            f"Aperçu **read-only** du modèle Poisson. Le worker auto fait la même chose "
+            f"à **{' et '.join(scan_hours)}** (Europe/Paris) et **sauvegarde** les picks "
+            f"comme « proposés » dans la file de validation. "
+        )
+    else:
+        scan_caption = (
+            "Aperçu **read-only** du modèle Poisson. Auto-scan désactivé "
+            "(`SCAN_HOURS=` dans `.env`) → c'est **toi** qui contrôles quand "
+            "l'Odds API est appelé. "
+        )
     st.caption(
-        "Aperçu **read-only** du modèle Poisson. Le worker auto fait la même chose "
-        "à **09h00 et 20h00** (Europe/Paris) et **sauvegarde** les picks comme "
-        "« proposés » dans la file de validation. Ce bouton-ci ne sauvegarde "
-        "rien par défaut — utilise « 💾 Sauvegarder » sous le tableau si tu "
-        "veux pousser les picks vers la file de validation hors planning."
+        scan_caption +
+        "Ce bouton-ci ne sauvegarde rien par défaut — utilise « 💾 Sauvegarder » "
+        "sous le tableau si tu veux pousser les picks vers la file de validation "
+        "**Mes picks → Picks à valider**."
     )
 
     if st.button("▶️ Lancer le scan", type="primary", width='stretch'):

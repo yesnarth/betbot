@@ -63,7 +63,12 @@ def render_sidebar(
                       delta_color="normal" if quota >= 100 else "off")
 
         st.metric("Équipes en DB", health["teams_in_db"])
-        st.caption(f"Scans auto : {' · '.join(health['scan_hours'])}")
+        scan_hours = health.get('scan_hours') or []
+        if scan_hours:
+            st.caption(f"Scans auto : {' · '.join(scan_hours)}")
+        else:
+            st.caption("Scans : **manuel uniquement** "
+                       "(lance via 🛠️ Outils → Scan manuel quand tu veux parier)")
 
         active = health.get("active_sports", []) or []
         if active:

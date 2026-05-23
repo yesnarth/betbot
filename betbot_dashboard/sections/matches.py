@@ -68,11 +68,21 @@ def render_events_tab(filters: dict) -> None:
 
 
 def render_validate_tab(health: dict) -> None:
-    st.subheader("🔔 Picks à valider — recommandations du worker")
-    scan_hours_in_caption = " / ".join(health.get("scan_hours", []))
+    st.subheader("🔔 Picks à valider")
+    scan_hours = health.get("scan_hours") or []
+    if scan_hours:
+        scan_origin = (
+            f"Le worker a proposé ces picks lors des scans automatiques "
+            f"({' / '.join(scan_hours)}). "
+        )
+    else:
+        scan_origin = (
+            "Auto-scan désactivé (SCAN_HOURS vide). Ces picks viennent des "
+            "scans manuels que tu lances toi-même via **🛠️ Outils → Scan manuel** "
+            "+ le bouton **💾 Sauvegarder ces picks comme proposés**. "
+        )
     st.caption(
-        f"Le worker a proposé ces picks lors des scans automatiques "
-        f"({scan_hours_in_caption}). "
+        scan_origin +
         "**Aucun argent n'a été engagé** — c'est à toi de placer le pari chez ton "
         "bookmaker, puis de revenir cliquer **« J'ai placé »** pour que le solde "
         "soit débité du stake Kelly. **« Skipper »** archive le pick sans débit. "
@@ -86,14 +96,20 @@ def render_validate_tab(health: dict) -> None:
         proposed = []
 
     if not proposed:
-        scan_hours_str = " ou ".join(health.get("scan_hours", []))
-        empty_state(
-            "🔔",
-            "Aucun pick en attente de validation",
-            f"Les picks proposés par le worker apparaîtront ici après le prochain "
-            f"scan automatique ({scan_hours_str} Europe/Paris). "
-            f"Auto-archivage des picks proposed > 36h.",
-        )
+        if scan_hours:
+            hint = (
+                f"Les picks proposés par le worker apparaîtront ici après le prochain "
+                f"scan automatique ({' ou '.join(scan_hours)} Europe/Paris). "
+                f"Auto-archivage des picks proposed > 36h."
+            )
+        else:
+            hint = (
+                "Auto-scan désactivé. Va dans **🛠️ Outils → Scan manuel**, "
+                "lance le scan, puis clique **💾 Sauvegarder ces picks comme "
+                "proposés** pour qu'ils apparaissent ici. "
+                "Auto-archivage des picks proposed > 36h."
+            )
+        empty_state("🔔", "Aucun pick en attente de validation", hint)
     else:
         st.markdown(f"**{len(proposed)} pick(s) à valider**")
         for p in proposed:
