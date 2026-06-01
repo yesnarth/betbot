@@ -169,3 +169,110 @@ def resolve_pending(
         resolved, still_pending, errors,
     )
     return {"resolved": resolved, "still_pending": still_pending, "errors": errors}
+
+
+def _resolve_from_results(pending: list[dict], parsed: list[dict]) -> list[tuple[str, str, str, str]]:
+    """Match stale pending bets to historical results (football-data.org) and
+    decide each outcome. Pure → unit-testable.
+
+    Team names differ between the Odds API (the bet) and football-data (the
+    result) — e.g. "Bayer Leverkusen"/"Bayer 04 Leverkusen", "Athletic
+    Bilbao"/"Athletic Club" — so we reuse the model's full name matcher
+    (``_fuzzy_lookup``: exact → normalized → alias → token-set → fuzzy) rather
+    than exact matching. Returns [(event_id, market, selection, outcome)].
+    """
+    from betbot.analysis import _fuzzy_lookup, _invalidate_norm_cache
+
+    # team_cache: canonical football-data name → itself (the _fuzzy_lookup index)
+    # match_index: (fd_home, fd_away) → (home_goals, away_goals)
+    team_cache: dict[str, str] = {}
+    match_index: dict[tuple[str, str], tuple[int, int]] = {}
+    for m in parsed:
+        h, a = m.get("home_team"), m.get("away_team")
+        if not (h and a):
+            continue
+        try:
+            hg, ag = int(m.get("home_goals", 0) or 0), int(m.get("away_goals", 0) or 0)
+        except (ValueError, TypeError):
+            continue
+        team_cache[h] = h
+        team_cache[a] = a
+        match_index[(h, a)] = (hg, ag)
+
+    # _fuzzy_lookup memoizes its index by id(team_cache); this short-lived dict
+    # could collide with a freed dict of the same size, so evict around use.
+    _invalidate_norm_cache(team_cache)
+    out: list[tuple[str, str, str, str]] = []
+    try:
+        for p in pending:
+            _, fd_home = _fuzzy_lookup(p["home_team"], team_cache)
+            _, fd_away = _fuzzy_lookup(p["away_team"], team_cache)
+            if not (fd_home and fd_away):
+                continue
+            sc = match_index.get((fd_home, fd_away))
+            if sc is None:
+                continue
+            hg, ag = sc
+            scores = [{"name": p["home_team"], "score": hg}, {"name": p["away_team"], "score": ag}]
+            market = p.get("market")
+            if market == "h2h":
+                outcome = _decide_h2h_outcome(p["selection"], p["home_team"], p["away_team"], scores)
+            elif market == "totals":
+                outcome = _decide_totals_outcome(p["selection"], scores)
+            else:
+                continue
+            if outcome:
+                out.append((p["event_id"], market, p["selection"], outcome))
+    finally:
+        _invalidate_norm_cache(team_cache)
+    return out
+
+
+def resolve_stale_pending(db: Database, fd_api_key: str, min_age_days: int = 2) -> dict:
+    """Fallback resolver for confirmed-pending FOOTBALL bets too old for the Odds
+    API /scores window (3 days): resolve them from football-data.org historical
+    results, so a bet confirmed but not resolved within ~3 days no longer becomes
+    a permanent 'zombie'. Tennis/basket are not covered (football-data is football).
+    """
+    from datetime import datetime, timezone
+
+    from betbot.football_api import LEAGUE_MAP, FootballDataClient, parse_match_results
+
+    if not fd_api_key or "REMPLACE" in fd_api_key:
+        return {"resolved": 0, "reason": "football-data key not configured"}
+
+    pending = db.get_pending_predictions()
+    now = datetime.now(timezone.utc)
+
+    def _age_days(iso: str) -> float:
+        try:
+            return (now - datetime.fromisoformat(iso.replace("Z", "+00:00"))).days
+        except (ValueError, TypeError, AttributeError):
+            return 0.0
+
+    stale_by_sport: dict[str, list[dict]] = {}
+    for p in pending:
+        if p.get("sport_key") in LEAGUE_MAP and _age_days(p.get("created_at", "")) >= min_age_days:
+            stale_by_sport.setdefault(p["sport_key"], []).append(p)
+
+    if not stale_by_sport:
+        return {"resolved": 0, "still_pending": len(pending)}
+
+    fd = FootballDataClient(fd_api_key)
+    resolved = 0
+    for sport_key, preds in stale_by_sport.items():
+        comp = LEAGUE_MAP.get(sport_key)
+        if not comp:
+            continue
+        try:
+            parsed = parse_match_results(fd.get_recent_matches(comp, limit=300))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("stale-resolve: fetch %s échoué : %s", sport_key, exc)
+            continue
+        for eid, market, selection, outcome in _resolve_from_results(preds, parsed):
+            db.update_result(event_id=eid, market=market, selection=selection, result=outcome)
+            resolved += 1
+            logger.info("stale-resolve : %s [%s] → %s", eid, selection, outcome)
+
+    logger.info("Résolution tardive : %d résolu(s) via football-data.org", resolved)
+    return {"resolved": resolved, "still_pending": len(pending) - resolved}

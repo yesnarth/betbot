@@ -99,6 +99,8 @@ _KNOWN_ALIASES: dict[str, str] = {
     'rb leipzig':            'leipzig',
     'paris saint-germain':   'paris',
     'psg':                   'paris',
+    'athletic bilbao':       'athletic',   # football-data: "Athletic Club"
+    'athletic club':         'athletic',
 }
 
 
@@ -137,6 +139,18 @@ def _norm_indexes_for(cache: dict) -> tuple[dict[str, str], dict[str, frozenset]
     token_index = {n: frozenset(n.split()) for n in norm_index}
     _NORM_INDEX_CACHE[cache_id] = (norm_index, token_index)
     return norm_index, token_index
+
+
+def _invalidate_norm_cache(cache: dict) -> None:
+    """Evict the memoized (norm_index, token_index) for a cache.
+
+    The memo is keyed by ``id(cache)`` with only a size check for freshness —
+    fine for the model's single long-lived cache, but unsafe for callers that
+    build many SHORT-LIVED caches (e.g. the stale resolver, one per league): a
+    freed dict's id() can be reused by a new dict of the same size, which would
+    otherwise return a stale index. Such callers must evict around their use.
+    """
+    _NORM_INDEX_CACHE.pop(id(cache), None)
 
 
 def _fuzzy_lookup(name: str, cache: dict):

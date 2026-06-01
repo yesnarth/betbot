@@ -32,7 +32,7 @@ from betbot.clv import snapshot_closing_odds
 from betbot.db import Database
 from betbot.enrichment import enrich_team_stats
 from betbot.notifier import EmailNotifier
-from betbot.resolver import resolve_pending
+from betbot.resolver import resolve_pending, resolve_stale_pending
 from betbot.source_health import check_and_alert as source_health_check
 from betbot.worker_health import WorkerHealthState, start_health_server
 
@@ -397,6 +397,7 @@ def main() -> None:
     if args.resolve:
         odds_client = OddsAPIClient(settings.odds_api_key)
         resolve_pending(db, odds_client)
+        resolve_stale_pending(db, settings.football_data_api_key)
         return
 
     if args.backtest:
@@ -570,6 +571,21 @@ def main() -> None:
         trigger=CronTrigger(hour=4, minute=0),
         id="resolve_daily",
         name="resolve",
+        misfire_grace_time=3600,
+    )
+
+    # Fallback resolution at 05h00 UTC — picks up confirmed bets too old for the
+    # Odds API /scores window (3 days) using football-data.org historical results,
+    # so a confirmed bet never becomes a permanent 'zombie' (committed capital
+    # stuck, excluded from ROI/CLV forever).
+    def _resolve_stale_job():
+        r = resolve_stale_pending(db, settings.football_data_api_key)
+        logger.info("Résolution tardive (football-data) : %s", r)
+    scheduler.add_job(
+        _wrap("resolve_stale", _resolve_stale_job),
+        trigger=CronTrigger(hour=5, minute=0),
+        id="resolve_stale_daily",
+        name="resolve-stale",
         misfire_grace_time=3600,
     )
 

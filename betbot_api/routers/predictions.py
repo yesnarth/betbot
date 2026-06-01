@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from betbot.api import OddsAPIClient
 from betbot.config import load_settings
 from betbot.db import Database
-from betbot.resolver import resolve_pending
+from betbot.resolver import resolve_pending, resolve_stale_pending
 from betbot_api.auth import require_auth
 from betbot_api.deps import get_db, limiter
 from betbot_api.schemas import (
@@ -178,4 +178,8 @@ def resolve(
 ) -> dict:
     s = load_settings()
     client = OddsAPIClient(s.odds_api_key)
-    return resolve_pending(db, client, days_from=days_from)
+    live = resolve_pending(db, client, days_from=days_from)
+    # Fallback: resolve bets too old for the /scores window via football-data.org
+    # (so confirmed bets never become permanent 'zombies').
+    stale = resolve_stale_pending(db, s.football_data_api_key)
+    return {**live, "stale_resolved": stale.get("resolved", 0)}
