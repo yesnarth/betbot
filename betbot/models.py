@@ -559,6 +559,8 @@ def blended_match_probs(
     league_home_avg: float,
     league_away_avg: float,
     weather_modifier: float = 1.0,
+    home_attack_mod: float = 1.0,
+    away_attack_mod: float = 1.0,
     elo_weight: float = 0.30,
     xg_weight: float = 0.35,
     weights_sum_check: bool = True,
@@ -641,9 +643,11 @@ def blended_match_probs(
     else:
         elo_weight = 0.0  # no ELO → all weight back on Dixon-Coles + xG
 
-    # ---- Apply weather modifier ------------------------------------------
-    lambda_home *= weather_modifier
-    lambda_away *= weather_modifier
+    # ---- Apply weather + injury modifiers --------------------------------
+    # home_attack_mod / away_attack_mod (≤1.0) cut the affected team's expected
+    # goals when key players are out (betbot.injuries). Default 1.0 = no effect.
+    lambda_home *= weather_modifier * home_attack_mod
+    lambda_away *= weather_modifier * away_attack_mod
     lambda_home = max(0.2, min(lambda_home, 5.0))
     lambda_away = max(0.2, min(lambda_away, 5.0))
 

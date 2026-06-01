@@ -14,7 +14,12 @@ from dataclasses import dataclass
 from difflib import get_close_matches
 
 from betbot.calibration import shrink_toward_market
-from betbot.ml import calibrate as ml_calibrate
+from betbot.ml import calibrate as ml_calibrate, segment_for as _ml_segment
+from betbot.blend_params import get_weights as _get_blend_weights
+from betbot.injuries import (
+    get_injury_factor as _injury_factor,
+    reset_run_budget as _reset_injury_budget,
+)
 from betbot.models import (
     MatchProbs,
     poisson_match_probs,
@@ -60,6 +65,9 @@ class Parlay:
     combined_odds: float
     combined_prob: float
     combined_ev: float   # (combined_prob * combined_odds - 1) * 100
+    # True when ≥2 legs share a league (same-day correlation). Surfaced in the
+    # UI and reflected in a small EV haircut applied at build time.
+    correlated: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +246,8 @@ def detect_value_bets(
     min_value_edge: float = 0.04,
     min_model_prob: float = 0.40,
     min_book_odds: float = 1.50,
+    min_edge_vs_novig: float = 0.0,
+    require_positive_stake: bool = True,
     prebuilt_stats_by_sport: dict[str, dict] | None = None,
     probs_cache: dict[str, "MatchProbs"] | None = None,
 ) -> list[ValueBet]:
@@ -249,6 +259,7 @@ def detect_value_bets(
     """
     from betbot.models import DEFAULT_HOME_AVG, DEFAULT_AWAY_AVG
     all_bets: list[ValueBet] = []
+    _reset_injury_budget()  # fresh per-scan API-Football lookup budget (injuries)
     if probs_cache is None:
         probs_cache = {}
 
@@ -336,66 +347,101 @@ def detect_value_bets(
                     ("U35", "Moins de 3.5 buts",   "Under", "totals", 3.5,  probs.under_35),
                 ]
 
+            # ---- Stage 1 : calibrate every outcome, grouped by coherent market.
+            # Calibrating each outcome independently (market shrink + ML isotonic)
+            # destroys the 1+X+2 == 1 (and Over+Under == 1) coherence. So we
+            # calibrate first, then RE-NORMALIZE within each group before any
+            # value test. Groups are keyed by (market_key, point): all of 1/X/2
+            # share ("h2h", None); each totals line is its own pair.
+            groups: dict[tuple, list[dict]] = {}
             for code, label, outcome_name, market_key, point, raw_model_prob in outcome_map:
-                if raw_model_prob < min_model_prob:
-                    continue
-
                 best = extract_best_odds(event, outcome_name, market_key=market_key, point=point)
-                if best is None or best.price < min_book_odds:
-                    continue
+                # Market shrinkage needs the outcome's own odds. Without a price
+                # we still ML-calibrate the raw prob so the group normalizes on
+                # the full distribution (the leg just can't be bet anyway).
+                shrunk = shrink_toward_market(raw_model_prob, best.price) if best else raw_model_prob
+                cal = ml_calibrate(shrunk, _ml_segment(sport_key, market_key))
+                groups.setdefault((market_key, point), []).append({
+                    "code": code, "label": label, "outcome_name": outcome_name,
+                    "market_key": market_key, "point": point,
+                    "best": best, "cal": max(0.0, min(cal, 1.0)),
+                })
 
-                # Two-stage probability calibration:
-                # 1. Market shrinkage — pull toward the bookmaker-implied
-                #    probability when the disagreement is suspiciously large.
-                #    This caps fictitious mega-edges from qualitative info
-                #    (injuries, suspensions) the statistical model doesn't see.
-                # 2. ML calibration — apply the IsotonicRegression learned from
-                #    historical resolved bets. No-op until 50+ resolved bets,
-                #    then auto-corrects systematic over/under-confidence.
-                shrunk = shrink_toward_market(raw_model_prob, best.price)
-                model_prob = ml_calibrate(shrunk)
+            # ---- Stage 2 : renormalize within each group, then test value.
+            for (market_key, point), members in groups.items():
+                total_cal = sum(m["cal"] for m in members)
+                for m in members:
+                    m["model_prob"] = (m["cal"] / total_cal) if total_cal > 0 else m["cal"]
 
-                edge = round(model_prob * best.price - 1.0, 4)
-                if edge < min_value_edge:
-                    continue
+                group_names = {m["outcome_name"] for m in members}
+                for m in members:
+                    model_prob = m["model_prob"]
+                    if model_prob < min_model_prob:
+                        continue
 
-                # Reliability is computed BEFORE Kelly so we can down-weight
-                # the stake for low-confidence picks. A pick with reliability
-                # 0.3 commits ~30% of what a 1.0 pick would — protects the
-                # bankroll from acting on huge-edge / small-sample artifacts
-                # at full conviction.
-                from betbot.reliability import compute_reliability
-                reliability = compute_reliability(
-                    model_prob=model_prob,
-                    value_edge=edge,
-                    model_type=probs.model,
-                    n_matches=probs.n_matches if probs.n_matches > 0 else None,
-                )
+                    best = m["best"]
+                    if best is None or best.price < min_book_odds:
+                        continue
 
-                stake = kelly_stake(model_prob, best.price, bankroll,
-                                    kelly_fraction, reliability=reliability)
-                if stake == 0.0:
-                    continue
+                    # No-vig gate (adverse-selection guard) : require the model to
+                    # beat the market's *fair* (vig-removed) CONSENSUS line — not
+                    # merely the single best price, which is often the one book
+                    # whose line is most stale. Abstains when no book prices the
+                    # whole group (novig is None) rather than blocking the pick.
+                    if min_edge_vs_novig > 0.0:
+                        novig = _novig_fair_prob(event, m["outcome_name"], market_key, point, group_names)
+                        if novig is not None and novig > 0.0 and (model_prob / novig - 1.0) < min_edge_vs_novig:
+                            continue
 
-                all_bets.append(ValueBet(
-                    event_id=event_id,
-                    sport_key=sport_key,
-                    home_team=home,
-                    away_team=away,
-                    league_label=league_label,
-                    market=market_key,
-                    selection_code=code,
-                    selection_label=label,
-                    model_prob=round(model_prob, 4),
-                    best_odds=best.price,
-                    best_book=best.bookmaker,
-                    value_edge=edge,
-                    kelly_stake=stake,
-                    lambda_home=probs.lambda_home,
-                    lambda_away=probs.lambda_away,
-                    model_type=probs.model,
-                    reliability=reliability,
-                ))
+                    # value_edge stays computed against the BEST available price —
+                    # that's the real EV of the bet you'd actually place.
+                    edge = round(model_prob * best.price - 1.0, 4)
+                    if edge < min_value_edge:
+                        continue
+
+                    # Reliability is computed BEFORE Kelly so we can down-weight
+                    # the stake for low-confidence picks (huge-edge / small-sample
+                    # artifacts get ~reliability× of a full-conviction stake).
+                    from betbot.reliability import compute_reliability
+                    reliability = compute_reliability(
+                        model_prob=model_prob,
+                        value_edge=edge,
+                        model_type=probs.model,
+                        n_matches=probs.n_matches if probs.n_matches > 0 else None,
+                    )
+
+                    stake = kelly_stake(model_prob, best.price, bankroll,
+                                        kelly_fraction, reliability=reliability)
+                    if require_positive_stake and stake == 0.0:
+                        # A genuine edge zeroed by low reliability is dropped here —
+                        # surface it so filtered picks aren't silently invisible.
+                        # (The ×1000 parlay pool passes require_positive_stake=False:
+                        # leg eligibility there is about EV, not stake sizing.)
+                        logger.debug(
+                            "drop %s %s/%s edge=%+.1f%% rel=%.2f → stake 0",
+                            event_id, m["code"], m["outcome_name"], edge * 100, reliability,
+                        )
+                        continue
+
+                    all_bets.append(ValueBet(
+                        event_id=event_id,
+                        sport_key=sport_key,
+                        home_team=home,
+                        away_team=away,
+                        league_label=league_label,
+                        market=market_key,
+                        selection_code=m["code"],
+                        selection_label=m["label"],
+                        model_prob=round(model_prob, 4),
+                        best_odds=best.price,
+                        best_book=best.bookmaker,
+                        value_edge=edge,
+                        kelly_stake=stake,
+                        lambda_home=probs.lambda_home,
+                        lambda_away=probs.lambda_away,
+                        model_type=probs.model,
+                        reliability=reliability,
+                    ))
 
     logger.info("Détection terminée : %d paris de valeur trouvés", len(all_bets))
     return all_bets
@@ -484,6 +530,62 @@ def _orient_h2h(h2h_lookup: dict, home: str, away: str) -> dict | None:
     }
 
 
+def _novig_fair_prob(
+    event: dict,
+    outcome_name: str,
+    market_key: str,
+    point: float | None,
+    group_names: set[str],
+) -> float | None:
+    """
+    Consensus *no-vig* (vig-removed) fair probability for `outcome_name`,
+    averaged across every bookmaker that prices the FULL market group.
+
+    Removing the margin requires the complete set of mutually-exclusive
+    outcomes (1/X/2, or Over/Under for one line). For each book that quotes the
+    whole group we divide its raw implied probabilities by their overround, then
+    weight-average across books (sharper books weigh more — models.BOOK_WEIGHTS).
+
+    Returns None when no book prices the whole group, so the caller's no-vig gate
+    ABSTAINS on thin markets rather than blocking a pick on missing data.
+    """
+    from betbot.models import BOOK_WEIGHTS, DEFAULT_BOOK_WEIGHT
+
+    acc = 0.0
+    total_w = 0.0
+    for bm in event.get("bookmakers", []):
+        weight = BOOK_WEIGHTS.get(bm.get("key", ""), DEFAULT_BOOK_WEIGHT)
+        prices: dict[str, float] = {}
+        for mkt in bm.get("markets", []):
+            if mkt.get("key") != market_key:
+                continue
+            for o in mkt.get("outcomes", []):
+                nm = o.get("name")
+                if nm not in group_names:
+                    continue
+                if point is not None and o.get("point") not in (point, str(point)):
+                    continue
+                try:
+                    price = float(o["price"])
+                except (KeyError, ValueError, TypeError):
+                    continue
+                if price > 1.0:
+                    prices[nm] = price
+        # Need the whole group priced by this book to strip the vig coherently.
+        if len(prices) < len(group_names):
+            continue
+        implied = {nm: 1.0 / p for nm, p in prices.items()}
+        overround = sum(implied.values())
+        if overround <= 0:
+            continue
+        acc += (implied.get(outcome_name, 0.0) / overround) * weight
+        total_w += weight
+
+    if total_w <= 0:
+        return None
+    return acc / total_w
+
+
 def _compute_probs(
     home: str,
     away: str,
@@ -551,14 +653,20 @@ def _compute_probs(
             # Use blended model (Dixon-Coles + xG + ELO + H2H) — auto-degrades
             # when any signal is missing (legacy rows / fresh install / no past
             # matchup between these two teams).
+            # Per-league tuned blend weights (betbot.tuning) when available —
+            # otherwise blended_match_probs uses its hardcoded defaults.
+            _tuned = _get_blend_weights(sport_key)
             result = blended_match_probs(
                 home_stats=home_stats,
                 away_stats=away_stats,
                 league_home_avg=league_home_avg,
                 league_away_avg=league_away_avg,
                 weather_modifier=1.0,
+                home_attack_mod=_injury_factor(home, sport_key),
+                away_attack_mod=_injury_factor(away, sport_key),
                 sport_key=sport_key,   # propagates to per-league Dixon-Coles τ
                 h2h=h2h_oriented,
+                **({"elo_weight": _tuned[0], "xg_weight": _tuned[1]} if _tuned else {}),
             )
             match_info = f"({home_matched} / {away_matched})" if (home_matched != home or away_matched != away) else ""
             logger.debug("%s %s vs %s %s: λH=%.2f λA=%.2f → H=%.1f%% D=%.1f%% A=%.1f%%",
@@ -592,6 +700,14 @@ def rank_value_bets(bets: list[ValueBet]) -> list[ValueBet]:
 # ---------------------------------------------------------------------------
 # Parlay builder
 # ---------------------------------------------------------------------------
+
+# Conservative multiplier applied to a parlay's combined probability per EXTRA
+# leg sharing the same league (same day). Legs in the same league carry mild
+# positive correlation (shared conditions), so the independence product
+# over-credits diversification. 0.97 nudges the ranking toward genuinely
+# diversified combos and keeps the displayed EV honest; 1.0 disables it.
+CORRELATION_HAIRCUT = 0.97
+
 
 def build_parlays(
     bets: list[ValueBet],
@@ -627,15 +743,25 @@ def build_parlays(
             continue
 
         combined_odds = 1.0
-        combined_prob = 1.0
+        raw_prob = 1.0
+        sport_counts: dict[str, int] = {}
         for bet in combo:
             combined_odds *= bet.best_odds
-            combined_prob *= bet.model_prob
+            raw_prob *= bet.model_prob
+            sport_counts[bet.sport_key] = sport_counts.get(bet.sport_key, 0) + 1
 
         combined_odds = round(combined_odds, 2)
         if combined_odds < min_combined_odds:
             continue
 
+        # Correlation haircut : legs from the SAME league (same day) aren't fully
+        # independent, so the naive product over-states diversification. Penalize
+        # per EXTRA same-league leg so genuinely diversified parlays rank above
+        # concentrated ones and the displayed EV stays honest. (Same-match legs
+        # are already excluded by the event_id check above.)
+        extra_corr = sum(c - 1 for c in sport_counts.values() if c > 1)
+        correlated = extra_corr > 0
+        combined_prob = raw_prob * (CORRELATION_HAIRCUT ** extra_corr)
         combined_ev = round((combined_prob * combined_odds - 1.0) * 100, 2)
 
         parlays.append(Parlay(
@@ -643,6 +769,7 @@ def build_parlays(
             combined_odds=combined_odds,
             combined_prob=round(combined_prob, 4),
             combined_ev=combined_ev,
+            correlated=correlated,
         ))
 
     parlays.sort(key=lambda p: p.combined_ev, reverse=True)
@@ -666,6 +793,88 @@ def build_parlays(
         if len(selected) >= top_n:
             break
     return selected
+
+
+# ---------------------------------------------------------------------------
+# Target-odds parlay builder (×1000 "lottery" mode)
+# ---------------------------------------------------------------------------
+
+def build_target_parlays(
+    bets: list[ValueBet],
+    target_odds: float = 1000.0,
+    max_legs: int = 12,
+    top_n: int = 3,
+    min_leg_odds: float = 1.2,
+) -> list[Parlay]:
+    """
+    Assemble parlays that REACH a target combined odds (e.g. ×1000) by greedily
+    stacking the best value legs. Unlike build_parlays (all n-combinations at a
+    FIXED n_legs, via itertools — explodes past ~5 legs), this scales to the
+    ~8-15 legs a ×1000 combo needs.
+
+    Strategy:
+      - Candidate legs sorted by quality (value_edge × reliability, then prob).
+      - Walk the pool, adding event-disjoint legs until combined_odds ≥
+        target_odds (or max_legs is hit).
+      - Across the `top_n` returned parlays, each event is used at most ONCE
+        (same diversification guarantee as build_parlays).
+      - A parlay is emitted ONLY if it genuinely reaches target_odds.
+
+    This is a LOTTERY tool — a ×1000 parlay wins ~0.1% of the time. The
+    correlation haircut (same-league legs) still applies so combined_prob and EV
+    stay honest. Returns fewer (or zero) parlays when the pool can't reach the
+    target.
+    """
+    pool = [b for b in bets if b.best_odds >= min_leg_odds]
+    pool.sort(
+        key=lambda b: (b.value_edge * (b.reliability or 1.0), b.model_prob),
+        reverse=True,
+    )
+
+    parlays: list[Parlay] = []
+    used_events: set[str] = set()
+
+    for _ in range(max(1, top_n)):
+        legs: list[ValueBet] = []
+        leg_events: set[str] = set()
+        combined_odds = 1.0
+        for b in pool:
+            if b.event_id in used_events or b.event_id in leg_events:
+                continue
+            legs.append(b)
+            leg_events.add(b.event_id)
+            combined_odds *= b.best_odds
+            # A combiné needs ≥2 legs — keep stacking even if a single fat leg
+            # already clears the target (otherwise a lone longshot in the pool
+            # would abort the whole build).
+            if (combined_odds >= target_odds and len(legs) >= 2) or len(legs) >= max_legs:
+                break
+
+        # Couldn't reach the target with a disjoint ≥2-leg set : try the next
+        # slot instead of abandoning every remaining combo.
+        if len(legs) < 2 or combined_odds < target_odds:
+            continue
+
+        sport_counts: dict[str, int] = {}
+        raw_prob = 1.0
+        for b in legs:
+            raw_prob *= b.model_prob
+            sport_counts[b.sport_key] = sport_counts.get(b.sport_key, 0) + 1
+        extra_corr = sum(c - 1 for c in sport_counts.values() if c > 1)
+        combined_prob = raw_prob * (CORRELATION_HAIRCUT ** extra_corr)
+        combined_odds = round(combined_odds, 2)
+        combined_ev = round((combined_prob * combined_odds - 1.0) * 100, 2)
+
+        parlays.append(Parlay(
+            bets=list(legs),
+            combined_odds=combined_odds,
+            combined_prob=round(combined_prob, 6),
+            combined_ev=combined_ev,
+            correlated=extra_corr > 0,
+        ))
+        used_events |= leg_events
+
+    return parlays
 
 
 # ---------------------------------------------------------------------------

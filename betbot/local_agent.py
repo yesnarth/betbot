@@ -263,8 +263,12 @@ def _rule_bad_weather(
     ev: PickEvaluation,
     weather: dict | None,
 ) -> None:
-    """Heavy rain or strong wind reduces total goals — penalize Over 2.5 picks."""
-    if not weather or ev.pick.get("market") != "h2h":
+    """Heavy rain or strong wind reduces total goals — penalize Over picks.
+
+    Over picks are emitted with market="totals" (codes O15/O25/O35), NOT "h2h"
+    — guarding on h2h made this rule dead code (it never fired).
+    """
+    if not weather or ev.pick.get("market") != "totals":
         return
     label = (ev.pick.get("selection_label") or "").lower()
     is_over_pick = "over" in label or "plus de" in label

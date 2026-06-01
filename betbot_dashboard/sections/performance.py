@@ -188,7 +188,8 @@ def render_capital_tab() -> None:
                     headers={"Idempotency-Key": _idem_key(
                         "bankroll/deposit", dep_amt, dep_note)},
                 )
-                st.success(f"+{dep_amt:.2f}$ déposés. Recharge la page.")
+                st.toast(f"+{dep_amt:.2f} $ déposés.", icon="➕")
+                st.rerun()
             except Exception as exc:
                 st.error(f"Erreur : {exc}")
     with c3[1]:
@@ -203,7 +204,8 @@ def render_capital_tab() -> None:
                     headers={"Idempotency-Key": _idem_key(
                         "bankroll/withdraw", wd_amt, wd_note)},
                 )
-                st.success(f"-{wd_amt:.2f}$ retirés. Recharge la page.")
+                st.toast(f"-{wd_amt:.2f} $ retirés.", icon="➖")
+                st.rerun()
             except Exception as exc:
                 st.error(f"Erreur : {exc}")
 

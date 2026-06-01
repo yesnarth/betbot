@@ -112,4 +112,7 @@ def backtest(
         calibration=[BacktestCalibrationBucket(**b) for b in result.calibration],
         notes=result.notes,
         duration_seconds=duration,
+        roi_pct=result.roi_pct,
+        n_value_bets=result.n_value_bets,
+        avg_ev_pct=result.avg_ev_pct,
     )

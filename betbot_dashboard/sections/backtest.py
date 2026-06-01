@@ -59,6 +59,43 @@ def render_backtest_tab() -> None:
         "vraiment ~65% de réussites ?"
     )
 
+    with st.expander("⚙️ Optimiser les poids du modèle (elo / xG) par ligue"):
+        st.caption(
+            "Cherche les poids elo/xG qui **minimisent le log-loss** sur un backtest "
+            "walk-forward — remplace les valeurs devinées (0.30 / 0.35). ⚠️ Fit "
+            "optimiste (look-ahead ELO/xG), à revalider via le CLV. Les poids ne sont "
+            "enregistrés **que s'ils battent les défauts** (jamais de régression)."
+        )
+        tune_label = st.selectbox("Ligue à optimiser",
+                                  options=list(SUPPORTED_LEAGUES.values()), key="tune_league")
+        tune_key = next(k for k, v in SUPPORTED_LEAGUES.items() if v == tune_label)
+        if st.button("⚙️ Optimiser cette ligue", key="tune_btn"):
+            with st.spinner(f"Backtest + grid-search sur {tune_label}… (~10-30 s)"):
+                res = api_post("/ml/blend/tune", sport_key=tune_key, n_holdout=200)
+            if res.get("tuned"):
+                st.success(
+                    f"✅ Poids optimisés : elo **{res['elo_weight']}** · xG **{res['xg_weight']}** "
+                    f"— log-loss {res['log_loss_before']} → **{res['log_loss_after']}** "
+                    f"sur {res['n_matches']} matchs. Enregistré et actif."
+                )
+            elif res.get("log_loss_after") is not None:
+                st.info(
+                    f"Aucune amélioration : les défauts (elo 0.30 / xG 0.35) restent les "
+                    f"meilleurs (log-loss {res['log_loss_before']}). Rien n'a changé."
+                )
+            else:
+                st.warning(f"Optimisation impossible : {res.get('reason', '?')}")
+
+        st.divider()
+        if st.button("⚙️ Optimiser TOUTES les ligues (~2-3 min)", key="tune_all_btn"):
+            with st.spinner("Backtest + grid-search sur toutes les ligues foot…"):
+                res_all = api_post("/ml/blend/tune-all", n_holdout=200)
+            saved = res_all.get("saved", [])
+            st.success(
+                f"✅ {res_all.get('n_saved', 0)} ligue(s) optimisée(s)"
+                + (f" : {', '.join(saved)}" if saved else " (les défauts restaient les meilleurs partout)")
+            )
+
     c1, c2, c3 = st.columns([2, 1, 1])
     sport_label = c1.selectbox(
         "Ligue",
@@ -128,6 +165,27 @@ def render_backtest_tab() -> None:
 
     # Reference points
     st.caption(f"📊 {res.get('notes', '')}")
+
+    # Odds-free value backtest (proxy) — does the model's deviation from base
+    # rates actually profit against a synthetic base-rate market?
+    n_vb = res.get("n_value_bets", 0)
+    if n_vb:
+        st.markdown("### Backtest de valeur (proxy marché base-rate)")
+        roi = res.get("roi_pct", 0.0)
+        vcol = st.columns(3)
+        vcol[0].metric(
+            "ROI simulé", f"{roi:+.1f}%",
+            delta="signal" if roi > 0 else "pas de signal",
+            delta_color="normal" if roi > 0 else "inverse",
+        )
+        vcol[1].metric("Paris simulés", n_vb)
+        vcol[2].metric("EV moyenne", f"{res.get('avg_ev_pct', 0.0):+.1f}%")
+        st.caption(
+            "⚠️ **Proxy** : faute de cotes historiques, on simule des paris contre un "
+            "marché synthétique calé sur les fréquences de base de la ligue (+ marge "
+            "bookmaker). Un ROI > 0 indique que les **écarts du modèle vs la base-rate "
+            "portent un vrai signal** — ce n'est pas un ROI réel garanti."
+        )
 
     # Calibration buckets — the most actionable view
     st.markdown("### Calibration : prédit vs observé")

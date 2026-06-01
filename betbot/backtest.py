@@ -47,6 +47,14 @@ from betbot.models import (
 
 logger = logging.getLogger("betbot.backtest")
 
+# Odds-free value backtest. We have no historical bookmaker odds, so we test
+# whether the model's DEVIATIONS from the league base rates would have profited
+# against a synthetic "market" that prices those base rates with a typical
+# bookmaker margin. ROI > 0 here = the model's edges carry real signal (not just
+# good calibration around the base rate). It is a PROXY, not a real-odds ROI.
+MARKET_MARGIN = 0.05          # synthetic bookmaker overround on the base-rate line
+VALUE_EDGE_THRESHOLD = 0.03   # only "bet" an outcome when its EV ≥ 3% vs that market
+
 
 class CalibrationBucket(TypedDict):
     range: str
@@ -69,6 +77,12 @@ class BacktestResult:
     # cold-start calibration trainer. Empty for callers that only need
     # aggregated metrics.
     samples: list[tuple[float, int]] = field(default_factory=list)
+    # Odds-free value backtest vs a synthetic base-rate market (see MARKET_MARGIN).
+    # roi_pct > 0 ⇒ the model's deviations from league base rates would have
+    # profited despite the margin. PROXY metric — no real odds were available.
+    roi_pct: float = 0.0
+    n_value_bets: int = 0
+    avg_ev_pct: float = 0.0
 
 
 def _outcome_index(home_goals: int, away_goals: int) -> int:
@@ -78,6 +92,24 @@ def _outcome_index(home_goals: int, away_goals: int) -> int:
     if home_goals == away_goals:
         return 1
     return 2
+
+
+def _base_outcome_rates(matches: list[dict]) -> tuple[float, float, float]:
+    """League base frequencies of (home win, draw, away win). Falls back to
+    typical top-5 European averages when there's no history."""
+    if not matches:
+        return (0.45, 0.27, 0.28)
+    h = d = a = 0
+    for m in matches:
+        idx = _outcome_index(int(m.get("home_goals", 0)), int(m.get("away_goals", 0)))
+        if idx == 0:
+            h += 1
+        elif idx == 1:
+            d += 1
+        else:
+            a += 1
+    n = len(matches)
+    return (h / n, d / n, a / n)
 
 
 def _brier_multiclass(probs: tuple[float, float, float], actual_idx: int) -> float:
@@ -156,6 +188,11 @@ def run_backtest(
     parsed.sort(key=lambda m: m.get("date", ""))
     holdout_window = parsed[-n_holdout:]
 
+    # Base outcome frequencies from everything BEFORE the holdout window — the
+    # synthetic value-backtest market prices these (causal w.r.t. the holdout).
+    pre_holdout = parsed[:-n_holdout] if 0 < n_holdout < len(parsed) else parsed
+    base_rates = _base_outcome_rates(pre_holdout)
+
     # Optional enrichment snapshot. Gives an OPTIMISTIC bound; off by default.
     elo_snapshot: dict = {}
     xg_by_title: dict = {}
@@ -204,6 +241,10 @@ def run_backtest(
     log_loss_total = 0.0
     n_scored = 0
     n_skipped_no_history = 0
+    # Value-backtest accumulators (odds-free, vs synthetic base-rate market)
+    value_profit = 0.0
+    value_ev_sum = 0.0
+    n_value_bets = 0
 
     # Pre-compute: for each holdout date, the index where train ends (parsed is sorted)
     # This avoids O(N²) total complexity — we re-scan parsed once and reuse cache
@@ -246,6 +287,19 @@ def run_backtest(
         samples_draw.append((probs.draw, 1 if actual_idx == 1 else 0))
         samples_away.append((probs.away_win, 1 if actual_idx == 2 else 0))
 
+        # Odds-free value backtest : "bet" each outcome whose EV beats the
+        # synthetic base-rate market by VALUE_EDGE_THRESHOLD (flat 1-unit stake).
+        for k, p_k in enumerate(triple):
+            base_k = base_rates[k]
+            if base_k <= 0.0:
+                continue
+            offered_odds = (1.0 / base_k) * (1.0 - MARKET_MARGIN)
+            ev = p_k * offered_odds - 1.0
+            if ev >= VALUE_EDGE_THRESHOLD:
+                n_value_bets += 1
+                value_ev_sum += ev
+                value_profit += (offered_odds - 1.0) if actual_idx == k else -1.0
+
     if n_scored == 0:
         return BacktestResult(
             sport_key=sport_key, n_matches=0, brier_score=0.0, log_loss=0.0,
@@ -253,6 +307,9 @@ def run_backtest(
         )
 
     calibration = _calibration_buckets(samples_home + samples_away)
+
+    roi_pct = round(100.0 * value_profit / n_value_bets, 2) if n_value_bets else 0.0
+    avg_ev_pct = round(100.0 * value_ev_sum / n_value_bets, 2) if n_value_bets else 0.0
 
     notes = (f"walk-forward, enrichment={'ON' if use_enrichment else 'OFF'}, "
              f"skipped (no history): {n_skipped_no_history}")
@@ -264,6 +321,9 @@ def run_backtest(
         calibration=calibration,
         notes=notes,
         samples=samples_home + samples_draw + samples_away,
+        roi_pct=roi_pct,
+        n_value_bets=n_value_bets,
+        avg_ev_pct=avg_ev_pct,
     )
 
 
@@ -274,6 +334,7 @@ def backtest_summary(result: BacktestResult) -> str:
         f"  Matchs scorés     : {result.n_matches}",
         f"  Brier score       : {result.brier_score:.4f}  (lower is better; ~0.667 = baseline 1/3, 0 = perfect)",
         f"  Log-loss          : {result.log_loss:.4f}    (lower is better)",
+        f"  ROI (proxy marché base-rate) : {result.roi_pct:+.1f}%  sur {result.n_value_bets} paris simulés (EV moy {result.avg_ev_pct:+.1f}%)",
         f"  Notes             : {result.notes}",
         "",
         "Calibration (predicted vs actual hit rate par décile) :",

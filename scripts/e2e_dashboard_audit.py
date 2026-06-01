@@ -32,24 +32,26 @@ OUT_DIR.mkdir(exist_ok=True)
 (OUT_DIR / "screenshots").mkdir(exist_ok=True)
 
 TABS = [
-    # New structure: top-level sections, then sub-tabs within Décision/Matchs/Performance.
-    # Each entry is (slug, [click_path]) — labels to click in order to reach the tab.
-    ("decision",       ["🎯 Décision"]),
-    ("scan",           ["🎯 Décision", "🎯 Scan manuel"]),
-    ("local",          ["🎯 Décision", "🧠 Agent local"]),
-    ("agent",          ["🎯 Décision", "🤖 Agent IA (Claude)"]),
-    ("matches",        ["📅 Matchs"]),
-    ("events",         ["📅 Matchs", "📅 Matchs disponibles"]),
-    ("pending",        ["📅 Matchs", "⏳ Paris en attente"]),
-    ("performance",    ["📊 Performance"]),
-    ("roi",            ["📊 Performance", "📊 ROI / Performance"]),
-    ("capital",        ["📊 Performance", "💰 Capital"]),
-    ("history",        ["📜 Historique"]),
-    ("system",         ["⚙️ Système"]),
-    ("sources",        ["⚙️ Système", "🔌 Sources"]),
-    ("calibrator",     ["⚙️ Système", "🎚️ Calibrateur ML"]),
-    ("tennis",         ["⚙️ Système", "🎾 Modèle tennis"]),
-    ("basketball",     ["⚙️ Système", "🏀 Modèle basket"]),
+    # Mirrors the CURRENT app.py layout (top-level sections → sub-tabs). Labels
+    # are matched as substrings, so dynamic count suffixes like " (3)" are fine.
+    # Each entry is (slug, [click_path]) — labels to click in order.
+    ("picks",        ["🔔 Mes picks"]),
+    ("validate",     ["🔔 Mes picks", "🔔 Picks à valider"]),
+    ("pending",      ["🔔 Mes picks", "⏳ Paris en attente"]),
+    ("performance",  ["📊 Performance"]),
+    ("capital",      ["💰 Capital"]),
+    ("model",        ["🔬 Modèle"]),
+    ("backtest",     ["🔬 Modèle", "🧪 Backtest"]),
+    ("calibrator",   ["🔬 Modèle", "🎚️ Calibrateur ML"]),
+    ("tennis",       ["🔬 Modèle", "🎾 Tennis ELO"]),
+    ("basketball",   ["🔬 Modèle", "🏀 Basketball"]),
+    ("scan",         ["🛠️ Outils", "🎯 Scan manuel"]),
+    ("local",        ["🛠️ Outils", "🧠 Agent local"]),
+    ("agent",        ["🛠️ Outils", "🤖 Agent IA (Claude)"]),
+    ("parlay1000",   ["🛠️ Outils", "🎰 Combiné ×1000"]),
+    ("events",       ["🛠️ Outils", "📅 Matchs disponibles"]),
+    ("sources",      ["🛠️ Outils", "🔌 Sources"]),
+    ("history",      ["🛠️ Outils", "📜 Historique IA"]),
 ]
 
 

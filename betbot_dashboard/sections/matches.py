@@ -1,6 +1,8 @@
 """Matches tabs — available events, validation queue, pending bets."""
 from __future__ import annotations
 
+import time
+
 import pandas as pd
 import streamlit as st
 
@@ -45,12 +47,20 @@ def render_events_tab(filters: dict) -> None:
             if filters["sport"] != "Toutes":
                 params["sport_key"] = filters["sport"]
             st.session_state.events_data = api_get("/events", **params)
+            st.session_state.events_ts = time.time()
         except Exception as exc:
             st.error(f"Erreur : {exc}")
             st.session_state.events_data = None
 
     ev = st.session_state.events_data
     if ev:
+        # Cotes périssables : prévenir si la liste affichée commence à dater.
+        age = time.time() - st.session_state.get("events_ts", 0.0)
+        if age > 600:
+            st.warning(
+                f"⚠️ Liste chargée il y a ~{int(age // 60)} min — les cotes ont pu "
+                f"bouger. Clique « 🔄 Rafraîchir la liste » pour les mettre à jour."
+            )
         st.metric("Total", ev["total"])
         for sk, items in ev["by_sport"].items():
             label = f"{LEAGUE_LABELS.get(sk, sk)} ({len(items)})"
@@ -127,24 +137,41 @@ def render_validate_tab(health: dict) -> None:
                     placeholder="ex : pinnacle, bet365, unibet…",
                     key=f"bm_{pid}",
                 )
+                confirm_key = f"await_confirm_{pid}"
                 if c1.button("✅ J'ai placé", key=f"confirm_{pid}", type="primary"):
-                    try:
-                        api_post(f"/predictions/{pid}/confirm-placed",
-                                 json={"bookmaker": bookmaker or None})
-                        st.success(
-                            f"✅ Pick #{pid} confirmé. "
-                            f"Bankroll débité de ${p['kelly_stake']:.2f}. "
-                            f"Recharge la page."
-                        )
-                    except Exception as exc:
-                        st.error(f"Erreur : {exc}")
+                    st.session_state[confirm_key] = True
                 if c2.button("❌ Skipper", key=f"skip_{pid}"):
                     try:
                         api_post(f"/predictions/{pid}/skip",
                                  json={"reason": "user_skipped"})
-                        st.info(f"Pick #{pid} skippé. Recharge la page.")
+                        st.toast(f"Pick #{pid} skippé.", icon="❌")
+                        st.rerun()
                     except Exception as exc:
                         st.error(f"Erreur : {exc}")
+
+                # Two-step confirmation — confirming DEBITS the bankroll, so we
+                # never act on a single (possibly accidental) click.
+                if st.session_state.get(confirm_key):
+                    st.warning(
+                        f"Confirmer le **débit de ${p['kelly_stake']:.2f}** du bankroll "
+                        f"pour le pick #{pid} ({p['home_team']} vs {p['away_team']}) ?"
+                    )
+                    cc1, cc2 = st.columns(2)
+                    if cc1.button("Oui, débiter", key=f"confirm_yes_{pid}", type="primary"):
+                        try:
+                            api_post(f"/predictions/{pid}/confirm-placed",
+                                     json={"bookmaker": bookmaker or None})
+                            st.session_state.pop(confirm_key, None)
+                            st.toast(
+                                f"Pick #{pid} confirmé — bankroll débité de "
+                                f"${p['kelly_stake']:.2f}.", icon="✅",
+                            )
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Erreur : {exc}")
+                    if cc2.button("Annuler", key=f"confirm_no_{pid}"):
+                        st.session_state.pop(confirm_key, None)
+                        st.rerun()
 
                 st.markdown(f"**Sport** : `{p.get('sport_key', '—')}` · "
                            f"**Modèle** : `{p.get('model_type', '—')}` · "
@@ -181,9 +208,8 @@ def render_validate_tab(health: dict) -> None:
                                       key=f"unskip_{pid}", width='stretch'):
                         try:
                             api_post(f"/predictions/{pid}/unskip", json={})
-                            st.success(
-                                f"Pick #{pid} remis en 'proposed'. Recharge la page."
-                            )
+                            st.toast(f"Pick #{pid} remis en file de validation.", icon="↩️")
+                            st.rerun()
                         except Exception as exc:
                             st.error(f"Erreur : {exc}")
                 else:

@@ -68,8 +68,10 @@ def shrink_toward_market(
     if gap >= hard_threshold:
         weight = max_shrinkage
     else:
-        # Linear interpolation between soft and hard thresholds
-        ratio = (gap - soft_threshold) / (hard_threshold - soft_threshold)
+        # Linear interpolation between soft and hard thresholds. Guard the
+        # denominator so a misconfigured soft==hard never divides by zero.
+        span = hard_threshold - soft_threshold
+        ratio = (gap - soft_threshold) / span if span > 0 else 1.0
         weight = max_shrinkage * ratio
 
     # Pull model_prob toward market_prob by `weight`

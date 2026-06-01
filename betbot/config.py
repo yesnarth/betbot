@@ -27,6 +27,10 @@ class Settings:
     top_combos: int
     scan_hours: list[str]          # ex: ["09:00", "15:00", "20:00"]
     min_before_kickoff: int        # ignorer matchs démarrant dans moins de N minutes
+    # Garde anti-sélection-adverse : edge minimal exigé vs la ligne CONSENSUS
+    # sans-vig (pas seulement la meilleure cote, souvent en retard). 0.0 =
+    # désactivé. Consommé par analysis.detect_value_bets.
+    min_edge_vs_novig: float = 0.0
     log_path: str = field(default="betbot.log")
     database_url: str = field(default="")
     anthropic_api_key: str = field(default="")
@@ -53,6 +57,7 @@ def load_settings() -> Settings:
     bankroll          = float(os.getenv("BANKROLL", "100.0"))
     kelly_fraction    = float(os.getenv("KELLY_FRACTION", "0.25"))
     min_value_edge    = float(os.getenv("MIN_VALUE_EDGE", "0.04"))
+    min_edge_vs_novig = float(os.getenv("MIN_EDGE_VS_NOVIG", "0.02"))
     min_model_prob    = float(os.getenv("MIN_MODEL_PROB", "0.40"))
     min_book_odds     = float(os.getenv("MIN_BOOK_ODDS", "1.50"))
     top_bets          = int(os.getenv("TOP_BETS", "10"))
@@ -111,6 +116,7 @@ def load_settings() -> Settings:
         bankroll=bankroll,
         kelly_fraction=kelly_fraction,
         min_value_edge=min_value_edge,
+        min_edge_vs_novig=min_edge_vs_novig,
         min_model_prob=min_model_prob,
         min_book_odds=min_book_odds,
         top_bets=top_bets,

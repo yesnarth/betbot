@@ -85,6 +85,14 @@ _CSS = """
 
   /* Dataframe */
   [data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; border: 1px solid #e5e7eb; }
+
+  /* Mobile / narrow screens — keep tabs and content usable below ~768px */
+  @media (max-width: 768px) {
+    .block-container { max-width: 100% !important; padding-left: 0.6rem !important; padding-right: 0.6rem !important; }
+    [data-baseweb="tab"] { padding: 8px 10px !important; font-size: 0.85rem !important; }
+    h1 { font-size: 1.35rem !important; }
+    [data-testid="stMetricValue"] { font-size: 1.2rem !important; }
+  }
 </style>
 """
 

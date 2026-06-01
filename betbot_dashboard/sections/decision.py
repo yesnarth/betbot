@@ -283,7 +283,11 @@ def render_ai_agent_tab(filters: dict, agent_enabled: bool) -> None:
     )
     if st.button("🚀 Demander une recommandation à l'agent", type="primary", width='stretch'):
         payload = _payload_from_filters(filters, {"extra_instructions": extra or None})
-        with st.spinner("L'agent raisonne… (~30-60 s)"):
+        with st.spinner(
+            "L'agent raisonne… (de ~30 s à plusieurs minutes selon la complexité). "
+            "Ne ferme pas l'onglet — même si la réponse expire côté navigateur, le "
+            "run reste consultable dans 🛠️ Outils → 📜 Historique IA."
+        ):
             try:
                 res = api_post("/agent/recommend", json=payload)
             except Exception as exc:
@@ -306,3 +310,56 @@ def render_ai_agent_tab(filters: dict, agent_enabled: bool) -> None:
             if res.get("parlays"):
                 st.markdown("### Combinés")
                 render_parlays(res["parlays"])
+
+
+def render_target_parlay_tab(filters: dict) -> None:
+    st.subheader("🎰 Combiné ×1000 — mode loterie")
+    st.warning(
+        "**Stratégie à très forte variance.** Un combiné à cote ×1000 gagne "
+        "≈ **1 fois sur 1000**. Le bot empile assez de jambes (souvent 8-12) pour "
+        "atteindre la cote cible, en **relâchant** ses filtres (pas de garde no-vig). "
+        "À placer toi-même chez ton bookmaker — **non suivi au bankroll**.",
+        icon="🎰",
+    )
+
+    c1, c2, c3 = st.columns(3)
+    target = c1.number_input("Cote combinée cible", min_value=2.0, max_value=100000.0,
+                             value=1000.0, step=100.0)
+    max_legs = c2.slider("Jambes max", 2, 20, 12)
+    n_combos = c3.slider("Combinés à générer", 1, 10, 3)
+    today_only = st.checkbox("Aujourd'hui seulement",
+                             value=bool(filters.get("today_only", False)), key="tp_today")
+    sport = None if filters.get("sport") in (None, "Toutes") else filters.get("sport")
+
+    if st.button(f"🎰 Générer un combiné ×{target:.0f}", type="primary", width='stretch'):
+        payload = {
+            "sport_key": sport,
+            "today_only": today_only,
+            "target_odds": float(target),
+            "max_legs": int(max_legs),
+            "n_combos": int(n_combos),
+        }
+        with st.spinner("Scan large de toutes les ligues + assemblage glouton…"):
+            res = api_post("/recommend/parlay-target", json=payload)
+
+        if res.get("odds_quota_exhausted"):
+            empty_state("🚫", "Quota Odds API épuisé", "Réessaie plus tard.")
+            return
+
+        cols = st.columns(3)
+        cols[0].metric("Jambes candidates", res.get("n_candidates", 0))
+        cols[1].metric("Matchs scannés", res.get("n_events_scanned", 0))
+        cols[2].metric(f"Combinés ×{target:.0f}", len(res.get("parlays", [])))
+
+        parlays = res.get("parlays", [])
+        if parlays:
+            render_parlays(parlays)
+        else:
+            best = res.get("best_achievable_odds", 0.0)
+            empty_state(
+                "🎯",
+                f"Impossible d'atteindre ×{target:.0f} aujourd'hui",
+                f"Meilleure cote atteignable avec {max_legs} jambes : **×{best:.0f}**. "
+                "Baisse la cible, augmente « Jambes max », décoche « Aujourd'hui "
+                "seulement », ou active `SCAN_ALL_SOCCER=1` pour couvrir plus de ligues.",
+            )

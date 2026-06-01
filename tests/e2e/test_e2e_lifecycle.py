@@ -54,13 +54,15 @@ def test_winning_bet_flows_through_lifecycle():
         value_edge=0.10, kelly_stake=10.0, model_type="poisson",
     )
     assert ok is True
+    # save_prediction creates a PROPOSED pick — no debit yet (advisor mode).
+    assert get_state().balance == 100.0
+
+    # User confirms they placed the bet at Pinnacle — THIS debits the stake.
+    pred = db.get_proposed_predictions()[0]
+    assert db.confirm_prediction_placed(pred["id"], bookmaker="pinnacle") is True
     state_after_place = get_state()
     assert state_after_place.balance == 90.0
     assert state_after_place.committed == 10.0
-
-    # User confirms they played the bet at Pinnacle
-    pred = db.get_pending_predictions()[0]
-    assert db.confirm_prediction_placed(pred["id"], bookmaker="pinnacle") is True
 
     # Match settles as a win
     db.update_result("e2e_evt_1", "h2h", "1", "win")
@@ -90,7 +92,7 @@ def test_losing_bet_flows_through_lifecycle():
         model_prob=0.30, best_odds=4.0, best_book="Bet365",
         value_edge=0.20, kelly_stake=5.0, model_type="poisson",
     )
-    pred = db.get_pending_predictions()[0]
+    pred = db.get_proposed_predictions()[0]
     db.confirm_prediction_placed(pred["id"], bookmaker="bet365")
 
     db.update_result("e2e_evt_2", "h2h", "1", "loss")
@@ -119,7 +121,9 @@ def test_void_refunds_stake():
         model_prob=0.55, best_odds=2.0, best_book="x",
         value_edge=0.10, kelly_stake=8.0, model_type="poisson",
     )
-    db.update_result("e2e_evt_3", "h2h", "1", "void")
+    pred = db.get_proposed_predictions()[0]
+    db.confirm_prediction_placed(pred["id"])              # débite 8 → solde 92
+    db.update_result("e2e_evt_3", "h2h", "1", "void")     # rembourse 8 → 100
 
     state = get_state()
     # 100 - 8 (placed) + 8 (void refund) = 100
@@ -142,6 +146,8 @@ def test_resolving_twice_does_not_double_credit():
         model_prob=0.55, best_odds=2.0, best_book="x",
         value_edge=0.10, kelly_stake=10.0, model_type="poisson",
     )
+    pred = db.get_proposed_predictions()[0]
+    db.confirm_prediction_placed(pred["id"])
     db.update_result("e2e_evt_4", "h2h", "1", "win")
     balance_after_first = get_state().balance
     db.update_result("e2e_evt_4", "h2h", "1", "win")   # second call
@@ -198,7 +204,7 @@ def test_cool_off_blocks_after_consecutive_losses(monkeypatch):
             model_prob=0.55, best_odds=2.0, best_book="x",
             value_edge=0.10, kelly_stake=5.0, model_type="poisson",
         )
-        pid = db.get_pending_predictions()[0]["id"]
+        pid = db.get_proposed_predictions()[0]["id"]
         db.confirm_prediction_placed(pid)
         db.update_result(f"e2e_loss_{i}", "h2h", "1", "loss")
 

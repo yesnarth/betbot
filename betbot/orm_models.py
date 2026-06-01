@@ -306,7 +306,9 @@ class IdempotencyKey(Base):
     )
 
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
-    endpoint: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Part of the PK : a client key is unique PER ENDPOINT (lookup/record both
+    # scope by (key, endpoint)). See migration l6a9c3e5b8d2.
+    endpoint: Mapped[str] = mapped_column(String(64), primary_key=True, nullable=False)
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     response_json: Mapped[str] = mapped_column(Text, nullable=False)
     status_code: Mapped[int] = mapped_column(Integer, nullable=False)

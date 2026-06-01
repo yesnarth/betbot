@@ -29,6 +29,7 @@ from betbot_dashboard.sections.decision import (
     render_ai_agent_tab,
     render_local_agent_tab,
     render_scan_tab,
+    render_target_parlay_tab,
 )
 from betbot_dashboard.sections.history import render_history_tab
 from betbot_dashboard.sections.matches import (
@@ -47,6 +48,24 @@ from betbot_dashboard.sections.system import (
     render_tennis_tab,
 )
 from betbot_dashboard.styles import inject_css
+from betbot_dashboard.ui import guarded
+
+# Wrap each section renderer so a backend failure (ApiError) shows a friendly
+# message inside that tab instead of crashing the whole page with a traceback.
+render_validate_tab = guarded(render_validate_tab)
+render_pending_tab = guarded(render_pending_tab)
+render_roi_tab = guarded(render_roi_tab)
+render_capital_tab = guarded(render_capital_tab)
+render_backtest_tab = guarded(render_backtest_tab)
+render_calibrator_tab = guarded(render_calibrator_tab)
+render_tennis_tab = guarded(render_tennis_tab)
+render_basket_tab = guarded(render_basket_tab)
+render_scan_tab = guarded(render_scan_tab)
+render_local_agent_tab = guarded(render_local_agent_tab)
+render_ai_agent_tab = guarded(render_ai_agent_tab)
+render_target_parlay_tab = guarded(render_target_parlay_tab)
+render_events_tab = guarded(render_events_tab)
+render_history_tab = guarded(render_history_tab)
 
 
 # ---------------------------------------------------------------------------
@@ -167,10 +186,11 @@ with section_tools:
         "par défaut), diagnostic infra et historique des invocations IA. Utilise "
         "ces outils pour explorer, pas pour ton workflow quotidien."
     )
-    tab_scan, tab_local, tab_agent, tab_events, tab_sources, tab_agent_runs = st.tabs([
+    tab_scan, tab_local, tab_agent, tab_parlay, tab_events, tab_sources, tab_agent_runs = st.tabs([
         "🎯 Scan manuel",
         "🧠 Agent local",
         "🤖 Agent IA (Claude)",
+        "🎰 Combiné ×1000",
         "📅 Matchs disponibles",
         "🔌 Sources",
         "📜 Historique IA",
@@ -181,6 +201,8 @@ with section_tools:
         render_local_agent_tab(filters, health)
     with tab_agent:
         render_ai_agent_tab(filters, agent_enabled)
+    with tab_parlay:
+        render_target_parlay_tab(filters)
     with tab_events:
         render_events_tab(filters)
     with tab_sources:

@@ -116,7 +116,14 @@ def record(
         return
 
     with session_scope() as s:
-        existing = s.get(IdempotencyKey, key)
+        # Scope by (key, endpoint) — the same client key is independent across
+        # endpoints (matches lookup() and the composite primary key).
+        existing = s.execute(
+            select(IdempotencyKey).where(
+                IdempotencyKey.key == key,
+                IdempotencyKey.endpoint == endpoint,
+            )
+        ).scalar_one_or_none()
         if existing is not None:
             return  # another request won the race; leave it alone
         s.add(IdempotencyKey(

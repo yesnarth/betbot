@@ -24,7 +24,7 @@ passlib[bcrypt]>=1.7.4
 python-multipart>=0.0.9
 
 # Dashboard
-streamlit>=1.40.0
+streamlit>=1.49.0          # width='stretch' on buttons/dataframes needs >=1.49
 pandas>=2.0.0
 lxml>=5.0.0          # required by pandas.read_html for basketball-reference scraping
 

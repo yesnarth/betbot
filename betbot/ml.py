@@ -1,25 +1,22 @@
-"""
-ML probability calibration — learns a correction map from MODEL probabilities
+"""ML probability calibration — learns a correction map from MODEL probabilities
 to OBSERVED win rates, using the predictions table once enough are resolved.
 
 Design choice: **Isotonic Regression** (Niculescu-Mizil & Caruana, 2005).
   - Non-parametric: makes no assumption about the shape of the correction
   - Monotone: a higher model_prob always maps to a higher calibrated_prob
-  - Robust on ~100-1000 samples, which is the realistic range for a
-    personal bot in the first 6 months
-  - Proven to outperform Platt scaling on long-tail betting data
+  - Robust on ~100-1000 samples, the realistic range for a personal bot
 
-Workflow:
-  1. Worker calls `train_calibrator()` weekly (or on demand)
-  2. The fitted model is persisted to `data/calibrator.joblib`
-  3. At scan time, `calibrate(p)` adjusts the raw model probability before
-     edge computation. If the calibrator is missing or stale (< MIN_SAMPLES
-     resolved bets), `calibrate(p) == p` (no-op)
+**Per-segment calibration (v2):** a single calibrator trained mostly on football
+h2h does NOT transfer to tennis ELO, basketball pace, or Over/Under totals — those
+have different miscalibration shapes. So we fit ONE map per *segment*
+(football_h2h, football_totals, tennis, basketball) plus a *global* map. At scan
+time `calibrate(p, segment)` uses the segment map when available, else the global
+map, else identity. Old single-map files (v1) are still read as the global map.
 
 This module DEGRADES gracefully:
-  - sklearn missing → calibrator returns identity
-  - file missing → identity
-  - too few resolved bets → identity (forced)
+  - sklearn missing → identity
+  - file missing / unparseable → identity
+  - segment + global both below MIN_SAMPLES → identity for that segment
 """
 from __future__ import annotations
 
@@ -36,27 +33,50 @@ from betbot.orm_models import Prediction
 
 logger = logging.getLogger("betbot.ml")
 
-# How many resolved bets we want before we trust the calibrator. Below this
-# the isotonic fit is high-variance — better to ship the raw probability.
+# How many resolved bets we want before we trust a calibrator (per segment, and
+# for the global map). Below this the isotonic fit is high-variance.
 MIN_SAMPLES_TO_TRUST = 50
+
+# Beyond this age (days) the calibrator is considered stale — model drift over a
+# season means an old fit can quietly mis-calibrate. The dashboard surfaces this.
+STALE_AFTER_DAYS = 30
 
 CALIBRATOR_PATH = Path(os.getenv("CALIBRATOR_PATH", "data/calibrator.json"))
 
 
 # ---------------------------------------------------------------------------
-# Train
+# Segments
+# ---------------------------------------------------------------------------
+
+def segment_for(sport_key: str | None, market: str | None) -> str:
+    """Map a (sport_key, market) to a calibration segment.
+
+    Tennis and basketball use fundamentally different models from football, and
+    Over/Under totals miscalibrate differently from 1X2 — so each gets its own
+    isotonic map.
+    """
+    sk = sport_key or ""
+    if sk.startswith("tennis_"):
+        return "tennis"
+    if sk.startswith("basketball_"):
+        return "basketball"
+    if market == "totals":
+        return "football_totals"
+    return "football_h2h"
+
+
+# ---------------------------------------------------------------------------
+# Training-data collection
 # ---------------------------------------------------------------------------
 
 def _collect_training_data() -> list[tuple[float, int]]:
-    """
-    Pull (model_prob, won_or_lost) pairs from resolved predictions.
-    Filters out 'void' results (push) — they don't tell us whether the
-    model was right or wrong about the outcome.
+    """Pull (model_prob, won_or_lost) pairs from resolved predictions (all
+    segments pooled). Used for the resolved-bet COUNT and the global fit.
+    'void' (push) rows are excluded — they don't tell us if the model was right.
     """
     with session_scope() as s:
         rows = s.execute(
-            select(Prediction.model_prob, Prediction.result)
-            .where(
+            select(Prediction.model_prob, Prediction.result).where(
                 Prediction.result.is_not(None),
                 Prediction.result.in_(("win", "loss")),
             )
@@ -64,70 +84,137 @@ def _collect_training_data() -> list[tuple[float, int]]:
     return [(float(p), 1 if r == "win" else 0) for p, r in rows]
 
 
-def train_calibrator(min_samples: int = MIN_SAMPLES_TO_TRUST) -> dict:
+def _collect_segmented_training_data() -> list[tuple[float, int, str]]:
+    """Like _collect_training_data but tagged with the segment (sport/market)."""
+    with session_scope() as s:
+        rows = s.execute(
+            select(
+                Prediction.model_prob, Prediction.result,
+                Prediction.sport_key, Prediction.market,
+            ).where(
+                Prediction.result.is_not(None),
+                Prediction.result.in_(("win", "loss")),
+            )
+        ).all()
+    return [
+        (float(p), 1 if r == "win" else 0, segment_for(sk, mk))
+        for p, r, sk, mk in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Isotonic fit helpers
+# ---------------------------------------------------------------------------
+
+def _fit_isotonic(samples: list[tuple[float, int]]) -> tuple[list[float], list[float]] | None:
+    """Fit an IsotonicRegression on (prob, won) pairs; return (x_thresholds,
+    y_thresholds) as plain lists (JSON-safe — no pickle/RCE), or None on failure.
     """
-    Fit an Isotonic Regression on resolved predictions and persist it as JSON.
-
-    We persist only the (X_thresholds_, y_thresholds_) pair as JSON instead of
-    pickling the sklearn IsotonicRegression. This is **safer** (no pickle/RCE
-    deserialization vector) and **portable** — at predict time we only need
-    monotone linear interpolation between thresholds, which is just numpy.interp.
-
-    Returns a status dict with:
-      - n_samples         : how many resolved predictions were used
-      - trained           : True if calibrator was fitted and saved
-      - reason            : explanation when training was skipped
-      - brier_before/after: improvement on the training set
-    """
-    samples = _collect_training_data()
-    if len(samples) < min_samples:
-        return {
-            "trained": False,
-            "n_samples": len(samples),
-            "reason": f"need at least {min_samples} resolved bets, have {len(samples)}",
-        }
-
     try:
         from sklearn.isotonic import IsotonicRegression
-    except ImportError as exc:
-        return {"trained": False, "n_samples": len(samples), "reason": f"sklearn unavailable: {exc}"}
-
-    probs = [s[0] for s in samples]
-    outcomes = [s[1] for s in samples]
-
-    brier_before = sum((p - y) ** 2 for p, y in samples) / len(samples)
-
+    except ImportError:
+        return None
+    if not samples:
+        return None
     iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-    iso.fit(probs, outcomes)
+    iso.fit([p for p, _ in samples], [y for _, y in samples])
+    return iso.X_thresholds_.tolist(), iso.y_thresholds_.tolist()
 
-    calibrated = iso.predict(probs)
-    brier_after = sum((c - y) ** 2 for c, y in zip(calibrated, outcomes)) / len(samples)
 
+def _brier(samples: list[tuple[float, int]]) -> float:
+    return sum((p - y) ** 2 for p, y in samples) / len(samples) if samples else 0.0
+
+
+def _brier_after(samples: list[tuple[float, int]], xy: tuple[list[float], list[float]]) -> float:
+    import numpy as np
+    x_t, y_t = xy
+    return sum(
+        (float(np.interp(p, x_t, y_t)) - y) ** 2 for p, y in samples
+    ) / len(samples) if samples else 0.0
+
+
+def _build_payload(
+    all_samples: list[tuple[float, int]],
+    by_segment: dict[str, list[tuple[float, int]]],
+    min_samples: int,
+    source: str,
+    extra: dict | None = None,
+) -> dict | None:
+    """Fit the global map + one map per segment that has enough samples.
+    Returns the JSON payload, or None if even the global fit is impossible.
+    """
+    g_xy = _fit_isotonic(all_samples)
+    if g_xy is None:
+        return None
+    segments: dict[str, dict] = {}
+    seg_counts: dict[str, int] = {}
+    for seg, samples in by_segment.items():
+        seg_counts[seg] = len(samples)
+        if len(samples) >= min_samples:
+            xy = _fit_isotonic(samples)
+            if xy is not None:
+                segments[seg] = {"x": xy[0], "y": xy[1], "n": len(samples)}
     payload = {
-        "format": "isotonic-thresholds-v1",
-        "x_thresholds": iso.X_thresholds_.tolist(),
-        "y_thresholds": iso.y_thresholds_.tolist(),
-        "y_min": 0.0,
-        "y_max": 1.0,
+        "format": "isotonic-segmented-v1",
+        "global": {"x": g_xy[0], "y": g_xy[1], "n": len(all_samples)},
+        "segments": segments,
         "trained_at": datetime.now(timezone.utc).isoformat(),
-        "n_samples": len(samples),
-        "brier_before": round(brier_before, 4),
-        "brier_after": round(brier_after, 4),
-        "source": "resolved_bets",
+        "source": source,
+        "n_samples": len(all_samples),
+        "brier_before": round(_brier(all_samples), 4),
+        "brier_after": round(_brier_after(all_samples, g_xy), 4),
+        "segment_counts": seg_counts,
     }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _persist(payload: dict) -> None:
     CALIBRATOR_PATH.parent.mkdir(parents=True, exist_ok=True)
     CALIBRATOR_PATH.write_text(json.dumps(payload, indent=1), encoding="utf-8")
     reset_cache()
+
+
+# ---------------------------------------------------------------------------
+# Train (on real resolved bets)
+# ---------------------------------------------------------------------------
+
+def train_calibrator(min_samples: int = MIN_SAMPLES_TO_TRUST) -> dict:
+    """Fit isotonic maps (global + per-segment) on resolved predictions and
+    persist them as JSON. Returns a status dict (trained, n_samples, brier_*,
+    segments, ...)."""
+    rows = _collect_segmented_training_data()
+    if len(rows) < min_samples:
+        return {
+            "trained": False,
+            "n_samples": len(rows),
+            "reason": f"need at least {min_samples} resolved bets, have {len(rows)}",
+        }
+
+    all_samples = [(p, w) for p, w, _ in rows]
+    by_segment: dict[str, list[tuple[float, int]]] = {}
+    for p, w, seg in rows:
+        by_segment.setdefault(seg, []).append((p, w))
+
+    payload = _build_payload(all_samples, by_segment, min_samples, source="resolved_bets")
+    if payload is None:
+        return {"trained": False, "n_samples": len(all_samples),
+                "reason": "sklearn unavailable"}
+    _persist(payload)
     logger.info(
-        "Calibrator trained on %d samples, Brier %.4f → %.4f, saved to %s",
-        len(samples), brier_before, brier_after, CALIBRATOR_PATH,
+        "Calibrator trained on %d samples (global) ; segments=%s ; Brier %.4f → %.4f",
+        len(all_samples), list(payload["segments"]),
+        payload["brier_before"], payload["brier_after"],
     )
     return {
         "trained": True,
-        "n_samples": len(samples),
+        "n_samples": len(all_samples),
         "path": str(CALIBRATOR_PATH),
-        "brier_before": round(brier_before, 4),
-        "brier_after": round(brier_after, 4),
+        "brier_before": payload["brier_before"],
+        "brier_after": payload["brier_after"],
+        "segments": list(payload["segments"]),
+        "segment_counts": payload["segment_counts"],
     }
 
 
@@ -135,10 +222,6 @@ def train_calibrator(min_samples: int = MIN_SAMPLES_TO_TRUST) -> dict:
 # Cold-start training
 # ---------------------------------------------------------------------------
 
-# Default leagues to combine for cold-start. We pick the 5 biggest European
-# leagues — they share enough match dynamics that a combined isotonic fit
-# transfers reasonably well to other leagues, and they have plenty of
-# football-data.org history.
 DEFAULT_COLD_START_LEAGUES = (
     "soccer_epl",
     "soccer_spain_la_liga",
@@ -153,24 +236,11 @@ def cold_start_train(
     sport_keys: tuple[str, ...] = DEFAULT_COLD_START_LEAGUES,
     n_per_sport: int = 150,
 ) -> dict:
-    """
-    Bootstrap the calibrator from synthetic predictions on historical matches.
-
-    Walk-forward backtest produces (model_prob, won) pairs that look exactly
-    like real resolved bets — feeds the same isotonic regression. Used on
-    fresh installs where the user hasn't placed enough real bets yet to
-    train the calibrator from live data.
-
-    Once the user accumulates >= MIN_SAMPLES_TO_TRUST real resolved bets,
-    the weekly scheduled `train_calibrator()` job takes over and overwrites
-    the cold-start file with a "real" fit.
-
-    Returns a status dict :
-      - trained         : bool — calibrator file written?
-      - n_samples       : total (model_prob, won) pairs from all leagues
-      - per_league      : dict {sport_key: n_samples}
-      - brier_before    : training Brier of the raw probabilities
-      - brier_after     : training Brier of the calibrated probabilities
+    """Bootstrap the calibrator from walk-forward backtests on historical
+    matches (synthetic but realistic (model_prob, won) pairs). All cold-start
+    samples are football h2h, so they fill both the global map and the
+    `football_h2h` segment. The weekly train_calibrator() later overwrites this
+    with real per-segment fits.
     """
     from betbot.backtest import run_backtest
 
@@ -180,8 +250,7 @@ def cold_start_train(
 
     for sport in sport_keys:
         try:
-            r = run_backtest(sport, fd_api_key, n_holdout=n_per_sport,
-                             use_enrichment=False)
+            r = run_backtest(sport, fd_api_key, n_holdout=n_per_sport, use_enrichment=False)
         except Exception as exc:
             notes.append(f"{sport}: error {exc}")
             per_league[sport] = 0
@@ -204,52 +273,29 @@ def cold_start_train(
             "notes": notes,
         }
 
-    try:
-        from sklearn.isotonic import IsotonicRegression
-    except ImportError as exc:
-        return {
-            "trained": False, "n_samples": len(all_samples),
-            "per_league": per_league,
-            "reason": f"sklearn unavailable: {exc}",
-        }
-
-    probs = [s[0] for s in all_samples]
-    outcomes = [s[1] for s in all_samples]
-    brier_before = sum((p - y) ** 2 for p, y in all_samples) / len(all_samples)
-
-    iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-    iso.fit(probs, outcomes)
-    calibrated = iso.predict(probs)
-    brier_after = sum((c - y) ** 2 for c, y in zip(calibrated, outcomes)) / len(all_samples)
-
-    payload = {
-        "format": "isotonic-thresholds-v1",
-        "x_thresholds": iso.X_thresholds_.tolist(),
-        "y_thresholds": iso.y_thresholds_.tolist(),
-        "y_min": 0.0,
-        "y_max": 1.0,
-        "trained_at": datetime.now(timezone.utc).isoformat(),
-        "n_samples": len(all_samples),
-        "brier_before": round(brier_before, 4),
-        "brier_after": round(brier_after, 4),
-        "source": "cold_start_backtest",
-        "per_league": per_league,
-    }
-    CALIBRATOR_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CALIBRATOR_PATH.write_text(json.dumps(payload, indent=1), encoding="utf-8")
-    reset_cache()
+    # All cold-start samples are football h2h → seed both global and that segment.
+    payload = _build_payload(
+        all_samples,
+        {"football_h2h": all_samples},
+        MIN_SAMPLES_TO_TRUST,
+        source="cold_start_backtest",
+        extra={"per_league": per_league},
+    )
+    if payload is None:
+        return {"trained": False, "n_samples": len(all_samples),
+                "per_league": per_league, "reason": "sklearn unavailable"}
+    _persist(payload)
     logger.info(
-        "Cold-start calibrator trained on %d samples across %d leagues, "
-        "Brier %.4f → %.4f",
-        len(all_samples), len(sport_keys), brier_before, brier_after,
+        "Cold-start calibrator on %d samples across %d leagues, Brier %.4f → %.4f",
+        len(all_samples), len(sport_keys), payload["brier_before"], payload["brier_after"],
     )
     return {
         "trained": True,
         "n_samples": len(all_samples),
         "per_league": per_league,
         "path": str(CALIBRATOR_PATH),
-        "brier_before": round(brier_before, 4),
-        "brier_after": round(brier_after, 4),
+        "brier_before": payload["brier_before"],
+        "brier_after": payload["brier_after"],
         "notes": notes,
     }
 
@@ -258,12 +304,15 @@ def cold_start_train(
 # Apply
 # ---------------------------------------------------------------------------
 
-# Cached as (x_thresholds: list[float], y_thresholds: list[float], trained_at: str)
-_cached_calibrator: tuple[list[float], list[float], str] | None = None
+# Cached as {"global": (x, y) | None, "segments": {seg: (x, y)},
+#            "trained_at": str, "source": str}
+_cached_calibrator: dict | None = None
 
 
-def _load_calibrator():
-    """Lazily load and cache the persisted calibrator from JSON. Returns None if absent."""
+def _load_calibrator() -> dict | None:
+    """Load and cache the persisted calibrator. Handles both the segmented v2
+    format and the legacy single-map v1 format (treated as the global map).
+    Returns None when no usable map is present."""
     global _cached_calibrator
     if _cached_calibrator is not None:
         return _cached_calibrator
@@ -271,19 +320,40 @@ def _load_calibrator():
         return None
     try:
         payload = json.loads(CALIBRATOR_PATH.read_text(encoding="utf-8"))
-        if payload.get("format") != "isotonic-thresholds-v1":
-            logger.warning("Calibrator file format mismatch: %s", payload.get("format"))
-            return None
-        _cached_calibrator = (
-            list(payload["x_thresholds"]),
-            list(payload["y_thresholds"]),
-            payload.get("trained_at", "?"),
-            payload.get("source", "resolved_bets"),
-        )
-        return _cached_calibrator
-    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+    except (OSError, json.JSONDecodeError) as exc:
         logger.warning("Could not load calibrator: %s", exc)
         return None
+
+    fmt = payload.get("format")
+    glob: tuple[list, list] | None = None
+    segments: dict[str, tuple[list, list]] = {}
+    try:
+        if fmt == "isotonic-segmented-v1":
+            g = payload.get("global")
+            if g and g.get("x") and g.get("y"):
+                glob = (list(g["x"]), list(g["y"]))
+            for seg, m in (payload.get("segments") or {}).items():
+                if m.get("x") and m.get("y"):
+                    segments[seg] = (list(m["x"]), list(m["y"]))
+        elif fmt == "isotonic-thresholds-v1":  # legacy single map → global
+            if payload.get("x_thresholds") and payload.get("y_thresholds"):
+                glob = (list(payload["x_thresholds"]), list(payload["y_thresholds"]))
+        else:
+            logger.warning("Calibrator file format mismatch: %s", fmt)
+            return None
+    except (KeyError, TypeError) as exc:
+        logger.warning("Could not parse calibrator maps: %s", exc)
+        return None
+
+    if glob is None and not segments:
+        return None
+    _cached_calibrator = {
+        "global": glob,
+        "segments": segments,
+        "trained_at": payload.get("trained_at", "?"),
+        "source": payload.get("source", "resolved_bets"),
+    }
+    return _cached_calibrator
 
 
 def reset_cache() -> None:
@@ -292,41 +362,50 @@ def reset_cache() -> None:
     _cached_calibrator = None
 
 
-def calibrate(prob: float) -> float:
-    """
-    Apply the persisted Isotonic calibration to a raw model probability.
+def calibrate(prob: float, segment: str | None = None) -> float:
+    """Apply the persisted isotonic calibration to a raw model probability.
 
-    Pure JSON+numpy implementation — no pickle/joblib deserialization, so
-    even an attacker writing a malicious file can only cause garbage output,
-    never code execution. The math is the same as IsotonicRegression.predict
-    on univariate data: monotone linear interpolation between thresholds.
-
-    Returns `prob` unchanged when no calibrator is available.
+    Uses the `segment` map when available, else the global map, else returns
+    `prob` unchanged. Pure JSON + numpy interpolation — no pickle deserialization.
     """
     cal = _load_calibrator()
     if cal is None:
         return prob
-    x_t, y_t, _, _ = cal
-    if not x_t or not y_t:
+    xy = None
+    if segment and segment in cal["segments"]:
+        xy = cal["segments"][segment]
+    elif cal["global"] is not None:
+        xy = cal["global"]
+    if not xy or not xy[0] or not xy[1]:
         return prob
     try:
         import numpy as np
-        # `clip` behaviour: predictions outside the training range pin to nearest
-        result = float(np.interp(prob, x_t, y_t))
-        return max(0.0, min(result, 1.0))
+        return max(0.0, min(float(np.interp(prob, xy[0], xy[1])), 1.0))
     except (ValueError, TypeError):
         return prob
 
 
 def calibrator_status() -> dict:
-    """Diagnostic: is the calibrator present, from when, and its source."""
+    """Diagnostic: presence, age/staleness, source, and which segments are fitted."""
     cal = _load_calibrator()
     if cal is None:
         return {"available": False, "path": str(CALIBRATOR_PATH)}
-    _, _, trained_at, source = cal
-    return {
+    out = {
         "available": True,
         "path": str(CALIBRATOR_PATH),
-        "trained_at": trained_at,
-        "source": source,  # "resolved_bets" | "cold_start_backtest"
+        "trained_at": cal["trained_at"],
+        "source": cal["source"],  # "resolved_bets" | "cold_start_backtest"
+        "has_global": cal["global"] is not None,
+        "segments": sorted(cal["segments"].keys()),
     }
+    try:
+        ts = datetime.fromisoformat(cal["trained_at"])
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - ts).days
+        out["age_days"] = age_days
+        out["stale"] = age_days > STALE_AFTER_DAYS
+    except (ValueError, TypeError):
+        out["age_days"] = None
+        out["stale"] = False
+    return out

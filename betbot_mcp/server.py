@@ -67,6 +67,7 @@ def _parlay_to_dict(p: Parlay) -> dict:
         "combined_odds": p.combined_odds,
         "combined_prob": p.combined_prob,
         "combined_ev_pct": p.combined_ev,
+        "correlated": p.correlated,
         "legs": [_bet_to_dict(b) for b in p.bets],
     }
 
@@ -301,6 +302,7 @@ def find_value_bets(
         min_value_edge=edge,
         min_model_prob=prob,
         min_book_odds=odds,
+        min_edge_vs_novig=s.min_edge_vs_novig,
         prebuilt_stats_by_sport=prebuilt,
     )
     ranked = rank_value_bets(bets)[:top_n]
@@ -902,6 +904,7 @@ def run_local_agent(
         bankroll=s.bankroll, kelly_fraction=s.kelly_fraction,
         min_value_edge=edge, min_model_prob=s.min_model_prob,
         min_book_odds=s.min_book_odds,
+        min_edge_vs_novig=s.min_edge_vs_novig,
         prebuilt_stats_by_sport=prebuilt,
     )
     raw = rank_value_bets(raw)[: s.top_bets]

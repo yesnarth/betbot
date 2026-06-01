@@ -75,12 +75,17 @@ def _ensure_min_combos(
     Returns (ranked_bets, parlays).
     """
     # (edge_threshold, min_model_prob, min_book_odds, n_legs, label)
+    # IMPORTANT : on ne descend JAMAIS sous edge 0. Forcer des combinés à EV
+    # négative pour atteindre min_combos est contraire à « robuste et sûr ».
+    # On relâche uniquement prob / cote / nombre de jambes, jamais l'exigence
+    # d'EV positive. Si min_combos n'est pas atteint, on en renvoie moins —
+    # run_daily_scan gère le cas « aucun combiné » via render_no_value().
     attempts = [
         (settings.min_value_edge, settings.min_model_prob, settings.min_book_odds,    3, f"strict (edge ≥ {settings.min_value_edge*100:.0f}%)"),
-        (0.0,                     settings.min_model_prob, settings.min_book_odds,    3, "EV positif"),
-        (-0.05,                   0.35,                    1.30,                      3, "relâché (prob ≥ 35%, cote ≥ 1.30)"),
-        (-0.15,                   0.30,                    1.20,                      3, "très relâché (3 jambes)"),
-        (-0.15,                   0.30,                    1.20,                      2, "2 jambes seulement"),
+        (0.0,                     settings.min_model_prob, settings.min_book_odds,    3, "EV ≥ 0"),
+        (0.0,                     0.35,                    1.30,                      3, "EV ≥ 0, prob ≥ 35%, cote ≥ 1.30"),
+        (0.0,                     0.30,                    1.20,                      3, "EV ≥ 0, seuils bas (3 jambes)"),
+        (0.0,                     0.30,                    1.20,                      2, "EV ≥ 0, 2 jambes"),
     ]
 
     ranked: list[ValueBet] = []
@@ -96,6 +101,7 @@ def _ensure_min_combos(
             min_value_edge=edge_thr,
             min_model_prob=prob_thr,
             min_book_odds=odds_thr,
+            min_edge_vs_novig=settings.min_edge_vs_novig,
             prebuilt_stats_by_sport=prebuilt_stats,
             probs_cache=probs_cache,
         )
@@ -579,6 +585,30 @@ def main() -> None:
         trigger=CronTrigger(day_of_week="sun", hour=3, minute=30),
         id="ml_calibrator_weekly",
         name="ml-calibrator",
+        misfire_grace_time=3600,
+    )
+
+    # Blend-weight auto-tune — Wednesday 06:00 UTC. Re-fits per-league elo/xg
+    # weights on the growing football-data history; persists ONLY improvements
+    # (a league that no longer beats its defaults is left unchanged).
+    from betbot.tuning import tune_all_leagues
+    from betbot import blend_params as _blend_params
+    def _blend_tune_job():
+        from datetime import datetime as _dt, timezone as _tz
+        results = tune_all_leagues(settings.football_data_api_key)
+        now = _dt.now(_tz.utc).isoformat()
+        saved = 0
+        for sk, res in results.items():
+            if res.get("tuned"):
+                _blend_params.save_weights(sk, res["elo_weight"], res["xg_weight"],
+                                           res["log_loss_after"], now)
+                saved += 1
+        logger.info("Blend auto-tune : %d/%d ligue(s) mises à jour", saved, len(results))
+    scheduler.add_job(
+        _wrap("blend_tune_weekly", _blend_tune_job),
+        trigger=CronTrigger(day_of_week="wed", hour=6, minute=0),
+        id="blend_tune_weekly",
+        name="blend-tune",
         misfire_grace_time=3600,
     )
 

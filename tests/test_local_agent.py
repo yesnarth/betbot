@@ -263,6 +263,9 @@ def test_coach_sacked_reduces_prob():
 
 def test_bad_weather_reduces_over_pick():
     ev = _make_eval(prob=0.60)
+    # Over picks are emitted with market="totals" (NOT h2h). The rule now guards
+    # on totals, so the test reflects the real production market.
+    ev.pick["market"] = "totals"
     ev.pick["selection_label"] = "Plus de 2.5 buts"
     weather = {"will_rain_heavy": True, "is_windy": False,
                "precipitation_mm": 8.0, "wind_kmh": 10.0}

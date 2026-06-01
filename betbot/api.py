@@ -72,6 +72,15 @@ def _enabled_sport_keys() -> list[str]:
     return keys
 
 
+def _scan_all_soccer() -> bool:
+    """When SCAN_ALL_SOCCER=1, scan EVERY in-season `soccer_*` league The Odds
+    API lists (discovered for FREE via get_active_sports), not just the curated
+    wishlist. Leagues without football-data.org coverage fall back to the
+    consensus model. Read each call so .env changes take effect at runtime.
+    """
+    return os.getenv("SCAN_ALL_SOCCER", "0") == "1"
+
+
 class QuotaExhaustedError(Exception):
     pass
 
@@ -235,6 +244,18 @@ class OddsAPIClient:
         active = self.get_active_sports()  # free probe
         if active:
             to_query = [s for s in wishlist if s in active]
+            # SCAN_ALL_SOCCER : add EVERY in-season soccer league the API lists
+            # (discovered for free via the probe above), beyond the curated
+            # wishlist. New leagues without football-data.org stats degrade
+            # gracefully to the consensus model in detect_value_bets.
+            if _scan_all_soccer():
+                extra = sorted(
+                    s for s in active
+                    if s.startswith("soccer_") and s not in to_query
+                )
+                if extra:
+                    logger.info("SCAN_ALL_SOCCER : +%d ligue(s) foot en saison", len(extra))
+                    to_query = to_query + extra
             skipped = [s for s in wishlist if s not in active]
             if skipped:
                 logger.info("Skipping out-of-season sports : %s", ", ".join(skipped))

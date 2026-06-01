@@ -17,6 +17,8 @@ from betbot_api.schemas import (
     LocalAgentResponse,
     ManualScanFilters,
     ManualScanResponse,
+    TargetParlayFilters,
+    TargetParlayResponse,
 )
 
 router = APIRouter(tags=["recommend"])
@@ -81,6 +83,7 @@ def recommend_manual(
         min_value_edge=edge,
         min_model_prob=prob,
         min_book_odds=odds,
+        min_edge_vs_novig=s.min_edge_vs_novig,
         prebuilt_stats_by_sport=prebuilt,
     )
     ranked = rank_value_bets(raw)[: s.top_bets]
@@ -112,6 +115,7 @@ def recommend_manual(
             "combined_odds": p.combined_odds,
             "combined_prob": p.combined_prob,
             "combined_ev_pct": p.combined_ev,
+            "correlated": p.correlated,
             "legs": [bet_to_dict(b) for b in p.bets],
         }
         for p in parlays
@@ -130,6 +134,115 @@ def recommend_manual(
             "n_legs": filters.n_legs,
             "n_combos": filters.n_combos,
         },
+        n_events_scanned=n_events,
+        odds_quota_remaining=odds_client.quota_remaining,
+        odds_quota_exhausted=odds_client.quota_exhausted,
+    )
+
+
+@router.post("/recommend/parlay-target", response_model=TargetParlayResponse)
+@limiter.limit("3/minute")  # heavy fan-out scan (all leagues) — tighter than other scans
+def recommend_parlay_target(
+    request: Request,
+    filters: TargetParlayFilters,
+    _: str = Depends(require_auth),
+) -> TargetParlayResponse:
+    """
+    ×1000 "lottery" parlay mode. Scans broadly (set SCAN_ALL_SOCCER=1 to cover
+    every in-season football league), gathers a large pool of candidate legs with
+    RELAXED filters (NO no-vig gate, EV ≥ 0 by default), then greedily stacks
+    event-disjoint legs until combined odds reach `target_odds`.
+
+    HIGH VARIANCE by design — a ×1000 combo wins ~0.1% of the time. The safe
+    singles path (worker + /recommend/manual) keeps all its protections.
+    """
+    from betbot.analysis import build_target_parlays, detect_value_bets
+    from betbot.shared import filter_upcoming_today, load_team_stats_from_db
+
+    s = load_settings()
+    odds_client = OddsAPIClient(s.odds_api_key)
+
+    if filters.sport_key:
+        all_events = {filters.sport_key: odds_client.get_events_with_odds(filters.sport_key)}
+    else:
+        all_events = odds_client.fetch_all_sports()
+
+    events_by_sport: dict[str, list[dict]] = {}
+    for sk, ev in all_events.items():
+        kept = filter_upcoming_today(ev, s.min_before_kickoff) if filters.today_only else ev
+        if kept:
+            events_by_sport[sk] = kept
+
+    n_events = sum(len(v) for v in events_by_sport.values())
+    if n_events == 0:
+        return TargetParlayResponse(
+            parlays=[], n_candidates=0, best_achievable_odds=0.0,
+            target_odds=filters.target_odds, n_events_scanned=0,
+            odds_quota_remaining=odds_client.quota_remaining,
+            odds_quota_exhausted=odds_client.quota_exhausted,
+        )
+
+    db = Database(s.database_url)
+    prebuilt = load_team_stats_from_db(db, events_by_sport.keys())
+    # RELAXED pool : no no-vig gate (min_edge_vs_novig=0), EV floor = filters.min_edge.
+    pool = detect_value_bets(
+        events_by_sport=events_by_sport,
+        match_history_by_sport={},
+        bankroll=s.bankroll,
+        kelly_fraction=s.kelly_fraction,
+        min_value_edge=filters.min_edge,
+        min_model_prob=filters.min_prob,
+        min_book_odds=filters.min_leg_odds,
+        min_edge_vs_novig=0.0,
+        require_positive_stake=False,   # lottery pool : keep every edge≥0 leg
+        prebuilt_stats_by_sport=prebuilt,
+    )
+
+    parlays = build_target_parlays(
+        pool, target_odds=filters.target_odds, max_legs=filters.max_legs,
+        top_n=filters.n_combos, min_leg_odds=filters.min_leg_odds,
+    )
+
+    # Best achievable odds (single greedy chain) — informative when the target
+    # can't be reached with today's pool.
+    best = 1.0
+    seen: set[str] = set()
+    for b in sorted(pool, key=lambda x: (x.value_edge * (x.reliability or 1.0), x.model_prob),
+                    reverse=True):
+        if b.event_id in seen:
+            continue
+        seen.add(b.event_id)
+        best *= b.best_odds
+        if len(seen) >= filters.max_legs:
+            break
+
+    def bet_to_dict(b):
+        return {
+            "event_id": b.event_id, "sport_key": b.sport_key, "league": b.league_label,
+            "home_team": b.home_team, "away_team": b.away_team, "market": b.market,
+            "selection_code": b.selection_code, "selection_label": b.selection_label,
+            "model_prob": b.model_prob, "best_odds": b.best_odds, "best_book": b.best_book,
+            "value_edge": b.value_edge, "kelly_stake": b.kelly_stake,
+            "model_type": b.model_type, "reliability": b.reliability,
+        }
+
+    parlays_out = [
+        {
+            "n_legs": len(p.bets),
+            "combined_odds": p.combined_odds,
+            "combined_prob": p.combined_prob,
+            "combined_ev_pct": p.combined_ev,
+            "correlated": p.correlated,
+            "legs": [bet_to_dict(b) for b in p.bets],
+        }
+        for p in parlays
+    ]
+
+    return TargetParlayResponse(
+        parlays=parlays_out,
+        n_candidates=len(pool),
+        best_achievable_odds=round(best, 2),
+        target_odds=filters.target_odds,
         n_events_scanned=n_events,
         odds_quota_remaining=odds_client.quota_remaining,
         odds_quota_exhausted=odds_client.quota_exhausted,
@@ -209,6 +322,7 @@ def recommend_agent_local(
         min_value_edge=edge,
         min_model_prob=prob,
         min_book_odds=odds,
+        min_edge_vs_novig=s.min_edge_vs_novig,
         prebuilt_stats_by_sport=prebuilt,
     )
     ranked = rank_value_bets(raw_bets)[: s.top_bets]
@@ -274,6 +388,7 @@ def recommend_agent_local(
             "combined_odds": p.combined_odds,
             "combined_prob": p.combined_prob,
             "combined_ev_pct": p.combined_ev,
+            "correlated": p.correlated,
             "legs": [bet_to_dict(b) for b in p.bets],
         }
         for p in parlays

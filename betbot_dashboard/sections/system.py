@@ -92,14 +92,18 @@ def render_sources_tab() -> None:
         st.markdown(f"#### {title}")
         st.caption(hint)
         for s in items:
-            cols = st.columns([0.4, 2.0, 1.0, 3.0])
-            cols[0].markdown(status_icons.get(s["status"], "⚪"))
+            status = s["status"]
+            cols = st.columns([0.4, 2.0, 1.3, 2.7])
+            cols[0].markdown(status_icons.get(status, "⚪"))
             cols[1].markdown(f"**{s['name']}**")
-            if s["status"] == "ok":
-                cols[2].caption(f"{s.get('latency_ms', 0)} ms")
+            # Always show the WORD status (never colour-only — accessibility),
+            # with latency appended for healthy sources.
+            if status == "ok":
+                cols[2].caption(f":green[OK] · {s.get('latency_ms', 0)} ms")
+            elif status == "not_configured":
+                cols[2].caption(f":orange[{status_text[status]}]")
             else:
-                cols[2].caption(f":orange[{status_text[s['status']]}]" if s["status"] == "not_configured"
-                                else f":red[{status_text[s['status']]}]")
+                cols[2].caption(f":red[{status_text[status]}]")
             reason = s.get("reason") or ""
             cols[3].caption(reason[:140])
 

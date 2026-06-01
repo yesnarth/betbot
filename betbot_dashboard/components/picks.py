@@ -5,13 +5,14 @@ import pandas as pd
 import streamlit as st
 
 
-def _reliability_emoji(score: float) -> str:
-    """3-bucket visual cue for the Fiabilité column."""
+def _reliability_badge(score: float) -> str:
+    """Emoji + WORD label for the Fiabilité column. The word matters for
+    accessibility — a colour-blind user can't distinguish 🟢/🟡/🔴 alone."""
     if score >= 0.70:
-        return "🟢"
+        return "🟢 Haute"
     if score >= 0.40:
-        return "🟡"
-    return "🔴"
+        return "🟡 Moyenne"
+    return "🔴 Faible"
 
 
 def render_picks_table(picks: list[dict]) -> None:
@@ -22,7 +23,7 @@ def render_picks_table(picks: list[dict]) -> None:
     # The raw `reliability` column stays in `df` for the warning below.
     if "reliability" in df.columns:
         df["reliability_display"] = df["reliability"].apply(
-            lambda s: f"{_reliability_emoji(float(s))} {float(s):.2f}"
+            lambda s: f"{_reliability_badge(float(s))} ({float(s):.2f})"
         )
     cols = [c for c in [
         "home_team", "away_team", "league", "selection_label",
@@ -84,7 +85,25 @@ def render_parlays(parlays: list[dict]) -> None:
     for i, parlay in enumerate(parlays, 1):
         ev = parlay.get("combined_ev_pct", 0)
         odds = parlay.get("combined_odds", 0)
-        with st.expander(f"Combiné #{i}  —  cote × {odds}  —  EV {ev:+.1f}%", expanded=(i == 1)):
+        prob = parlay.get("combined_prob", 0.0)
+        corr_marker = "  ⚠️ corrélé" if parlay.get("correlated") else ""
+        # Win probability shown alongside EV : on a ×1000 combo the EV can look
+        # large while the real win chance is ~0.1% — surfacing both is honest.
+        with st.expander(
+            f"Combiné #{i}  —  cote × {odds}  —  proba {prob*100:.2f}%  —  EV {ev:+.1f}%{corr_marker}",
+            expanded=(i == 1),
+        ):
+            if parlay.get("correlated"):
+                st.caption(
+                    "⚠️ Plusieurs jambes de la même ligue (même jour) — corrélation "
+                    "possible. L'EV affichée intègre déjà une décote prudente."
+                )
+            if ev > 50:
+                st.caption(
+                    "⚠️ EV très élevée = **artefact de cumul** (le produit des edges du "
+                    "modèle exagère, surtout sur les longshots). Fie-toi à la **proba de "
+                    "gain** ci-dessus, pas à l'EV."
+                )
             df = pd.DataFrame(parlay.get("legs", []))
             if not df.empty:
                 show = [c for c in [
