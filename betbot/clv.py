@@ -345,3 +345,44 @@ def aggregate_clv(days: int = 30) -> dict:
         "positive_clv_share": round(positive / len(clvs) * 100, 1),
         "median_clv_pct": round(median, 2),
     }
+
+
+def _group_clv(rows: list[tuple]) -> list[dict]:
+    """Group (best_odds, closing_odds, sport_key, market) rows into per-segment
+    CLV stats (segment = league × market). Pure — easy to unit-test. Sorted best
+    CLV first; a positive avg means the segment beats the closing line."""
+    from collections import defaultdict
+
+    buckets: dict[tuple, list[float]] = defaultdict(list)
+    for entry, close, sport_key, market in rows:
+        buckets[(sport_key or "?", market or "?")].append(compute_clv_pct(entry, close))
+
+    out: list[dict] = []
+    for (sport_key, market), clvs in buckets.items():
+        positive = sum(1 for c in clvs if c > 0)
+        out.append({
+            "sport_key": sport_key,
+            "market": market,
+            "n_with_clv": len(clvs),
+            "avg_clv_pct": round(sum(clvs) / len(clvs), 2),
+            "positive_clv_share": round(positive / len(clvs) * 100, 1),
+        })
+    out.sort(key=lambda d: (d["avg_clv_pct"], d["n_with_clv"]), reverse=True)
+    return out
+
+
+def aggregate_clv_by_segment(days: int = 90) -> list[dict]:
+    """Per-segment (league × market) CLV over the last N days — shows which
+    leagues/markets actually beat the closing line. Default window is wider (90 d)
+    since per-segment samples are smaller than the overall figure."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with session_scope() as s:
+        rows = s.execute(
+            select(Prediction.best_odds, Prediction.closing_odds,
+                   Prediction.sport_key, Prediction.market)
+            .where(
+                Prediction.closing_odds.is_not(None),
+                Prediction.created_at >= cutoff,
+            )
+        ).all()
+    return _group_clv(rows)

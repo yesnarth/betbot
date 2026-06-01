@@ -43,6 +43,22 @@ def clv_coverage(
     return count_missed_clv_snapshots(days=days)
 
 
+@router.get("/clv-by-segment")
+def clv_by_segment(
+    days: int = Query(default=90, ge=1, le=365),
+    _: str = Depends(require_auth),
+) -> dict:
+    """Per-segment (league × market) CLV — which leagues/markets actually beat the
+    closing line. Positive avg = the model's edge there is real (favour it);
+    persistently negative = deprioritise. The decision signal behind eventual
+    auto-pruning. Wider default window (90 d) since per-segment samples are small."""
+    from betbot.clv import aggregate_clv, aggregate_clv_by_segment
+    return {
+        "segments": aggregate_clv_by_segment(days=days),
+        "overall": aggregate_clv(days=days),
+    }
+
+
 @router.post("/ab-test")
 @limiter.limit("5/minute")
 def ab_test(

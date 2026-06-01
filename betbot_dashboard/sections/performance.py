@@ -91,6 +91,39 @@ def render_roi_tab() -> None:
                 f"vérifier la santé d'Odds API dans Système → Sources."
             )
 
+    # ── CLV par segment : quelles ligues/marchés battent la clôture ──────
+    st.divider()
+    st.markdown("### CLV par segment (ligue × marché)")
+    st.caption(
+        "Le **vrai** juge de paix : un CLV moyen **positif** = le modèle bat la cote "
+        "de clôture sur ce segment (à privilégier) ; **négatif** = à éviter. "
+        "Significatif surtout avec assez de paris (colonne *Paris*)."
+    )
+    try:
+        seg = api_get("/stats/clv-by-segment", days=max(period, 90))
+    except Exception:
+        seg = None
+    segments = (seg or {}).get("segments", [])
+    if not segments:
+        empty_state(
+            "📈", "Pas encore de CLV par segment",
+            "Les snapshots de clôture s'accumulent (toutes les 10 min sur les matchs "
+            "qui démarrent). Reviens après quelques paris confirmés et résolus.",
+        )
+    else:
+        sdf = pd.DataFrame(segments)
+        sdf["Segment"] = sdf["sport_key"] + " · " + sdf["market"]
+        disp = sdf[["Segment", "n_with_clv", "avg_clv_pct", "positive_clv_share"]].rename(
+            columns={"n_with_clv": "Paris", "avg_clv_pct": "CLV moyen",
+                     "positive_clv_share": "% CLV>0"})
+        st.dataframe(
+            disp, width='stretch', hide_index=True,
+            column_config={
+                "CLV moyen": st.column_config.NumberColumn(format="%+.2f%%"),
+                "% CLV>0": st.column_config.NumberColumn(format="%.0f%%"),
+            },
+        )
+
 
 def render_capital_tab() -> None:
     st.subheader("💰 Gestion du capital")
