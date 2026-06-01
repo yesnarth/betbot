@@ -27,6 +27,7 @@ from betbot_dashboard.components.sidebar import render_sidebar
 from betbot_dashboard.sections.backtest import render_backtest_tab
 from betbot_dashboard.sections.decision import (
     render_ai_agent_tab,
+    render_live_tab,
     render_local_agent_tab,
     render_scan_tab,
     render_target_parlay_tab,
@@ -64,6 +65,7 @@ render_scan_tab = guarded(render_scan_tab)
 render_local_agent_tab = guarded(render_local_agent_tab)
 render_ai_agent_tab = guarded(render_ai_agent_tab)
 render_target_parlay_tab = guarded(render_target_parlay_tab)
+render_live_tab = guarded(render_live_tab)
 render_events_tab = guarded(render_events_tab)
 render_history_tab = guarded(render_history_tab)
 
@@ -186,11 +188,13 @@ with section_tools:
         "par défaut), diagnostic infra et historique des invocations IA. Utilise "
         "ces outils pour explorer, pas pour ton workflow quotidien."
     )
-    tab_scan, tab_local, tab_agent, tab_parlay, tab_events, tab_sources, tab_agent_runs = st.tabs([
+    (tab_scan, tab_local, tab_agent, tab_parlay, tab_live,
+     tab_events, tab_sources, tab_agent_runs) = st.tabs([
         "🎯 Scan manuel",
         "🧠 Agent local",
         "🤖 Agent IA (Claude)",
         "🎰 Combiné ×1000",
+        "🔴 Live",
         "📅 Matchs disponibles",
         "🔌 Sources",
         "📜 Historique IA",
@@ -203,6 +207,8 @@ with section_tools:
         render_ai_agent_tab(filters, agent_enabled)
     with tab_parlay:
         render_target_parlay_tab(filters)
+    with tab_live:
+        render_live_tab(filters)
     with tab_events:
         render_events_tab(filters)
     with tab_sources:

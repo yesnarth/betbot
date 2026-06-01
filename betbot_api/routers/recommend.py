@@ -16,6 +16,8 @@ from betbot_api.schemas import (
     AgentResponse,
     LocalAgentFilters,
     LocalAgentResponse,
+    LiveScanFilters,
+    LiveScanResponse,
     ManualScanFilters,
     ManualScanResponse,
     TargetParlayFilters,
@@ -247,6 +249,62 @@ def recommend_parlay_target(
         best_achievable_odds=round(best, 2),
         target_odds=filters.target_odds,
         n_events_scanned=n_events,
+        odds_quota_remaining=odds_client.quota_remaining,
+        odds_quota_exhausted=odds_client.quota_exhausted,
+    )
+
+
+@router.post("/recommend/live", response_model=LiveScanResponse)
+@limiter.limit("6/minute")  # live: refreshed often, still consumes the Odds quota
+def recommend_live(
+    request: Request,
+    filters: LiveScanFilters,
+    _: str = Depends(require_auth),
+) -> LiveScanResponse:
+    """
+    Live (in-play) value scanner. Pulls live odds (/odds — events already started)
+    + live scores (/scores, ~30 s), applies the in-play models, and returns SINGLE
+    value bets. Data is ~30 s stale and you place manually → place fast.
+    """
+    from datetime import datetime, timezone
+
+    from betbot.live import filter_live, scan_live
+    from betbot.shared import load_team_stats_from_db
+
+    s = load_settings()
+    odds_client = OddsAPIClient(s.odds_api_key)
+
+    if filters.sport_key:
+        all_events = {filters.sport_key: odds_client.get_events_with_odds(filters.sport_key)}
+    else:
+        all_events = odds_client.fetch_all_sports()
+
+    events_by_sport: dict[str, list[dict]] = {}
+    scores_by_sport: dict[str, list[dict]] = {}
+    for sk, evs in all_events.items():
+        live = filter_live(evs)
+        if not live:
+            continue
+        events_by_sport[sk] = live
+        try:
+            scores_by_sport[sk] = odds_client.get_scores(sk, days_from=1)
+        except Exception:  # noqa: BLE001
+            scores_by_sport[sk] = []
+
+    n_live = sum(len(v) for v in events_by_sport.values())
+    picks: list[dict] = []
+    if events_by_sport:
+        db = Database(s.database_url)
+        prebuilt = load_team_stats_from_db(db, events_by_sport.keys())
+        picks = scan_live(
+            events_by_sport, scores_by_sport, prebuilt,
+            bankroll=s.bankroll, kelly_fraction=s.kelly_fraction,
+            min_value_edge=filters.min_edge, min_book_odds=filters.min_odds,
+            min_edge_vs_novig=s.min_edge_vs_novig,
+        )
+    return LiveScanResponse(
+        picks=picks, n_live_events=n_live,
+        checked_at=datetime.now(timezone.utc).isoformat(),
         odds_quota_remaining=odds_client.quota_remaining,
         odds_quota_exhausted=odds_client.quota_exhausted,
     )

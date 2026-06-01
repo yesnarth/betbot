@@ -49,6 +49,7 @@ TABS = [
     ("local",        ["🛠️ Outils", "🧠 Agent local"]),
     ("agent",        ["🛠️ Outils", "🤖 Agent IA (Claude)"]),
     ("parlay1000",   ["🛠️ Outils", "🎰 Combiné ×1000"]),
+    ("live",         ["🛠️ Outils", "🔴 Live"]),
     ("events",       ["🛠️ Outils", "📅 Matchs disponibles"]),
     ("sources",      ["🛠️ Outils", "🔌 Sources"]),
     ("history",      ["🛠️ Outils", "📜 Historique IA"]),

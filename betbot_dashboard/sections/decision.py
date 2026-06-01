@@ -363,3 +363,66 @@ def render_target_parlay_tab(filters: dict) -> None:
                 "Baisse la cible, augmente « Jambes max », décoche « Aujourd'hui "
                 "seulement », ou active `SCAN_ALL_SOCCER=1` pour couvrir plus de ligues.",
             )
+
+
+def render_live_tab(filters: dict) -> None:
+    import pandas as pd
+
+    st.subheader("🔴 Scanner live (in-play)")
+    st.warning(
+        "**Données à ~30 s + tu places à la main → place vite.** Le scanner compare "
+        "les cotes **live** au modèle in-play (score courant + temps restant). La minute "
+        "foot/basket est **estimée** (le flux ne donne pas le chrono) ; le tennis suit "
+        "l'état des sets. **Paris simples uniquement** (pas de combinés en live).",
+        icon="🔴",
+    )
+    sport = None if filters.get("sport") in (None, "Toutes") else filters.get("sport")
+    c1, c2 = st.columns(2)
+    min_edge = c1.slider("Edge minimum (%)", 0.0, 20.0, 4.0, 0.5, key="live_edge")
+    min_odds = c2.slider("Cote minimum", 1.0, 5.0, 1.3, 0.1, key="live_odds")
+
+    if st.button("🔴 Scanner le live maintenant", type="primary", width='stretch'):
+        payload = {"sport_key": sport, "min_edge": round(min_edge / 100, 4), "min_odds": min_odds}
+        with st.spinner("Récupération des cotes + scores live…"):
+            st.session_state["live_res"] = api_post("/recommend/live", json=payload)
+
+    res = st.session_state.get("live_res")
+    if not res:
+        return
+
+    cols = st.columns(2)
+    cols[0].metric("Matchs en cours", res.get("n_live_events", 0))
+    cols[1].metric("Value bets live", len(res.get("picks", [])))
+    ca = (res.get("checked_at") or "")[:19].replace("T", " ")
+    st.caption(f"Dernier scan : {ca} UTC — **relance** pour rafraîchir (données ~30 s).")
+
+    picks = res.get("picks", [])
+    if not picks:
+        empty_state("🔴", "Aucune value bet live pour l'instant",
+                    "Soit aucun match en cours, soit aucune valeur détectée. Relance dans quelques minutes.")
+        return
+
+    df = pd.DataFrame(picks)
+    show = [c for c in ["home_team", "away_team", "live_score", "league", "selection_label",
+                        "best_odds", "model_prob", "value_edge", "kelly_stake",
+                        "reliability", "best_book", "model_type"] if c in df.columns]
+    disp = df[show].rename(columns={
+        "home_team": "Domicile", "away_team": "Extérieur", "live_score": "Score",
+        "league": "Ligue", "selection_label": "Pari", "best_odds": "Cote",
+        "model_prob": "Proba", "value_edge": "Edge", "kelly_stake": "Mise",
+        "reliability": "Fiab.", "best_book": "Book", "model_type": "Modèle",
+    })
+    cfg = {}
+    if "Cote" in disp.columns:
+        cfg["Cote"] = st.column_config.NumberColumn(format="%.2f")
+    if "Proba" in disp.columns:
+        disp["Proba"] = disp["Proba"] * 100
+        cfg["Proba"] = st.column_config.NumberColumn(format="%.1f%%")
+    if "Edge" in disp.columns:
+        disp["Edge"] = disp["Edge"] * 100
+        cfg["Edge"] = st.column_config.NumberColumn(format="%+.1f%%")
+    if "Mise" in disp.columns:
+        cfg["Mise"] = st.column_config.NumberColumn(format="$%.2f")
+    if "Fiab." in disp.columns:
+        cfg["Fiab."] = st.column_config.NumberColumn(format="%.2f")
+    st.dataframe(disp, width='stretch', hide_index=True, column_config=cfg)

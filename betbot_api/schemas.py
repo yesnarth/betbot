@@ -206,6 +206,21 @@ class TargetParlayResponse(BaseModel):
     odds_quota_exhausted: bool = False
 
 
+class LiveScanFilters(BaseModel):
+    """Filters for the live (in-play) scanner. Single bets only — no parlays."""
+    sport_key: str | None = Field(default=None, description="None = tous les sports en cours")
+    min_edge: float = Field(default=0.04, ge=-1.0, le=1.0)
+    min_odds: float = Field(default=1.30, ge=1.0)
+
+
+class LiveScanResponse(BaseModel):
+    picks: list[dict[str, Any]]   # value bets live (avec live_score, minute estimée)
+    n_live_events: int
+    checked_at: str               # ISO — données à ~30 s, à rafraîchir souvent
+    odds_quota_remaining: int = -1
+    odds_quota_exhausted: bool = False
+
+
 class BankrollSnapshot(BaseModel):
     balance: float
     committed: float
