@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from betbot.api import OddsAPIClient
 from betbot.config import load_settings
+from betbot.analysis import enforce_disjoint_parlays
 from betbot.db import Database
 from betbot_api.auth import require_auth
 from betbot_api.deps import limiter
@@ -120,6 +121,7 @@ def recommend_manual(
         }
         for p in parlays
     ]
+    parlays_out = enforce_disjoint_parlays(parlays_out)   # no match in 2 combos
     return ManualScanResponse(
         picks=picks_out,
         parlays=parlays_out,
@@ -237,6 +239,7 @@ def recommend_parlay_target(
         }
         for p in parlays
     ]
+    parlays_out = enforce_disjoint_parlays(parlays_out)   # no match in 2 combos
 
     return TargetParlayResponse(
         parlays=parlays_out,
@@ -393,6 +396,7 @@ def recommend_agent_local(
         }
         for p in parlays
     ]
+    parlays_out = enforce_disjoint_parlays(parlays_out)   # no match in 2 combos
 
     return LocalAgentResponse(
         picks=eval_result["picks"],

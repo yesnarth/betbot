@@ -877,6 +877,28 @@ def build_target_parlays(
     return parlays
 
 
+def enforce_disjoint_parlays(parlays: list[dict]) -> list[dict]:
+    """Hard guarantee applied to EVERY parlay list returned to the user: across
+    the returned combos, each match (event_id) appears in AT MOST ONE combo — so a
+    single losing pick can sink at most one combo, never several.
+
+    Greedy by input order (assumed best-first): keep a parlay only if none of its
+    legs share an event with an already-kept parlay. Operates on the serialized
+    dict form ({"legs": [{"event_id": ...}, ...]}). The deterministic builders
+    already satisfy this (no-op there); this also hardens the AI-agent path, whose
+    parlays come from an LLM and are not otherwise guaranteed disjoint.
+    """
+    kept: list[dict] = []
+    used: set = set()
+    for p in parlays or []:
+        evs = {leg.get("event_id") for leg in (p.get("legs") or []) if leg.get("event_id")}
+        if evs and (evs & used):
+            continue
+        kept.append(p)
+        used |= evs
+    return kept
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

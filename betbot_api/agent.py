@@ -231,9 +231,13 @@ async def run_agent(filters: dict[str, Any], trigger: str = "api") -> dict:
         error=error,
     )
 
+    # Hard guarantee (same as the deterministic paths): no match repeated across
+    # combos, so a losing pick can sink at most one combo. The agent is *told* to
+    # respect this, but we enforce it in code rather than trust the LLM.
+    from betbot.analysis import enforce_disjoint_parlays
     return {
         "picks": parsed.get("picks", []),
-        "parlays": parsed.get("parlays", []),
+        "parlays": enforce_disjoint_parlays(parsed.get("parlays", [])),
         "rationale": parsed.get("rationale", ""),
         "n_tool_calls": n_tool_calls,
         "duration_ms": duration_ms,
