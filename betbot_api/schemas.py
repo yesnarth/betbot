@@ -188,8 +188,8 @@ class TargetParlayFilters(BaseModel):
     but every leg is +edge and the ticket is +EV."""
     sport_key: str | None = Field(default=None)
     today_only: bool = Field(default=True)
-    target_odds: float = Field(default=1000.0, ge=2.0, le=100_000.0,
-                               description="Cote combinée MAX / plafond à ne pas dépasser (ex : 1000) — pas un objectif obligatoire")
+    target_odds: float = Field(default=100.0, ge=2.0, le=100_000.0,
+                               description="Cote combinée MAX / plafond à ne pas dépasser (défaut 100 ; monte vers 1000 pour viser plus gros) — pas un objectif obligatoire")
     max_legs: int = Field(default=14, ge=2, le=20,
                           description="Nombre maximum de jambes par combiné")
     n_combos: int = Field(default=3, ge=1, le=10)

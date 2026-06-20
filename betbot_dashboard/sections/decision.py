@@ -318,7 +318,8 @@ def render_target_parlay_tab(filters: dict) -> None:
         "**La cote cible est un PLAFOND, pas un objectif obligatoire.** Le bot "
         "génère le nombre de combinés demandé, chacun **aussi gros que possible "
         "SANS dépasser** ce plafond — donc tu obtiens des combinés même s'ils "
-        "n'atteignent pas ×1000 (ex. ×400 un jour creux). Il les construit en "
+        "n'atteignent pas le plafond (ex. ×60 un jour creux). Plus le plafond est "
+        "**bas**, plus le combiné a de chances de tomber. Il les construit en "
         "**empilant des FAVORIS** (chaque jambe garde la garde no-vig + un edge "
         "réel), **pas** des longshots voués à l'échec → tickets à **EV positive**. "
         "Forte variance quand même. À placer toi-même — **non suivi au bankroll**.",
@@ -327,8 +328,8 @@ def render_target_parlay_tab(filters: dict) -> None:
 
     c1, c2, c3 = st.columns(3)
     target = c1.number_input("Cote combinée MAX (plafond)", min_value=2.0, max_value=100000.0,
-                             value=1000.0, step=100.0,
-                             help="Plafond à ne pas dépasser. Le bot vise le plus gros combiné possible ≤ ce nombre, sans jamais le dépasser ni être obligé de l'atteindre.")
+                             value=100.0, step=50.0,
+                             help="Plafond à ne pas dépasser (défaut 100). Le bot vise le plus gros combiné possible ≤ ce nombre, sans jamais le dépasser ni être obligé de l'atteindre. Plus bas = plus de chances de gagner ; plus haut (ex. 1000) = plus gros gain, plus rare.")
     max_legs = c2.slider("Jambes max", 2, 20, 14)
     n_combos = c3.slider("Combinés à générer", 1, 10, 3)
     c4, c5 = st.columns(2)
