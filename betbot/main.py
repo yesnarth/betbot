@@ -102,6 +102,10 @@ def _ensure_min_combos(
             min_model_prob=prob_thr,
             min_book_odds=odds_thr,
             min_edge_vs_novig=settings.min_edge_vs_novig,
+            max_book_odds=settings.max_book_odds,
+            underdog_odds=settings.underdog_odds,
+            underdog_min_prob=settings.underdog_min_prob,
+            novig_required=settings.novig_required,
             prebuilt_stats_by_sport=prebuilt_stats,
             probs_cache=probs_cache,
         )

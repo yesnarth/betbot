@@ -1,6 +1,7 @@
 """Recommendation endpoints — manual (deterministic), local agent (rules), AI agent (Claude)."""
 from __future__ import annotations
 
+import logging
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -24,7 +25,51 @@ from betbot_api.schemas import (
     TargetParlayResponse,
 )
 
+logger = logging.getLogger("betbot.recommend")
+
 router = APIRouter(tags=["recommend"])
+
+
+def _historize_picks(db: Database, picks: list[dict], source: str) -> int:
+    """Shadow-log model singles as 'proposed' so we can MEASURE performance.
+
+    The recommend endpoints are advisors that previously returned picks without
+    persisting them — so most predictions were never recorded and couldn't be
+    evaluated (or feed the ML calibrator). This best-effort logger saves each
+    single as 'proposed' (no bankroll debit; idempotent on event/market/selection
+    via save_prediction). It never raises into the HTTP response.
+
+    Gated by Settings.historize_scans (env HISTORIZE_SCANS, default on).
+    """
+    saved = 0
+    for p in picks or []:
+        eid = p.get("event_id")
+        sel = p.get("selection_code") or p.get("selection")
+        market = p.get("market")
+        if not (eid and sel and market):
+            continue
+        try:
+            if db.save_prediction(
+                event_id=eid,
+                sport_key=p.get("sport_key", ""),
+                home_team=p.get("home_team", ""),
+                away_team=p.get("away_team", ""),
+                market=market,
+                selection=sel,
+                model_prob=float(p.get("model_prob") or 0.0),
+                best_odds=float(p.get("best_odds") or 0.0),
+                best_book=p.get("best_book", "") or "",
+                value_edge=float(p.get("value_edge") or 0.0),
+                kelly_stake=float(p.get("kelly_stake") or 0.0),
+                model_type=p.get("model_type", "poisson") or "poisson",
+                reliability=p.get("reliability"),
+            ):
+                saved += 1
+        except Exception as exc:  # noqa: BLE001 — logging must never break a scan
+            logger.warning("historize(%s) %s: %s", source, p.get("event_id"), exc)
+    if saved:
+        logger.info("historize(%s): %d nouveau(x) pick(s) shadow-logged", source, saved)
+    return saved
 
 
 @router.post("/recommend/manual", response_model=ManualScanResponse)
@@ -87,6 +132,10 @@ def recommend_manual(
         min_model_prob=prob,
         min_book_odds=odds,
         min_edge_vs_novig=s.min_edge_vs_novig,
+        max_book_odds=s.max_book_odds,
+        underdog_odds=s.underdog_odds,
+        underdog_min_prob=s.underdog_min_prob,
+        novig_required=s.novig_required,
         prebuilt_stats_by_sport=prebuilt,
     )
     ranked = rank_value_bets(raw)[: s.top_bets]
@@ -112,6 +161,8 @@ def recommend_manual(
         }
 
     picks_out = [bet_to_dict(b) for b in ranked]
+    if s.historize_scans:
+        _historize_picks(db, picks_out, source="manual")
     parlays_out = [
         {
             "n_legs": len(p.bets),
@@ -306,6 +357,8 @@ def recommend_live(
             min_value_edge=filters.min_edge, min_book_odds=filters.min_odds,
             min_edge_vs_novig=s.min_edge_vs_novig,
         )
+        if s.historize_scans:
+            _historize_picks(db, picks, source="live")
     return LiveScanResponse(
         picks=picks, n_live_events=n_live,
         checked_at=datetime.now(timezone.utc).isoformat(),
@@ -388,6 +441,10 @@ def recommend_agent_local(
         min_model_prob=prob,
         min_book_odds=odds,
         min_edge_vs_novig=s.min_edge_vs_novig,
+        max_book_odds=s.max_book_odds,
+        underdog_odds=s.underdog_odds,
+        underdog_min_prob=s.underdog_min_prob,
+        novig_required=s.novig_required,
         prebuilt_stats_by_sport=prebuilt,
     )
     ranked = rank_value_bets(raw_bets)[: s.top_bets]
@@ -460,6 +517,8 @@ def recommend_agent_local(
     ]
     parlays_out = enforce_disjoint_parlays(parlays_out)   # no match in 2 combos
 
+    if s.historize_scans:
+        _historize_picks(db, eval_result["picks"], source="agent-local")
     return LocalAgentResponse(
         picks=eval_result["picks"],
         rejected=eval_result["rejected"],

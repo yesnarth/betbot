@@ -20,6 +20,10 @@ from betbot.injuries import (
     get_injury_factor as _injury_factor,
     reset_run_budget as _reset_injury_budget,
 )
+from betbot.data_sources.weather import (
+    get_weather_factor as _weather_factor,
+    reset_weather_budget as _reset_weather_budget,
+)
 from betbot.models import (
     MatchProbs,
     poisson_match_probs,
@@ -262,6 +266,10 @@ def detect_value_bets(
     min_book_odds: float = 1.50,
     min_edge_vs_novig: float = 0.0,
     require_positive_stake: bool = True,
+    max_book_odds: float = 0.0,
+    underdog_odds: float = 0.0,
+    underdog_min_prob: float = 0.0,
+    novig_required: bool = False,
     prebuilt_stats_by_sport: dict[str, dict] | None = None,
     probs_cache: dict[str, "MatchProbs"] | None = None,
 ) -> list[ValueBet]:
@@ -274,6 +282,7 @@ def detect_value_bets(
     from betbot.models import DEFAULT_HOME_AVG, DEFAULT_AWAY_AVG
     all_bets: list[ValueBet] = []
     _reset_injury_budget()  # fresh per-scan API-Football lookup budget (injuries)
+    _reset_weather_budget()  # fresh per-scan Open-Meteo lookup budget (weather)
     if probs_cache is None:
         probs_cache = {}
 
@@ -396,15 +405,28 @@ def detect_value_bets(
                     best = m["best"]
                     if best is None or best.price < min_book_odds:
                         continue
+                    # Discipline (anti "value-trap") : cap extreme longshots —
+                    # model error grows with odds — and require real conviction on
+                    # underdogs. The edge formula (prob×odds−1) is easiest to
+                    # satisfy on high-odds outcomes the market priced as unlikely
+                    # (and is usually right about), so we gate those out.
+                    if max_book_odds > 0.0 and best.price > max_book_odds:
+                        continue
+                    if underdog_odds > 0.0 and best.price >= underdog_odds and model_prob < underdog_min_prob:
+                        continue
 
                     # No-vig gate (adverse-selection guard) : require the model to
                     # beat the market's *fair* (vig-removed) CONSENSUS line — not
                     # merely the single best price, which is often the one book
-                    # whose line is most stale. Abstains when no book prices the
-                    # whole group (novig is None) rather than blocking the pick.
+                    # whose line is most stale. With novig_required, a pick with
+                    # NO consensus to validate against is DROPPED rather than
+                    # silently allowed (thin markets are where the model is worst).
                     if min_edge_vs_novig > 0.0:
                         novig = _novig_fair_prob(event, m["outcome_name"], market_key, point, group_names)
-                        if novig is not None and novig > 0.0 and (model_prob / novig - 1.0) < min_edge_vs_novig:
+                        if novig is None or novig <= 0.0:
+                            if novig_required:
+                                continue
+                        elif (model_prob / novig - 1.0) < min_edge_vs_novig:
                             continue
 
                     # value_edge stays computed against the BEST available price —
@@ -675,7 +697,7 @@ def _compute_probs(
                 away_stats=away_stats,
                 league_home_avg=league_home_avg,
                 league_away_avg=league_away_avg,
-                weather_modifier=1.0,
+                weather_modifier=_weather_factor(home, event.get("commence_time"), sport_key),
                 home_attack_mod=_injury_factor(home, sport_key),
                 away_attack_mod=_injury_factor(away, sport_key),
                 sport_key=sport_key,   # propagates to per-league Dixon-Coles τ

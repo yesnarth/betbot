@@ -37,6 +37,15 @@ class Settings:
     anthropic_model: str = field(default="claude-sonnet-4-6")
     api_basic_user: str = field(default="betbot")
     api_basic_password: str = field(default="")
+    # Shadow-log every scan's picks as 'proposed' so model performance is
+    # measurable (and the ML calibrator gets training data). No bankroll impact.
+    historize_scans: bool = True
+    # Selection discipline (anti "value-trap" on hard-to-predict longshots).
+    # 0 / disabled by default on the dataclass; load_settings sets live values.
+    max_book_odds: float = 0.0          # drop singles priced above this (0 = off)
+    underdog_odds: float = 0.0          # odds at/above which the prob floor applies
+    underdog_min_prob: float = 0.0      # required model_prob when odds ≥ underdog_odds
+    novig_required: bool = False        # drop a pick when no-vig consensus is unavailable
 
 
 def load_settings() -> Settings:
@@ -107,6 +116,14 @@ def load_settings() -> Settings:
     basic_user = os.getenv("API_BASIC_USER", "betbot").strip()
     basic_pass = os.getenv("API_BASIC_PASSWORD", "").strip()
 
+    historize_scans = os.getenv("HISTORIZE_SCANS", "1") == "1"
+    # Selection discipline — live defaults bias AWAY from hard-to-predict
+    # longshots/draws (the "value trap"). Tunable via .env.
+    max_book_odds     = float(os.getenv("MAX_BOOK_ODDS", "6.0"))
+    underdog_odds     = float(os.getenv("UNDERDOG_ODDS", "3.0"))
+    underdog_min_prob = float(os.getenv("UNDERDOG_MIN_PROB", "0.42"))
+    novig_required    = os.getenv("NOVIG_REQUIRED", "1") == "1"
+
     return Settings(
         odds_api_key=odds_key,
         football_data_api_key=fd_key,
@@ -130,4 +147,9 @@ def load_settings() -> Settings:
         anthropic_model=anthropic_model,
         api_basic_user=basic_user,
         api_basic_password=basic_pass,
+        historize_scans=historize_scans,
+        max_book_odds=max_book_odds,
+        underdog_odds=underdog_odds,
+        underdog_min_prob=underdog_min_prob,
+        novig_required=novig_required,
     )

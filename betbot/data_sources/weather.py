@@ -11,6 +11,7 @@ clubs. Unknown stadiums fall back to "no weather adjustment".
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import TypedDict
 
@@ -147,3 +148,48 @@ def get_match_weather(home_team_normalized: str, kickoff_utc_iso: str) -> MatchW
         is_windy=is_windy,
         expected_goal_modifier=round(modifier, 3),
     )
+
+
+# ── High-level helper wired into the model (mirrors injuries.get_injury_factor) ──
+
+_WEATHER_BUDGET = {"left": 0}
+_weather_cache: dict[str, float] = {}
+
+
+def reset_weather_budget(limit: int = 60) -> None:
+    """Fresh per-scan Open-Meteo lookup budget (caps latency on large scans)."""
+    _WEATHER_BUDGET["left"] = limit
+
+
+def get_weather_factor(home: str, kickoff_utc_iso: str | None, sport_key: str | None) -> float:
+    """Multiplicative goal-expectancy modifier from kick-off weather (≤1.0 on
+    heavy rain / strong wind), applied to λ in the blended model.
+
+    Returns 1.0 (no effect) for non-football, when FETCH_WEATHER != "1" (default
+    on), when kickoff/stadium is unknown, the per-scan budget is exhausted, or on
+    any error. Only the ~33 top clubs in _STADIUM_COORDS trigger an HTTP call, so
+    most matches are an instant no-op.
+    """
+    if not (sport_key and sport_key.startswith("soccer_")):
+        return 1.0
+    if os.getenv("FETCH_WEATHER", "1") != "1" or not kickoff_utc_iso:
+        return 1.0
+    from betbot.data_sources.club_elo import _normalize
+    home_norm = _normalize(home)
+    if home_norm not in _STADIUM_COORDS:
+        return 1.0
+    key = f"{home_norm}|{kickoff_utc_iso[:13]}"
+    cached = _weather_cache.get(key)
+    if cached is not None:
+        return cached
+    if _WEATHER_BUDGET["left"] <= 0:
+        return 1.0
+    _WEATHER_BUDGET["left"] -= 1
+    try:
+        w = get_match_weather(home_norm, kickoff_utc_iso)
+    except Exception as exc:  # noqa: BLE001 — weather must never break a scan
+        logger.debug("weather factor %s: %s", home_norm, exc)
+        w = None
+    factor = w["expected_goal_modifier"] if w else 1.0
+    _weather_cache[key] = factor
+    return factor
