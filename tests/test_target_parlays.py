@@ -1,4 +1,9 @@
-"""Greedy target-odds parlay builder (×1000 mode) — Vague 4, item 4.2."""
+"""Greedy combined-odds builder (×1000 mode).
+
+`target_odds` is a CEILING (max not to exceed), not a floor: the builder returns
+the requested number of combos, each stacking as many quality favorites as fit
+WITHOUT exceeding the cap — it does not require reaching it.
+"""
 from betbot.analysis import ValueBet, build_target_parlays
 
 
@@ -13,23 +18,45 @@ def _bet(event_id: str, odds: float, sport_key: str = "soccer_epl",
     )
 
 
-def test_reaches_target_with_enough_legs():
-    # 12 candidate legs at odds 2.0 → 2^10 = 1024 ≥ 1000 after 10 legs.
+def test_combo_never_exceeds_the_ceiling():
+    # 12 legs at 2.0, ceiling ×1000 : 2^9=512 ≤1000 but 2^10=1024 would overshoot
+    # → stops at 9 legs / ×512, never over the cap.
     bets = [_bet(f"e{i}", 2.0) for i in range(12)]
     parlays = build_target_parlays(bets, target_odds=1000.0, max_legs=15, top_n=1)
     assert len(parlays) == 1
-    assert parlays[0].combined_odds >= 1000.0
-    assert len(parlays[0].bets) == 10
+    assert parlays[0].combined_odds <= 1000.0
+    assert len(parlays[0].bets) >= 2
 
 
-def test_returns_empty_when_target_unreachable():
-    # odds 1.5, max 5 legs → 1.5^5 ≈ 7.6, far below ×1000 → nothing emitted.
+def test_ceiling_caps_growth_below_max_legs():
+    # Legs at 3.0, ceiling ×100 : 3^4=81 ≤100, 3^5=243 overshoots → 4 legs/×81,
+    # even though max_legs (10) and the pool (10) would allow far more.
+    bets = [_bet(f"e{i}", 3.0) for i in range(10)]
+    parlays = build_target_parlays(bets, target_odds=100.0, max_legs=10, top_n=1)
+    assert len(parlays) == 1
+    assert parlays[0].combined_odds <= 100.0
+    assert len(parlays[0].bets) == 4
+
+
+def test_returns_best_effort_below_target():
+    # odds 1.5, max 5 legs → 1.5^5 ≈ 7.59, far below ×1000. The OLD builder
+    # returned []; now it returns the best achievable combo (cap not a floor).
     bets = [_bet(f"e{i}", 1.5) for i in range(20)]
-    assert build_target_parlays(bets, target_odds=1000.0, max_legs=5, top_n=1) == []
+    parlays = build_target_parlays(bets, target_odds=1000.0, max_legs=5, top_n=1)
+    assert len(parlays) == 1
+    assert parlays[0].combined_odds <= 1000.0
+    assert len(parlays[0].bets) == 5
+
+
+def test_returns_requested_number_of_combos():
+    bets = [_bet(f"e{i}", 2.0) for i in range(30)]
+    parlays = build_target_parlays(bets, target_odds=1000.0, max_legs=15, top_n=3)
+    assert len(parlays) == 3
+    assert all(p.combined_odds <= 1000.0 for p in parlays)
 
 
 def test_parlays_are_event_disjoint():
-    bets = [_bet(f"e{i}", 2.0) for i in range(20)]
+    bets = [_bet(f"e{i}", 2.0) for i in range(30)]
     parlays = build_target_parlays(bets, target_odds=1000.0, max_legs=15, top_n=2)
     assert len(parlays) == 2
     ev0 = {b.event_id for b in parlays[0].bets}
@@ -43,34 +70,38 @@ def test_min_leg_odds_filters_the_pool():
                                 min_leg_odds=1.2, top_n=1) == []
 
 
+def test_too_few_legs_returns_empty():
+    # A single eligible leg can't form a ≥2-leg combiné.
+    assert build_target_parlays([_bet("solo", 2.0)], target_odds=1000.0, top_n=1) == []
+
+
 def test_same_league_parlay_flagged_correlated():
     bets = [_bet(f"e{i}", 2.0, sport_key="soccer_epl") for i in range(12)]
     parlays = build_target_parlays(bets, target_odds=1000.0, max_legs=15, top_n=1)
     assert parlays[0].correlated is True
 
 
-def test_single_fat_leg_does_not_abort_build():
-    # Regression (audit C1): a lone leg whose odds alone exceed the target used
-    # to abort the WHOLE build (break). It must still produce ≥2-leg combos.
+def test_leg_that_would_overshoot_is_skipped():
+    # A fat leg whose odds alone exceed the ceiling must never be used — the
+    # combo is built from the favorites and stays under the cap.
     bets = [_bet("fat", 1500.0, edge=0.40)] + [_bet(f"e{i}", 2.0) for i in range(12)]
-    parlays = build_target_parlays(bets, target_odds=1000.0, max_legs=12, top_n=2)
-    assert len(parlays) >= 1
-    assert all(len(p.bets) >= 2 for p in parlays)          # never a 1-leg "combiné"
-    assert all(p.combined_odds >= 1000.0 for p in parlays)  # all genuinely reach target
+    parlays = build_target_parlays(bets, target_odds=1000.0, max_legs=15, top_n=1)
+    assert len(parlays) == 1
+    used = {b.event_id for b in parlays[0].bets}
+    assert "fat" not in used
+    assert parlays[0].combined_odds <= 1000.0
+    assert len(parlays[0].bets) >= 2
 
 
-# ── Robustesse : atteindre la cible avec des FAVORIS, pas des longshots ──────
+# ── Robustesse : favoris empilés, garde EV ──────────────────────────────────
 
 def test_max_leg_odds_excludes_longshots():
-    # A pool of fat longshots (odds 12) + many favorites (odds 2.0). With a leg
-    # cap at 2.5, the target is reached using ONLY favorites — no longshot legs.
     longshots = [_bet(f"L{i}", 12.0, prob=0.10) for i in range(5)]
     favorites = [_bet(f"f{i}", 2.0, prob=0.55, edge=0.10) for i in range(14)]
     parlays = build_target_parlays(longshots + favorites, target_odds=1000.0,
                                    max_legs=15, top_n=1, max_leg_odds=2.5)
     assert len(parlays) == 1
     assert all(b.best_odds <= 2.5 for b in parlays[0].bets)   # zero longshots used
-    assert len(parlays[0].bets) >= 10                          # reached via MORE legs
 
 
 def test_require_positive_ev_skips_negative_ev_combo():
@@ -85,9 +116,10 @@ def test_require_positive_ev_skips_negative_ev_combo():
 
 def test_positive_ev_combo_is_emitted_with_gate():
     # Real per-leg edges across DISTINCT leagues (no haircut) → combined EV > 0
-    # → emitted even with the honesty gate on.
+    # → emitted even with the honesty gate on, and still under the ceiling.
     edged = [_bet(f"e{i}", 2.0, sport_key=f"lg{i}", prob=0.55, edge=0.10) for i in range(14)]
     parlays = build_target_parlays(edged, target_odds=1000.0, max_legs=15, top_n=1,
                                    require_positive_ev=True)
     assert len(parlays) == 1
     assert parlays[0].combined_ev > 0
+    assert parlays[0].combined_odds <= 1000.0

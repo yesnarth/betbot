@@ -313,22 +313,22 @@ def render_ai_agent_tab(filters: dict, agent_enabled: bool) -> None:
 
 
 def render_target_parlay_tab(filters: dict) -> None:
-    st.subheader("🎯 Combiné ×1000 — favoris empilés")
+    st.subheader("🎯 Combiné gros multiplicateur — favoris empilés")
     st.info(
-        "**Forte variance, mais discipliné.** Une cote ×1000 gagne ≈ **1 fois sur "
-        "1000** : ça reste une loterie *sur la variance*. La différence : le bot "
-        "atteint la cible en **empilant plus de FAVORIS** — chaque jambe garde la "
-        "garde no-vig et un edge réel — **pas** en ajoutant des longshots qui ont "
-        "de grandes chances d'échouer. Résultat : moins de combinés proposés, mais "
-        "à **EV positive** et cohérents avec le moteur « picks sûrs ». À placer "
-        "toi-même — **non suivi au bankroll**.",
+        "**La cote cible est un PLAFOND, pas un objectif obligatoire.** Le bot "
+        "génère le nombre de combinés demandé, chacun **aussi gros que possible "
+        "SANS dépasser** ce plafond — donc tu obtiens des combinés même s'ils "
+        "n'atteignent pas ×1000 (ex. ×400 un jour creux). Il les construit en "
+        "**empilant des FAVORIS** (chaque jambe garde la garde no-vig + un edge "
+        "réel), **pas** des longshots voués à l'échec → tickets à **EV positive**. "
+        "Forte variance quand même. À placer toi-même — **non suivi au bankroll**.",
         icon="🎯",
     )
 
     c1, c2, c3 = st.columns(3)
-    target = c1.number_input("Cote combinée cible", min_value=2.0, max_value=100000.0,
+    target = c1.number_input("Cote combinée MAX (plafond)", min_value=2.0, max_value=100000.0,
                              value=1000.0, step=100.0,
-                             help="Baisse-la les jours creux : l'ajusteur réduit le multiplicateur sans toucher à la qualité des jambes.")
+                             help="Plafond à ne pas dépasser. Le bot vise le plus gros combiné possible ≤ ce nombre, sans jamais le dépasser ni être obligé de l'atteindre.")
     max_legs = c2.slider("Jambes max", 2, 20, 14)
     n_combos = c3.slider("Combinés à générer", 1, 10, 3)
     c4, c5 = st.columns(2)
@@ -344,7 +344,7 @@ def render_target_parlay_tab(filters: dict) -> None:
                              value=bool(filters.get("today_only", False)), key="tp_today")
     sport = None if filters.get("sport") in (None, "Toutes") else filters.get("sport")
 
-    if st.button(f"🎰 Générer un combiné ×{target:.0f}", type="primary", width='stretch'):
+    if st.button(f"🎯 Générer {n_combos} combiné(s) ≤ ×{target:.0f}", type="primary", width='stretch'):
         payload = {
             "sport_key": sport,
             "today_only": today_only,
@@ -364,21 +364,24 @@ def render_target_parlay_tab(filters: dict) -> None:
         cols = st.columns(3)
         cols[0].metric("Jambes candidates", res.get("n_candidates", 0))
         cols[1].metric("Matchs scannés", res.get("n_events_scanned", 0))
-        cols[2].metric(f"Combinés ×{target:.0f}", len(res.get("parlays", [])))
+        cols[2].metric("Combinés générés", len(res.get("parlays", [])))
 
         parlays = res.get("parlays", [])
         if parlays:
+            st.caption(
+                f"Plafond ×{target:.0f} — les combinés ci-dessous sont les plus gros "
+                "atteignables **sans le dépasser** (ils n'ont pas à l'atteindre)."
+            )
             render_parlays(parlays)
         else:
-            best = res.get("best_achievable_odds", 0.0)
             empty_state(
                 "🎯",
-                f"Aucun combiné ×{target:.0f} de qualité aujourd'hui",
-                f"Meilleure cote atteignable avec des favoris (≤ ×{max_leg_odds:.1f}/jambe, "
-                f"{max_legs} jambes max) : **×{best:.0f}**. C'est NORMAL : on refuse "
-                "d'ajouter des longshots juste pour gonfler la cote. Baisse la cible, "
-                "relâche « Cote max par jambe » ou « Proba min », décoche « Aujourd'hui "
-                "seulement », ou active `SCAN_ALL_SOCCER=1` pour couvrir plus de ligues.",
+                "Pas assez de jambes-favoris aujourd'hui",
+                f"Il faut au moins 2 favoris éligibles (≤ ×{max_leg_odds:.1f}/jambe, "
+                f"proba ≥ {min_prob:.0%}, edge réel vs marché) pour former un combiné. "
+                "Hors-saison il y a peu de matchs : relâche « Cote max par jambe » ou "
+                "« Proba min », décoche « Aujourd'hui seulement » (inclut les jours "
+                "suivants), ou active `SCAN_ALL_SOCCER=1` pour couvrir plus de ligues.",
             )
 
 

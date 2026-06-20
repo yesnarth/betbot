@@ -823,35 +823,38 @@ def build_target_parlays(
     require_positive_ev: bool = False,
 ) -> list[Parlay]:
     """
-    Assemble parlays that REACH a target combined odds (e.g. ×1000) by greedily
+    Assemble parlays up to a combined-odds CEILING (e.g. ×1000) by greedily
     stacking the best value legs. Unlike build_parlays (all n-combinations at a
     FIXED n_legs, via itertools — explodes past ~5 legs), this scales to the
-    ~8-15 legs a ×1000 combo needs.
+    ~8-15 legs a big combo needs.
+
+    `target_odds` is a CAP, not a floor. The builder returns the requested
+    `top_n` combos, each stacking as many quality favorites as fit WITHOUT the
+    product exceeding `target_odds` — it does NOT require reaching it. So on a
+    thin day you still get combos (e.g. ×300), just smaller; on a rich day they
+    approach the ceiling. This matches the user's model: "×1000 = a max not to
+    exceed; otherwise give me the requested number of combos."
 
     Strategy:
       - Candidate legs sorted by quality (value_edge × reliability, then prob).
-      - Walk the pool, adding event-disjoint legs until combined_odds ≥
-        target_odds (or max_legs is hit).
+      - Walk the pool, adding event-disjoint legs while combined_odds stays
+        ≤ target_odds (skip any leg that would overshoot; stop at max_legs).
       - Across the `top_n` returned parlays, each event is used at most ONCE
         (same diversification guarantee as build_parlays).
-      - A parlay is emitted ONLY if it genuinely reaches target_odds.
+      - A parlay is emitted once it has ≥2 legs.
 
-    Reaching the target by stacking MORE disciplined favorites rather than a few
-    longshots is what keeps the combo honest:
-      - `max_leg_odds` caps the odds of any single leg, so the target is reached
-        by adding more *favorites* (well-calibrated, lower-margin) instead of
-        padding with high-odds longshots that are likely to fail. With it set,
-        a ×1000 needs more legs (e.g. ~11 legs at ≤2.0 vs ~4 longshots) — same
-        ~0.1% headline win-rate, but +EV and defensible leg-by-leg.
+    Stacking MORE disciplined favorites rather than a few longshots keeps the
+    combo honest:
+      - `max_leg_odds` caps the odds of any single leg, so we approach the
+        ceiling by adding more *favorites* (well-calibrated, lower-margin)
+        instead of padding with high-odds longshots likely to fail.
       - `require_positive_ev` drops any assembled combo whose combined EV is ≤ 0
         (e.g. eroded by the same-league correlation haircut) so we never surface
         a negative-EV ticket.
 
-    A ×1000 parlay is still a ~0.1%-win lottery on variance — the win here is
-    that every leg carries a real edge and the ticket is +EV, not that it hits
-    more often. Returns fewer (or zero) parlays when the pool can't reach the
-    target with eligible legs; lower `target_odds` (or relax `max_leg_odds`) on
-    thin days.
+    A big combo is still a low-probability lottery on variance — the win here is
+    that every leg carries a real edge and the ticket is +EV. Returns fewer (or
+    zero) parlays only when the pool can't field ≥2 eligible favorites.
     """
     pool = [
         b for b in bets
@@ -870,21 +873,24 @@ def build_target_parlays(
         legs: list[ValueBet] = []
         leg_events: set[str] = set()
         combined_odds = 1.0
+        # target_odds is a CEILING, not a floor : stack the best favorites whose
+        # running product stays ≤ target_odds. A leg that would push the combo
+        # OVER the ceiling is skipped (a smaller one may still fit) — we never
+        # exceed it. We do NOT require reaching it : the result is simply the
+        # biggest quality combo achievable up to the cap, even if that's ×300.
         for b in pool:
             if b.event_id in used_events or b.event_id in leg_events:
+                continue
+            if combined_odds * b.best_odds > target_odds:
                 continue
             legs.append(b)
             leg_events.add(b.event_id)
             combined_odds *= b.best_odds
-            # A combiné needs ≥2 legs — keep stacking even if a single fat leg
-            # already clears the target (otherwise a lone longshot in the pool
-            # would abort the whole build).
-            if (combined_odds >= target_odds and len(legs) >= 2) or len(legs) >= max_legs:
+            if len(legs) >= max_legs:
                 break
 
-        # Couldn't reach the target with a disjoint ≥2-leg set : try the next
-        # slot instead of abandoning every remaining combo.
-        if len(legs) < 2 or combined_odds < target_odds:
+        # A combiné needs ≥2 legs — below that, try the next slot.
+        if len(legs) < 2:
             continue
 
         sport_counts: dict[str, int] = {}

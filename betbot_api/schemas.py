@@ -178,16 +178,18 @@ class LocalAgentFilters(ManualScanFilters):
 
 
 class TargetParlayFilters(BaseModel):
-    """Filters for the ×1000 high-variance parlay mode — stacks many legs to
-    reach a high target combined odds. Unlike before, this path now keeps the
-    SAME protections as the safe-picks engine (no-vig gate, positive-stake legs):
-    the target is reached by adding MORE disciplined favorites, not by padding
-    with longshots likely to fail. Still a ~0.1%-win lottery on variance, but
-    every leg is +edge and the ticket is +EV."""
+    """Filters for the ×1000 high-variance parlay mode — stacks many legs toward
+    a combined-odds CEILING. `target_odds` is a max-not-to-exceed, not a floor:
+    the builder returns the requested number of combos, each as big as it can be
+    WITHOUT exceeding the cap (so you still get combos below ×1000 on thin days).
+    Same protections as the safe-picks engine (no-vig gate, positive-stake legs):
+    the ceiling is approached by adding MORE disciplined favorites, not by padding
+    with longshots likely to fail. Still a low-probability lottery on variance,
+    but every leg is +edge and the ticket is +EV."""
     sport_key: str | None = Field(default=None)
     today_only: bool = Field(default=True)
     target_odds: float = Field(default=1000.0, ge=2.0, le=100_000.0,
-                               description="Cote combinée cible (ex : 1000)")
+                               description="Cote combinée MAX / plafond à ne pas dépasser (ex : 1000) — pas un objectif obligatoire")
     max_legs: int = Field(default=14, ge=2, le=20,
                           description="Nombre maximum de jambes par combiné")
     n_combos: int = Field(default=3, ge=1, le=10)
