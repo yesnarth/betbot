@@ -178,22 +178,27 @@ class LocalAgentFilters(ManualScanFilters):
 
 
 class TargetParlayFilters(BaseModel):
-    """Filters for the ×1000 'lottery' parlay mode — stacks many legs to reach a
-    high target combined odds. Filters are deliberately RELAXED vs the safe-picks
-    path (no no-vig gate), because this is an assumed high-variance strategy."""
+    """Filters for the ×1000 high-variance parlay mode — stacks many legs to
+    reach a high target combined odds. Unlike before, this path now keeps the
+    SAME protections as the safe-picks engine (no-vig gate, positive-stake legs):
+    the target is reached by adding MORE disciplined favorites, not by padding
+    with longshots likely to fail. Still a ~0.1%-win lottery on variance, but
+    every leg is +edge and the ticket is +EV."""
     sport_key: str | None = Field(default=None)
     today_only: bool = Field(default=True)
     target_odds: float = Field(default=1000.0, ge=2.0, le=100_000.0,
                                description="Cote combinée cible (ex : 1000)")
-    max_legs: int = Field(default=12, ge=2, le=20,
+    max_legs: int = Field(default=14, ge=2, le=20,
                           description="Nombre maximum de jambes par combiné")
     n_combos: int = Field(default=3, ge=1, le=10)
     min_leg_odds: float = Field(default=1.2, ge=1.01, le=50.0,
                                 description="Cote minimale acceptée par jambe")
-    min_prob: float = Field(default=0.25, ge=0.0, le=1.0,
-                            description="Proba modèle min/jambe — exclut les longshots extrêmes (les moins fiables du modèle)")
+    max_leg_odds: float | None = Field(default=2.5, ge=1.1, le=50.0,
+                                       description="Cote MAX par jambe — plafonne pour atteindre la cible en empilant des favoris, pas des longshots")
+    min_prob: float = Field(default=0.50, ge=0.0, le=1.0,
+                            description="Proba modèle min/jambe — favoris (plus de chances de gagner que de perdre)")
     min_edge: float = Field(default=0.0, ge=-1.0, le=1.0,
-                            description="Edge min vs meilleure cote (0 = EV non-négative)")
+                            description="Edge min vs meilleure cote (0 = EV non-négative ; la garde no-vig fait le tri fin)")
 
 
 class TargetParlayResponse(BaseModel):

@@ -819,6 +819,8 @@ def build_target_parlays(
     max_legs: int = 12,
     top_n: int = 3,
     min_leg_odds: float = 1.2,
+    max_leg_odds: float | None = None,
+    require_positive_ev: bool = False,
 ) -> list[Parlay]:
     """
     Assemble parlays that REACH a target combined odds (e.g. ×1000) by greedily
@@ -834,12 +836,28 @@ def build_target_parlays(
         (same diversification guarantee as build_parlays).
       - A parlay is emitted ONLY if it genuinely reaches target_odds.
 
-    This is a LOTTERY tool — a ×1000 parlay wins ~0.1% of the time. The
-    correlation haircut (same-league legs) still applies so combined_prob and EV
-    stay honest. Returns fewer (or zero) parlays when the pool can't reach the
-    target.
+    Reaching the target by stacking MORE disciplined favorites rather than a few
+    longshots is what keeps the combo honest:
+      - `max_leg_odds` caps the odds of any single leg, so the target is reached
+        by adding more *favorites* (well-calibrated, lower-margin) instead of
+        padding with high-odds longshots that are likely to fail. With it set,
+        a ×1000 needs more legs (e.g. ~11 legs at ≤2.0 vs ~4 longshots) — same
+        ~0.1% headline win-rate, but +EV and defensible leg-by-leg.
+      - `require_positive_ev` drops any assembled combo whose combined EV is ≤ 0
+        (e.g. eroded by the same-league correlation haircut) so we never surface
+        a negative-EV ticket.
+
+    A ×1000 parlay is still a ~0.1%-win lottery on variance — the win here is
+    that every leg carries a real edge and the ticket is +EV, not that it hits
+    more often. Returns fewer (or zero) parlays when the pool can't reach the
+    target with eligible legs; lower `target_odds` (or relax `max_leg_odds`) on
+    thin days.
     """
-    pool = [b for b in bets if b.best_odds >= min_leg_odds]
+    pool = [
+        b for b in bets
+        if b.best_odds >= min_leg_odds
+        and (max_leg_odds is None or b.best_odds <= max_leg_odds)
+    ]
     pool.sort(
         key=lambda b: (b.value_edge * (b.reliability or 1.0), b.model_prob),
         reverse=True,
@@ -878,6 +896,12 @@ def build_target_parlays(
         combined_prob = raw_prob * (CORRELATION_HAIRCUT ** extra_corr)
         combined_odds = round(combined_odds, 2)
         combined_ev = round((combined_prob * combined_odds - 1.0) * 100, 2)
+
+        # Honesty gate : never surface a negative-EV ticket. The legs are each
+        # +edge, but the same-league correlation haircut can erode the product —
+        # skip without consuming the events so a different slot can still try.
+        if require_positive_ev and combined_ev <= 0:
+            continue
 
         parlays.append(Parlay(
             bets=list(legs),

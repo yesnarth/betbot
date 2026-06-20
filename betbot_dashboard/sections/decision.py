@@ -313,20 +313,33 @@ def render_ai_agent_tab(filters: dict, agent_enabled: bool) -> None:
 
 
 def render_target_parlay_tab(filters: dict) -> None:
-    st.subheader("🎰 Combiné ×1000 — mode loterie")
-    st.warning(
-        "**Stratégie à très forte variance.** Un combiné à cote ×1000 gagne "
-        "≈ **1 fois sur 1000**. Le bot empile assez de jambes (souvent 8-12) pour "
-        "atteindre la cote cible, en **relâchant** ses filtres (pas de garde no-vig). "
-        "À placer toi-même chez ton bookmaker — **non suivi au bankroll**.",
-        icon="🎰",
+    st.subheader("🎯 Combiné ×1000 — favoris empilés")
+    st.info(
+        "**Forte variance, mais discipliné.** Une cote ×1000 gagne ≈ **1 fois sur "
+        "1000** : ça reste une loterie *sur la variance*. La différence : le bot "
+        "atteint la cible en **empilant plus de FAVORIS** — chaque jambe garde la "
+        "garde no-vig et un edge réel — **pas** en ajoutant des longshots qui ont "
+        "de grandes chances d'échouer. Résultat : moins de combinés proposés, mais "
+        "à **EV positive** et cohérents avec le moteur « picks sûrs ». À placer "
+        "toi-même — **non suivi au bankroll**.",
+        icon="🎯",
     )
 
     c1, c2, c3 = st.columns(3)
     target = c1.number_input("Cote combinée cible", min_value=2.0, max_value=100000.0,
-                             value=1000.0, step=100.0)
-    max_legs = c2.slider("Jambes max", 2, 20, 12)
+                             value=1000.0, step=100.0,
+                             help="Baisse-la les jours creux : l'ajusteur réduit le multiplicateur sans toucher à la qualité des jambes.")
+    max_legs = c2.slider("Jambes max", 2, 20, 14)
     n_combos = c3.slider("Combinés à générer", 1, 10, 3)
+    c4, c5 = st.columns(2)
+    max_leg_odds = c4.slider(
+        "Cote max par jambe (favoris)", 1.3, 5.0, 2.5, 0.1,
+        help="Plafonne la cote de chaque jambe → on atteint la cible en empilant "
+             "des FAVORIS, pas des longshots. Plus c'est bas, plus il faut de jambes.")
+    min_prob = c5.slider(
+        "Proba min par jambe", 0.30, 0.80, 0.50, 0.05,
+        help="Chaque jambe doit être un favori (plus de chances de gagner que de "
+             "perdre). Relâche un peu si trop peu de combinés sont trouvés.")
     today_only = st.checkbox("Aujourd'hui seulement",
                              value=bool(filters.get("today_only", False)), key="tp_today")
     sport = None if filters.get("sport") in (None, "Toutes") else filters.get("sport")
@@ -338,6 +351,8 @@ def render_target_parlay_tab(filters: dict) -> None:
             "target_odds": float(target),
             "max_legs": int(max_legs),
             "n_combos": int(n_combos),
+            "max_leg_odds": float(max_leg_odds),
+            "min_prob": float(min_prob),
         }
         with st.spinner("Scan large de toutes les ligues + assemblage glouton…"):
             res = api_post("/recommend/parlay-target", json=payload)
@@ -358,9 +373,11 @@ def render_target_parlay_tab(filters: dict) -> None:
             best = res.get("best_achievable_odds", 0.0)
             empty_state(
                 "🎯",
-                f"Impossible d'atteindre ×{target:.0f} aujourd'hui",
-                f"Meilleure cote atteignable avec {max_legs} jambes : **×{best:.0f}**. "
-                "Baisse la cible, augmente « Jambes max », décoche « Aujourd'hui "
+                f"Aucun combiné ×{target:.0f} de qualité aujourd'hui",
+                f"Meilleure cote atteignable avec des favoris (≤ ×{max_leg_odds:.1f}/jambe, "
+                f"{max_legs} jambes max) : **×{best:.0f}**. C'est NORMAL : on refuse "
+                "d'ajouter des longshots juste pour gonfler la cote. Baisse la cible, "
+                "relâche « Cote max par jambe » ou « Proba min », décoche « Aujourd'hui "
                 "seulement », ou active `SCAN_ALL_SOCCER=1` pour couvrir plus de ligues.",
             )
 

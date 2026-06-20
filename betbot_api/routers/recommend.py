@@ -188,7 +188,10 @@ def recommend_parlay_target(
 
     db = Database(s.database_url)
     prebuilt = load_team_stats_from_db(db, events_by_sport.keys())
-    # RELAXED pool : no no-vig gate (min_edge_vs_novig=0), EV floor = filters.min_edge.
+    # QUALITY pool : SAME protections as the safe-picks engine — no-vig gate ON
+    # (each leg must beat the fair consensus line) and real positive-stake value
+    # legs only. We reach the ×1000 target by STACKING MORE disciplined favorites
+    # (see max_leg_odds), never by padding with longshots likely to fail.
     pool = detect_value_bets(
         events_by_sport=events_by_sport,
         match_history_by_sport={},
@@ -197,14 +200,15 @@ def recommend_parlay_target(
         min_value_edge=filters.min_edge,
         min_model_prob=filters.min_prob,
         min_book_odds=filters.min_leg_odds,
-        min_edge_vs_novig=0.0,
-        require_positive_stake=False,   # lottery pool : keep every edge≥0 leg
+        min_edge_vs_novig=s.min_edge_vs_novig,   # re-armed adverse-selection guard
+        require_positive_stake=True,             # only genuine, stake-worthy legs
         prebuilt_stats_by_sport=prebuilt,
     )
 
     parlays = build_target_parlays(
         pool, target_odds=filters.target_odds, max_legs=filters.max_legs,
         top_n=filters.n_combos, min_leg_odds=filters.min_leg_odds,
+        max_leg_odds=filters.max_leg_odds, require_positive_ev=True,
     )
 
     # Best achievable odds (single greedy chain) — informative when the target
