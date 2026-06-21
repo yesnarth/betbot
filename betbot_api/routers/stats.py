@@ -59,6 +59,22 @@ def clv_by_segment(
     }
 
 
+@router.get("/model-performance")
+def model_performance(
+    days: int = Query(default=90, ge=1, le=365),
+    only_placed: bool = Query(default=False),
+    _: str = Depends(require_auth),
+) -> dict:
+    """"Would-have" model performance on ALL historized picks (proposed +
+    confirmed + skipped) at a flat 1u stake — the model's track record, not the
+    bankroll. Returns overall + per-segment (league × market) ROI/win-rate +
+    calibration buckets (does a model_prob of X actually win ~X%?). Set
+    only_placed=true to restrict to bets the user confirmed. Wider default
+    window (90 d) since per-segment samples are small."""
+    from betbot.perf import model_performance as _mp
+    return _mp(days=days, only_placed=only_placed)
+
+
 @router.post("/ab-test")
 @limiter.limit("5/minute")
 def ab_test(

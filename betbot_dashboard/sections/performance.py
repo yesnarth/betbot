@@ -124,6 +124,78 @@ def render_roi_tab() -> None:
             },
         )
 
+    # ── Performance modèle : ROI/réussite « would-have » sur TOUS les picks ──
+    st.divider()
+    st.markdown("### 🧪 Performance modèle (tous les picks historisés)")
+    st.caption(
+        "Le **vrai juge de paix** : ROI et réussite à **mise plate (1u)** sur **TOUS** "
+        "les picks historisés (proposés + confirmés + passés), pas seulement ceux que "
+        "tu as joués. Ça mesure le MODÈLE — indépendamment de tes mises (le bankroll "
+        "réel est dans l'onglet 💰). Échantillon par segment = petit au début."
+    )
+    try:
+        mp = api_get("/stats/model-performance", days=max(period, 90))
+    except Exception as exc:
+        mp = None
+        st.caption(f"_Indisponible : {exc}_")
+    ov = (mp or {}).get("overall", {})
+    if not mp or ov.get("n", 0) == 0:
+        empty_state(
+            "🧪", "Pas encore de picks historisés résolus",
+            "Désormais chaque scan (manuel / agent / live) enregistre ses picks "
+            "automatiquement. Reviens dans quelques jours : dès que des matchs se "
+            "terminent, le ROI et la calibration s'afficheront ici.",
+        )
+    else:
+        mcols = st.columns(4)
+        mcols[0].metric("Picks résolus", ov["n"])
+        mcols[1].metric("Réussite", f"{ov['win_rate']:.1f}%")
+        roi_v = ov["roi_pct"]
+        mcols[2].metric("ROI (mise plate)", f"{roi_v:+.1f}%",
+                        delta=("positif" if roi_v > 0 else "négatif" if roi_v < 0 else None),
+                        delta_color=("normal" if roi_v >= 0 else "inverse"))
+        mcols[3].metric("Proba moy / implicite",
+                        f"{ov['avg_model_prob']:.2f} / {ov['avg_implied_prob']:.2f}",
+                        help="Proba moyenne du modèle vs proba implicite du marché. "
+                             "Modèle > marché = le modèle voit de la valeur (souvent des outsiders).")
+
+        segs = mp.get("segments", [])
+        if segs:
+            st.markdown("**Par segment (ligue × marché)** — trié par ROI décroissant")
+            sdf = pd.DataFrame(segs)
+            sdf["Segment"] = sdf["sport_key"] + " · " + sdf["market"]
+            disp = sdf[["Segment", "n", "win_rate", "roi_pct",
+                        "avg_model_prob", "avg_implied_prob"]].rename(
+                columns={"n": "Picks", "win_rate": "Réussite", "roi_pct": "ROI",
+                         "avg_model_prob": "p modèle", "avg_implied_prob": "p marché"})
+            st.dataframe(
+                disp, width='stretch', hide_index=True,
+                column_config={
+                    "Réussite": st.column_config.NumberColumn(format="%.1f%%"),
+                    "ROI": st.column_config.NumberColumn(format="%+.1f%%"),
+                },
+            )
+
+        calib = mp.get("calibration", [])
+        if calib:
+            st.markdown("**Calibration** — un modèle honnête gagne ≈ le milieu de chaque tranche")
+            cdf = pd.DataFrame(calib).rename(columns={
+                "bucket": "Proba modèle", "n": "Picks",
+                "actual_win_rate": "Réussite réelle", "expected_win_rate": "Attendu"})
+            st.dataframe(
+                cdf[["Proba modèle", "Picks", "Réussite réelle", "Attendu"]],
+                width='stretch', hide_index=True,
+                column_config={
+                    "Réussite réelle": st.column_config.NumberColumn(format="%.1f%%"),
+                    "Attendu": st.column_config.NumberColumn(format="%.1f%%"),
+                },
+            )
+        st.caption(
+            "⚠️ « Would-have » à mise plate : mesure le MODÈLE, pas ton bankroll. "
+            "Sur petit échantillon, un ROI extrême (±) est surtout du bruit — "
+            "ça se stabilise avec le nombre de picks résolus."
+        )
+
 
 def render_capital_tab() -> None:
     st.subheader("💰 Gestion du capital")
