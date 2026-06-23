@@ -40,6 +40,10 @@ class Settings:
     # Shadow-log every scan's picks as 'proposed' so model performance is
     # measurable (and the ML calibrator gets training data). No bankroll impact.
     historize_scans: bool = True
+    # CLV closing-odds snapshots run every 10 min and BURN Odds API quota. Off by
+    # default (free-tier / often-off PC can't capture CLV reliably anyway) — turn
+    # ON once on a paid plan / always-on VPS where CLV is actually capturable.
+    clv_snapshot_enabled: bool = False
     # Selection discipline (anti "value-trap" on hard-to-predict longshots).
     # 0 / disabled by default on the dataclass; load_settings sets live values.
     max_book_odds: float = 0.0          # drop singles priced above this (0 = off)
@@ -66,7 +70,9 @@ def load_settings() -> Settings:
     bankroll          = float(os.getenv("BANKROLL", "100.0"))
     kelly_fraction    = float(os.getenv("KELLY_FRACTION", "0.25"))
     min_value_edge    = float(os.getenv("MIN_VALUE_EDGE", "0.04"))
-    min_edge_vs_novig = float(os.getenv("MIN_EDGE_VS_NOVIG", "0.02"))
+    # 3% beat of the vig-removed CONSENSUS line (raised from 2% → surer: only
+    # bet where the model clearly beats the efficient market). Tune via .env.
+    min_edge_vs_novig = float(os.getenv("MIN_EDGE_VS_NOVIG", "0.03"))
     min_model_prob    = float(os.getenv("MIN_MODEL_PROB", "0.40"))
     min_book_odds     = float(os.getenv("MIN_BOOK_ODDS", "1.50"))
     top_bets          = int(os.getenv("TOP_BETS", "10"))
@@ -117,6 +123,7 @@ def load_settings() -> Settings:
     basic_pass = os.getenv("API_BASIC_PASSWORD", "").strip()
 
     historize_scans = os.getenv("HISTORIZE_SCANS", "1") == "1"
+    clv_snapshot_enabled = os.getenv("CLV_SNAPSHOT_ENABLED", "0") == "1"
     # Selection discipline — live defaults bias AWAY from hard-to-predict
     # longshots/draws (the "value trap"). Tunable via .env.
     max_book_odds     = float(os.getenv("MAX_BOOK_ODDS", "6.0"))
@@ -148,6 +155,7 @@ def load_settings() -> Settings:
         api_basic_user=basic_user,
         api_basic_password=basic_pass,
         historize_scans=historize_scans,
+        clv_snapshot_enabled=clv_snapshot_enabled,
         max_book_odds=max_book_odds,
         underdog_odds=underdog_odds,
         underdog_min_prob=underdog_min_prob,

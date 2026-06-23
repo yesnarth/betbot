@@ -557,16 +557,21 @@ def main() -> None:
         misfire_grace_time=3600,
     )
 
-    # CLV snapshot toutes les 10 min
-    odds_client_for_clv = OddsAPIClient(settings.odds_api_key)
-    scheduler.add_job(
-        _wrap("clv_snapshot", snapshot_closing_odds, odds_client_for_clv),
-        trigger=CronTrigger(minute="*/10"),
-        id="clv_snapshot",
-        name="clv-snapshot",
-        misfire_grace_time=120,
-        coalesce=True,
-    )
+    # CLV snapshot toutes les 10 min — GATED: this hits the Odds API every 10 min
+    # and burns the (free-tier) quota fast. Off by default; enable only on a paid
+    # plan / always-on host where closing-line value is actually capturable.
+    if settings.clv_snapshot_enabled:
+        odds_client_for_clv = OddsAPIClient(settings.odds_api_key)
+        scheduler.add_job(
+            _wrap("clv_snapshot", snapshot_closing_odds, odds_client_for_clv),
+            trigger=CronTrigger(minute="*/10"),
+            id="clv_snapshot",
+            name="clv-snapshot",
+            misfire_grace_time=120,
+            coalesce=True,
+        )
+    else:
+        logger.info("CLV snapshot DÉSACTIVÉ (CLV_SNAPSHOT_ENABLED=0) — quota Odds préservé")
 
     # Source health check daily at 06:30 UTC — alerts via email + Telegram
     # whenever a source transitions from OK to DOWN (e.g. Understat changes
