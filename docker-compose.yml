@@ -178,7 +178,12 @@ services:
           apk add --no-cache rclone >/dev/null 2>&1 || echo "[backup] rclone install failed — offsite disabled"
         fi
         chmod +x /usr/local/bin/backup_db.sh
-        echo "[backup] Daemon started — will run at 03:00 UTC daily"
+        echo "[backup] Daemon started — backup once now, then 03:00 UTC daily"
+        # One-shot backup at startup. This machine is often shut down, so the
+        # daily 03:00 run may rarely fire; a fresh dump every time the stack
+        # comes up guarantees a recent restore point (a prune once wiped the
+        # data volume — the on-disk ./backups dumps are the safety net).
+        /usr/local/bin/backup_db.sh || echo "[backup] Startup backup failed — will retry on schedule"
         target_hour=3
         while true; do
           # Seconds since UTC midnight → seconds until next 03:00 UTC.

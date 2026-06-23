@@ -686,6 +686,25 @@ def main() -> None:
         misfire_grace_time=120,
     )
 
+    # Catch-up on startup — this PC is often shut down, so the daily resolve
+    # cron rarely fires. Settle any bets that finished while it was off, ONCE,
+    # right after boot. resolve_pending only calls Odds /scores for sports that
+    # actually have confirmed-pending bets (free otherwise); resolve_stale uses
+    # football-data (free). A one-shot 'date' job → runs off the main thread.
+    def _startup_catchup_job():
+        oc = OddsAPIClient(settings.odds_api_key)
+        live = resolve_pending(db, oc)
+        stale = resolve_stale_pending(db, settings.football_data_api_key)
+        logger.info("Catch-up démarrage : %s | tardifs résolus : %s",
+                    live, stale.get("resolved", 0))
+    scheduler.add_job(
+        _wrap("startup_catchup", _startup_catchup_job),
+        trigger="date",                 # no run_date → fires asap after start()
+        id="startup_catchup",
+        name="startup-catchup",
+        misfire_grace_time=300,
+    )
+
     logger.info("Bot actif (APScheduler, fuseau Europe/Paris). CTRL+C pour arrêter.")
     try:
         scheduler.start()
