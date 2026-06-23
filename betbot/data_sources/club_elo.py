@@ -19,7 +19,7 @@ import io
 import logging
 import time
 import unicodedata
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -55,16 +55,45 @@ def _fetch_csv(target_date: date) -> str:
     return resp.text
 
 
+def _fetch_csv_latest(target_date: date, max_lookback_days: int = 7):
+    """Fetch the ClubElo snapshot for target_date, falling back to the most
+    recent EARLIER date if that date isn't published yet (404). ClubElo only has
+    data up to its last computed date, so a clock that's a day or two ahead of
+    ClubElo's last update (or simply a day it hasn't published) would otherwise
+    404 and kill the ELO signal entirely. Returns (csv_text, used_date) or
+    (None, None) if no date in the window is available. The retry decorator on
+    _fetch_csv still covers transient network errors; 404 is what we walk back."""
+    for offset in range(max_lookback_days + 1):
+        d = target_date - timedelta(days=offset)
+        try:
+            return _fetch_csv(d), d
+        except requests.HTTPError as exc:
+            if getattr(exc.response, "status_code", None) == 404:
+                continue
+            raise
+    return None, None
+
+
 def get_all_elo_ratings(target_date: date | None = None) -> dict[str, float]:
     """
     Return a {normalized_team_name: elo_rating} mapping for the whole world
-    on the given date (default: today). Cached for 24 hours.
+    on the given date (default: today). Falls back to the most recent published
+    date when today's snapshot isn't available yet. Cached for 24 hours; an empty
+    result is cached too, so a degraded ELO source never hammers the API during a
+    scan (the blended model degrades to Dixon-Coles + H2H without it).
     """
     target_date = target_date or date.today()
     if target_date in _CACHE:
         return _CACHE[target_date]
 
-    csv_text = _fetch_csv(target_date)
+    csv_text, used = _fetch_csv_latest(target_date)
+    if csv_text is None:
+        logger.warning(
+            "Club Elo : aucune date publiée autour de %s — ELO indisponible "
+            "(le modèle dégrade sur Dixon-Coles + H2H).", target_date)
+        _CACHE[target_date] = {}
+        return {}
+
     ratings: dict[str, float] = {}
     reader = csv.DictReader(io.StringIO(csv_text))
     for row in reader:
@@ -78,7 +107,11 @@ def get_all_elo_ratings(target_date: date | None = None) -> dict[str, float]:
             continue
 
     _CACHE[target_date] = ratings
-    logger.info("Club Elo : %d ratings chargés pour %s", len(ratings), target_date)
+    if used != target_date:
+        logger.info("Club Elo : %d ratings (repli sur %s, %s pas encore publié)",
+                    len(ratings), used, target_date)
+    else:
+        logger.info("Club Elo : %d ratings chargés pour %s", len(ratings), target_date)
     return ratings
 
 
