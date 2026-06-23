@@ -23,6 +23,7 @@ from betbot.config import load_settings
 from betbot.api import OddsAPIClient
 from betbot.football_api import FootballDataClient, parse_match_results, LEAGUE_MAP
 from betbot.models import build_team_stats, compute_league_averages, TeamStats
+from betbot.elo_local import compute_elo_ratings
 from betbot.analysis import (
     detect_value_bets, rank_value_bets, build_parlays,
     ValueBet, Parlay, kelly_stake,
@@ -204,6 +205,12 @@ def update_team_stats(settings, db: Database, logger: logging.Logger) -> None:
             if m.get("away_team"):
                 teams.add(m["away_team"])
 
+        # Self-computed Elo from these same results — makes the Elo signal
+        # independent of ClubElo's (often-down) external API. ClubElo, when
+        # reachable, overlays a better cross-league rating during enrichment
+        # (update_team_enrichment only writes non-None, so it never nulls this).
+        local_elo = compute_elo_ratings(parsed)
+
         saved = 0
         for team in teams:
             stats = build_team_stats(team, parsed, home_avg, away_avg)
@@ -218,6 +225,10 @@ def update_team_stats(settings, db: Database, logger: logging.Logger) -> None:
                     defense_away=stats.defense_away,
                     matches_analyzed=stats.matches_analyzed,
                 )
+                _elo = local_elo.get(team)
+                if _elo is not None:
+                    db.update_team_enrichment(
+                        team_name=stats.name, sport_key=sport_key, elo_rating=_elo)
                 saved += 1
 
         # H2H per pair — cheap derivative of the same match list, persisted
