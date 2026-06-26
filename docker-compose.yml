@@ -16,7 +16,11 @@ services:
       timeout: 5s
       retries: 10
     ports:
-      - "127.0.0.1:5432:5432"   # bind to localhost only — never expose Postgres publicly
+      # Host port is configurable to avoid clashing with another local Postgres
+      # (e.g. Odoo's bundled PG on 5432). Containers always use db:5432 over the
+      # internal network, so this binding is host-side convenience only. Set
+      # DB_HOST_PORT in .env to change it (default 5432). Bound to localhost only.
+      - "127.0.0.1:${DB_HOST_PORT:-5432}:5432"
 
   redis:
     image: redis:7-alpine
