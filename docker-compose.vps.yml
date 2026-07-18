@@ -1,0 +1,284 @@
+# =============================================================================
+# docker-compose.vps.yml — déploiement sur le VPS PARTAGÉ ESARTH (91.134.240.150)
+# =============================================================================
+# Calqué sur mytrader/docker-compose.vps.yml et la doc esarth-platform/docs/
+# vps-administration.md. Diffère RADICALEMENT de docker-compose.prod.yml (Caddy) :
+#
+#  - IMAGE PRÉ-CONSTRUITE sur le PC, chargée via `docker load`. AUCUN build sur le
+#    VPS (préserve disque 72 Go + RAM 8 Go — cf. incidents "disque plein → 6 sites down").
+#  - PAS de reverse proxy embarqué : le nginx PARTAGÉ `esarth-nginx-prod` détient
+#    seul 80/443. Seul le `dashboard` joint le bus `esarth-proxy-net` pour être
+#    joignable par nginx. Le reste est privé (réseau `betbot_net`, bind 127.0.0.1).
+#  - Noms `betbot-*-prod` (zéro collision), volumes préfixés, mem_limit/cpus,
+#    cap_drop ALL sur les conteneurs applicatifs, no-new-privileges, rotation logs.
+#
+# Déploiement :  docker compose -f docker-compose.vps.yml up -d
+# Runbook complet : voir DEPLOY_VPS_ESARTH.md
+# =============================================================================
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: betbot-postgres-prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: betbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD requis en prod}
+      POSTGRES_DB: betbot
+    volumes:
+      - betbot_db_data:/var/lib/postgresql/data
+    networks:
+      - betbot_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U betbot -d betbot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: redis:7-alpine
+    container_name: betbot-redis-prod
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - betbot_redis_data:/data
+    networks:
+      - betbot_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 192m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  # One-shot: applique les migrations Alembic puis se termine. Les services qui en
+  # dépendent attendent `service_completed_successfully`.
+  migrate:
+    image: betbot:latest
+    container_name: betbot-migrate-prod
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://betbot:${POSTGRES_PASSWORD}@db:5432/betbot
+      LOG_PATH: ""
+    command: ["alembic", "upgrade", "head"]
+    networks:
+      - betbot_net
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  worker:
+    image: betbot:latest
+    container_name: betbot-worker-prod
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://betbot:${POSTGRES_PASSWORD}@db:5432/betbot
+      LOG_PATH: ""
+      REDIS_URL: redis://redis:6379/0
+      TZ: ${TZ:-Europe/Paris}
+    volumes:
+      - betbot_appdata:/app/data
+    networks:
+      - betbot_net
+    restart: unless-stopped
+    command: ["python", "-m", "betbot.main"]
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; urllib.request.urlopen('http://localhost:8001/').read(); sys.exit(0)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 768m
+    cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  api:
+    image: betbot:latest
+    container_name: betbot-api-prod
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://betbot:${POSTGRES_PASSWORD}@db:5432/betbot
+      LOG_PATH: ""
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - betbot_appdata:/app/data
+    networks:
+      - betbot_net
+    restart: unless-stopped
+    # Bind loopback uniquement : accessible depuis le VPS (tunnel SSH / debug),
+    # jamais depuis Internet. Le dashboard l'atteint en interne via betbot_net.
+    ports:
+      - "127.0.0.1:8000:8000"
+    command: ["uvicorn", "betbot_api.main:app", "--host", "0.0.0.0", "--port", "8000",
+              "--workers", "1", "--no-server-header"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 384m
+    cpus: "0.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  dashboard:
+    image: betbot:latest
+    container_name: betbot-dashboard-prod
+    depends_on:
+      - api
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://betbot:${POSTGRES_PASSWORD}@db:5432/betbot
+      LOG_PATH: ""
+      BETBOT_API_URL: http://api:8000
+    networks:
+      # betbot_net : pour joindre `api`.  esarth-proxy-net : pour être atteint par
+      # le nginx partagé (le SEUL conteneur BetBot sur ce bus).
+      - betbot_net
+      - esarth-proxy-net
+    restart: unless-stopped
+    # Bind loopback : debug direct depuis le VPS. L'accès public passe par nginx.
+    ports:
+      - "127.0.0.1:8501:8501"
+    # --server.address=0.0.0.0 : écoute sur toutes les interfaces, sinon nginx
+    # (autre réseau) reçoit 502 (cf. gotcha HOSTNAME de mytrader).
+    command: ["streamlit", "run", "betbot_dashboard/app.py",
+              "--server.port=8501", "--server.address=0.0.0.0",
+              "--server.headless=true",
+              "--browser.gatherUsageStats=false"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 384m
+    cpus: "0.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  backup:
+    image: postgres:16-alpine
+    container_name: betbot-backup-prod
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PG_HOST: db
+      PG_USER: betbot
+      PG_DB: betbot
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      BACKUP_REMOTE_TARGET: ${BACKUP_REMOTE_TARGET:-}
+      BACKUP_REMOTE_RETENTION_DAYS: ${BACKUP_REMOTE_RETENTION_DAYS:-}
+    volumes:
+      - ./scripts/backup_db.sh:/usr/local/bin/backup_db.sh:ro
+      - ./backups:/backups
+      - betbot_appdata:/app/data:ro
+    networks:
+      - betbot_net
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if [ -n "$$BACKUP_REMOTE_TARGET" ] && ! command -v rclone >/dev/null 2>&1; then
+          echo "[backup] Installing rclone for offsite backups…"
+          apk add --no-cache rclone >/dev/null 2>&1 || echo "[backup] rclone install failed — offsite disabled"
+        fi
+        chmod +x /usr/local/bin/backup_db.sh
+        echo "[backup] Daemon started — backup once now, then 03:00 UTC daily"
+        /usr/local/bin/backup_db.sh || echo "[backup] Startup backup failed — will retry on schedule"
+        target_hour=3
+        while true; do
+          secs_today=$$(( $$(date -u +%H) * 3600 + $$(date -u +%M) * 60 + $$(date -u +%S) ))
+          target_secs=$$(( target_hour * 3600 ))
+          if [ "$$secs_today" -lt "$$target_secs" ]; then
+            sleep_for=$$(( target_secs - secs_today ))
+          else
+            sleep_for=$$(( 86400 - secs_today + target_secs ))
+          fi
+          echo "[backup] Sleeping $${sleep_for}s until next run (UTC $$(date -u +%Y-%m-%dT%H:%M:%S))"
+          sleep "$$sleep_for"
+          /usr/local/bin/backup_db.sh || echo "[backup] Run failed — will retry tomorrow"
+        done
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+networks:
+  betbot_net:
+    name: betbot_net
+    driver: bridge
+  # Bus partagé du reverse proxy nginx (esarth-platform). external = déjà créé sur
+  # le VPS, jamais modifié ici. Le dashboard s'y attache pour que nginx le voie.
+  esarth-proxy-net:
+    external: true
+
+volumes:
+  betbot_db_data:
+    name: betbot_db_data
+  betbot_redis_data:
+    name: betbot_redis_data
+  betbot_appdata:
+    name: betbot_appdata
