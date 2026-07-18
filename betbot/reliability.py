@@ -44,6 +44,7 @@ def compute_reliability(
     value_edge: float,
     model_type: str,
     n_matches: int | None = None,
+    skip_extreme_prob_penalty: bool = False,
 ) -> float:
     """
     Return a reliability score in [0, 1] — higher is more trustworthy.
@@ -52,6 +53,10 @@ def compute_reliability(
     `model_prob` (typically the weaker of the two teams' match histories).
     Pass None when the model doesn't have a clean sample notion
     (consensus model, tennis ELO).
+
+    `skip_extreme_prob_penalty`: set for Double Chance / Draw No Bet, where a
+    high probability (>0.80) is the *nature* of the market — the favorite-or-draw
+    combined outcome is meant to be near-certain — not an overconfidence artifact.
     """
     score = 1.0
 
@@ -77,7 +82,7 @@ def compute_reliability(
     # Extreme-probability penalty — models tend to be over-confident at
     # the tails. A 0.92 model probability on a 5.0 underdog or 0.10 on
     # a 1.10 favorite is suspicious before it's edge-able.
-    if model_prob < 0.20 or model_prob > 0.80:
+    if not skip_extreme_prob_penalty and (model_prob < 0.20 or model_prob > 0.80):
         score *= 0.70
 
     # Model-type penalty — consensus is just a vig-corrected average of

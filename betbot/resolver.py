@@ -94,6 +94,44 @@ def _decide_totals_outcome(
     return "win" if total < line else "loss"
 
 
+def _actual_1x2(home_team: str, away_team: str, scores: list[dict]) -> str | None:
+    """Final 1/X/2 result from the score list, or None if incomplete."""
+    score_map: dict[str, int] = {}
+    for s in scores or []:
+        try:
+            score_map[s.get("name", "")] = int(s["score"])
+        except (KeyError, ValueError, TypeError):
+            return None
+    hg, ag = score_map.get(home_team), score_map.get(away_team)
+    if hg is None or ag is None:
+        return None
+    return "X" if hg == ag else ("1" if hg > ag else "2")
+
+
+def _decide_dc_outcome(selection_code, home_team, away_team, scores) -> str | None:
+    """Double Chance: 1X / X2 / 12 → 'win' / 'loss' (never pushes)."""
+    actual = _actual_1x2(home_team, away_team, scores)
+    if actual is None:
+        return None
+    covered = {"1X": {"1", "X"}, "X2": {"X", "2"}, "12": {"1", "2"}}.get(selection_code)
+    if covered is None:
+        return None
+    return "win" if actual in covered else "loss"
+
+
+def _decide_dnb_outcome(selection_code, home_team, away_team, scores) -> str | None:
+    """Draw No Bet: DNB1 (home) / DNB2 (away). Draw → 'void' (stake refunded)."""
+    actual = _actual_1x2(home_team, away_team, scores)
+    if actual is None:
+        return None
+    if actual == "X":
+        return "void"
+    side = {"DNB1": "1", "DNB2": "2"}.get(selection_code)
+    if side is None:
+        return None
+    return "win" if actual == side else "loss"
+
+
 def resolve_pending(
     db: Database,
     odds_client: OddsAPIClient,
@@ -146,6 +184,12 @@ def resolve_pending(
                 )
             elif market == "totals":
                 outcome = _decide_totals_outcome(pred["selection"], scores)
+            elif market == "double_chance":
+                outcome = _decide_dc_outcome(
+                    pred["selection"], pred["home_team"], pred["away_team"], scores)
+            elif market == "draw_no_bet":
+                outcome = _decide_dnb_outcome(
+                    pred["selection"], pred["home_team"], pred["away_team"], scores)
             else:
                 logger.debug("Skip marché non géré: %s", market)
                 continue
@@ -219,6 +263,10 @@ def _resolve_from_results(pending: list[dict], parsed: list[dict]) -> list[tuple
                 outcome = _decide_h2h_outcome(p["selection"], p["home_team"], p["away_team"], scores)
             elif market == "totals":
                 outcome = _decide_totals_outcome(p["selection"], scores)
+            elif market == "double_chance":
+                outcome = _decide_dc_outcome(p["selection"], p["home_team"], p["away_team"], scores)
+            elif market == "draw_no_bet":
+                outcome = _decide_dnb_outcome(p["selection"], p["home_team"], p["away_team"], scores)
             else:
                 continue
             if outcome:

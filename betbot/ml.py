@@ -37,6 +37,12 @@ logger = logging.getLogger("betbot.ml")
 # for the global map). Below this the isotonic fit is high-variance.
 MIN_SAMPLES_TO_TRUST = 50
 
+# Derived markets (Double Chance / Draw No Bet) are computed FROM the already
+# calibrated 1X2 — they are never calibrated themselves at scan time. Training a
+# map on them would only pool a different probability distribution (0.7–0.9) into
+# the football_h2h/global fit and bias it, so they're excluded from training.
+_DERIVED_MARKETS = ("double_chance", "draw_no_bet")
+
 # Beyond this age (days) the calibrator is considered stale — model drift over a
 # season means an old fit can quietly mis-calibrate. The dashboard surfaces this.
 STALE_AFTER_DAYS = 30
@@ -79,6 +85,7 @@ def _collect_training_data() -> list[tuple[float, int]]:
             select(Prediction.model_prob, Prediction.result).where(
                 Prediction.result.is_not(None),
                 Prediction.result.in_(("win", "loss")),
+                ~Prediction.market.in_(_DERIVED_MARKETS),
             )
         ).all()
     return [(float(p), 1 if r == "win" else 0) for p, r in rows]
@@ -94,6 +101,7 @@ def _collect_segmented_training_data() -> list[tuple[float, int, str]]:
             ).where(
                 Prediction.result.is_not(None),
                 Prediction.result.in_(("win", "loss")),
+                ~Prediction.market.in_(_DERIVED_MARKETS),
             )
         ).all()
     return [

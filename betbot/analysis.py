@@ -256,6 +256,62 @@ def kelly_stake(
 # Value detection
 # ---------------------------------------------------------------------------
 
+def _derive_dc_dnb_odds(event: dict, home: str, away: str) -> dict:
+    """
+    Best available Double Chance / Draw No Bet decimal odds, DERIVED from each
+    bookmaker's own 1/X/2 prices. Zero extra API quota — bookmakers construct
+    these markets exactly this way, so the derivation invents no free money:
+
+        q1,qX,q2 = 1/o1, 1/oX, 1/o2   (that book's vig-inclusive implieds)
+        Double Chance   1X = 1/(q1+qX)   X2 = 1/(qX+q2)   12 = 1/(q1+q2)
+        Draw No Bet   home = (q1+q2)/q1  away = (q1+q2)/q2   (draw → refund)
+
+    Because q1/qX/q2 already carry the book's margin, the derived prices are
+    realistic (slightly short of true-fair), never optimistic. Only books that
+    quote the FULL 1/X/2 are used (coherent derivation). Returns
+    {code: BestOdds} taking the best price per selection across books.
+    """
+    from betbot.models import BestOdds
+    best: dict = {}
+    for bm in event.get("bookmakers", []):
+        o: dict[str, float] = {}
+        for mkt in bm.get("markets", []):
+            if mkt.get("key") != "h2h":
+                continue
+            for out in mkt.get("outcomes", []):
+                try:
+                    price = float(out["price"])
+                except (KeyError, ValueError, TypeError):
+                    continue
+                if price <= 1.0:
+                    continue
+                name = out.get("name")
+                if name == home:
+                    o["1"] = price
+                elif name == away:
+                    o["2"] = price
+                elif name == "Draw":
+                    o["X"] = price
+        if not {"1", "X", "2"} <= o.keys():
+            continue  # need the whole 1/X/2 to derive coherently
+        q1, qx, q2 = 1.0 / o["1"], 1.0 / o["X"], 1.0 / o["2"]
+        title = bm.get("title", bm.get("key", "?"))
+        derived = {
+            "1X":   1.0 / (q1 + qx),
+            "X2":   1.0 / (qx + q2),
+            "12":   1.0 / (q1 + q2),
+            "DNB1": (q1 + q2) / q1,
+            "DNB2": (q1 + q2) / q2,
+        }
+        for code, price in derived.items():
+            if price <= 1.0:
+                continue
+            price = round(price, 3)
+            if code not in best or price > best[code].price:
+                best[code] = BestOdds(outcome_name=code, price=price, bookmaker=title)
+    return best
+
+
 def detect_value_bets(
     events_by_sport: dict[str, list[dict]],
     match_history_by_sport: dict[str, list[dict]],
@@ -270,6 +326,9 @@ def detect_value_bets(
     underdog_odds: float = 0.0,
     underdog_min_prob: float = 0.0,
     novig_required: bool = False,
+    derive_dc_dnb: bool = True,
+    derived_min_edge: float = 0.02,
+    derived_min_odds: float = 1.10,
     prebuilt_stats_by_sport: dict[str, dict] | None = None,
     probs_cache: dict[str, "MatchProbs"] | None = None,
 ) -> list[ValueBet]:
@@ -478,6 +537,78 @@ def detect_value_bets(
                         model_type=probs.model,
                         reliability=reliability,
                     ))
+
+            # ---- Stage 3 : derived markets (Double Chance + Draw No Bet).
+            # Deterministic functions of the CALIBRATED 1/X/2 above, priced from
+            # each book's own 1X2 (vig-inclusive). They add lower-variance options
+            # and ideal favorite legs for combos at ZERO extra quota. Skipped for
+            # tennis/basketball (no draw) and when 1/X/2 wasn't fully produced.
+            if derive_dc_dnb and not is_tennis and not is_basketball:
+                h2h_members = {m["code"]: m for m in groups.get(("h2h", None), [])}
+                if {"1", "X", "2"} <= h2h_members.keys():
+                    p1 = h2h_members["1"]["model_prob"]
+                    px = h2h_members["X"]["model_prob"]
+                    p2 = h2h_members["2"]["model_prob"]
+                    win_no_draw = p1 + p2
+                    dc_dnb_odds = _derive_dc_dnb_odds(event, home, away)
+                    derived_specs = [
+                        ("1X",   "Double chance 1X (domicile ou nul)",       "double_chance", p1 + px),
+                        ("X2",   "Double chance X2 (nul ou extérieur)",      "double_chance", px + p2),
+                        ("12",   "Double chance 12 (domicile ou extérieur)", "double_chance", p1 + p2),
+                        ("DNB1", "Domicile — remb. si nul (Draw No Bet)",    "draw_no_bet",
+                         (p1 / win_no_draw) if win_no_draw > 0 else 0.0),
+                        ("DNB2", "Extérieur — remb. si nul (Draw No Bet)",   "draw_no_bet",
+                         (p2 / win_no_draw) if win_no_draw > 0 else 0.0),
+                    ]
+                    for code, label, mkt_key, model_prob in derived_specs:
+                        if model_prob < min_model_prob:
+                            continue
+                        best = dc_dnb_odds.get(code)
+                        # DC/DNB are low-odds by nature → their own (lower) odds
+                        # floor, not min_book_odds which is tuned for 1X2/totals.
+                        if best is None or best.price < derived_min_odds:
+                            continue
+                        if max_book_odds > 0.0 and best.price > max_book_odds:
+                            continue
+                        if underdog_odds > 0.0 and best.price >= underdog_odds and model_prob < underdog_min_prob:
+                            continue
+                        # No no-vig gate here: the price is already the book's own
+                        # vig-inclusive 1X2 recombined, so there is no separate
+                        # consensus to beat — the edge below is the honest EV.
+                        edge = round(model_prob * best.price - 1.0, 4)
+                        if edge < derived_min_edge:
+                            continue
+                        from betbot.reliability import compute_reliability
+                        reliability = compute_reliability(
+                            model_prob=model_prob,
+                            value_edge=edge,
+                            model_type=probs.model,
+                            n_matches=probs.n_matches if probs.n_matches > 0 else None,
+                            skip_extreme_prob_penalty=True,  # high DC prob is by design
+                        )
+                        stake = kelly_stake(model_prob, best.price, bankroll,
+                                            kelly_fraction, reliability=reliability)
+                        if require_positive_stake and stake == 0.0:
+                            continue
+                        all_bets.append(ValueBet(
+                            event_id=event_id,
+                            sport_key=sport_key,
+                            home_team=home,
+                            away_team=away,
+                            league_label=league_label,
+                            market=mkt_key,
+                            selection_code=code,
+                            selection_label=label,
+                            model_prob=round(model_prob, 4),
+                            best_odds=best.price,
+                            best_book=best.bookmaker,
+                            value_edge=edge,
+                            kelly_stake=stake,
+                            lambda_home=probs.lambda_home,
+                            lambda_away=probs.lambda_away,
+                            model_type=probs.model,
+                            reliability=reliability,
+                        ))
 
     logger.info("Détection terminée : %d paris de valeur trouvés", len(all_bets))
     return all_bets

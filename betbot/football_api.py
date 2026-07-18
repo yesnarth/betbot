@@ -63,16 +63,44 @@ class FootballDataClient:
             return {}
         return resp.json()
 
-    def get_recent_matches(self, competition_code: str, limit: int = 60) -> list[dict]:
+    def get_recent_matches(
+        self, competition_code: str, limit: int = 60, season: int | None = None
+    ) -> list[dict]:
         """
         Fetch the most recent finished matches for a competition.
         Returns a list of match dicts with home/away team names and scores.
+
+        `season` pins a specific season (its STARTING year, e.g. 2025 = 2025-26).
+        When omitted, football-data returns the CURRENT season — which in the
+        summer off-season has 0 finished matches. So when the current season is
+        empty (and the caller didn't pin one), we fall back to the most recent
+        COMPLETED season, so the model / backtest / calibration cold-start still
+        get data year-round instead of going blind between June and August.
         """
-        data = self._get(
-            f"competitions/{competition_code}/matches",
-            params={"status": "FINISHED", "limit": limit},
-        )
-        matches = data.get("matches", [])
+        def _fetch(params: dict) -> list[dict]:
+            data = self._get(f"competitions/{competition_code}/matches", params=params)
+            return data.get("matches", [])
+
+        params = {"status": "FINISHED", "limit": limit}
+        if season is not None:
+            params["season"] = season
+        matches = _fetch(params)
+
+        if not matches and season is None:
+            from datetime import datetime, timezone
+            yr = datetime.now(timezone.utc).year
+            for cand in (yr - 1, yr - 2):   # last completed season, then the one before
+                try:
+                    fallback = _fetch({"status": "FINISHED", "limit": limit, "season": cand})
+                except Exception as exc:
+                    logger.debug("season-fallback %s %d: %s", competition_code, cand, exc)
+                    fallback = []
+                if fallback:
+                    logger.info("  %s : saison courante vide → repli saison %d",
+                                competition_code, cand)
+                    matches = fallback
+                    break
+
         logger.info(
             "  %s : %d matchs terminés récupérés", competition_code, len(matches)
         )

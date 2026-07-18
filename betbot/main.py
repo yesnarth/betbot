@@ -107,6 +107,9 @@ def _ensure_min_combos(
             underdog_odds=settings.underdog_odds,
             underdog_min_prob=settings.underdog_min_prob,
             novig_required=settings.novig_required,
+            derive_dc_dnb=settings.derive_dc_dnb,
+            derived_min_edge=settings.derived_min_edge,
+            derived_min_odds=settings.derived_min_odds,
             prebuilt_stats_by_sport=prebuilt_stats,
             probs_cache=probs_cache,
         )
@@ -708,6 +711,33 @@ def main() -> None:
         id="startup_catchup",
         name="startup-catchup",
         misfire_grace_time=300,
+    )
+
+    # Bootstrap calibration on first run — an UNtrained calibrator means the
+    # model's probabilities are never market-corrected, the #1 driver of
+    # avoidable losing picks. cold_start_train fits the isotonic map from
+    # historical backtests (football-data.org — free, no Odds quota) so
+    # calibration is active from day one instead of after ~50 resolved live bets.
+    # Runs ONCE, only when no calibrator exists yet and an fd key is available;
+    # the weekly retrain later refines it on real resolved bets. One-shot 'date'
+    # job → runs off the main thread, ~30-60 s.
+    def _startup_calibrator_bootstrap():
+        from betbot.ml import calibrator_status, cold_start_train
+        if calibrator_status().get("available"):
+            logger.info("Calibrateur déjà présent — bootstrap ignoré.")
+            return
+        if not settings.football_data_api_key:
+            logger.info("Bootstrap calibrateur ignoré : pas de clé football-data.")
+            return
+        logger.info("Bootstrap calibrateur au démarrage (backtests historiques)…")
+        result = cold_start_train(settings.football_data_api_key)
+        logger.info("Bootstrap calibrateur : %s", result)
+    scheduler.add_job(
+        _wrap("startup_calibrator_bootstrap", _startup_calibrator_bootstrap),
+        trigger="date",
+        id="startup_calibrator_bootstrap",
+        name="calibrator-bootstrap",
+        misfire_grace_time=600,
     )
 
     logger.info("Bot actif (APScheduler, fuseau Europe/Paris). CTRL+C pour arrêter.")

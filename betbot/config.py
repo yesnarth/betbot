@@ -50,6 +50,11 @@ class Settings:
     underdog_odds: float = 0.0          # odds at/above which the prob floor applies
     underdog_min_prob: float = 0.0      # required model_prob when odds ≥ underdog_odds
     novig_required: bool = False        # drop a pick when no-vig consensus is unavailable
+    # Derived markets (Double Chance + Draw No Bet), computed from the 1X2 we
+    # already fetch — 0 extra quota. More options + lower-variance combo legs.
+    derive_dc_dnb: bool = True
+    derived_min_edge: float = 0.02      # edge floor for a DC/DNB single/leg (+EV)
+    derived_min_odds: float = 1.10      # DC/DNB are low-odds by nature → own floor
 
 
 def load_settings() -> Settings:
@@ -130,6 +135,9 @@ def load_settings() -> Settings:
     underdog_odds     = float(os.getenv("UNDERDOG_ODDS", "3.0"))
     underdog_min_prob = float(os.getenv("UNDERDOG_MIN_PROB", "0.42"))
     novig_required    = os.getenv("NOVIG_REQUIRED", "1") == "1"
+    derive_dc_dnb     = os.getenv("DERIVE_DC_DNB", "1") == "1"
+    derived_min_edge  = float(os.getenv("DERIVED_MIN_EDGE", "0.02"))
+    derived_min_odds  = float(os.getenv("DERIVED_MIN_ODDS", "1.10"))
 
     return Settings(
         odds_api_key=odds_key,
@@ -160,4 +168,7 @@ def load_settings() -> Settings:
         underdog_odds=underdog_odds,
         underdog_min_prob=underdog_min_prob,
         novig_required=novig_required,
+        derive_dc_dnb=derive_dc_dnb,
+        derived_min_edge=derived_min_edge,
+        derived_min_odds=derived_min_odds,
     )
