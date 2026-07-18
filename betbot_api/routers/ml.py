@@ -58,9 +58,11 @@ def ml_calibrator_cold_start(
     Slow (~30-60 s) because it runs 5 backtests sequentially. Rate-limited
     to 2/min.
     """
-    from betbot.ml import cold_start_train
+    from betbot.ml import bootstrap_calibrator
     s = load_settings()
-    return cold_start_train(s.football_data_api_key)
+    # Prefer REAL closing-odds (football-data.co.uk, keyless); fall back to the
+    # synthetic-market backtest (football-data.org) only if it can't gather enough.
+    return bootstrap_calibrator(s.football_data_api_key)
 
 
 @router.post("/blend/tune")

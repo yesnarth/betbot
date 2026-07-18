@@ -309,6 +309,128 @@ def cold_start_train(
 
 
 # ---------------------------------------------------------------------------
+# Cold-start on REAL closing odds (football-data.co.uk) — preferred
+# ---------------------------------------------------------------------------
+
+def _walk_forward_real_samples(matches: list[dict]) -> list[tuple[float, int]]:
+    """Walk a league's matches chronologically; for each, predict from STRICTLY
+    prior results, shrink each outcome toward its REAL closing line exactly as
+    production does, and emit (shrunk_prob, won) samples for home/draw/away.
+
+    The sample's probability is the PER-OUTCOME shrunk value (not renormalized) —
+    that is precisely the domain production passes to calibrate() (analysis.py
+    shrinks, then calibrates, then renormalizes), so the fitted map applies cleanly.
+    """
+    from betbot.models import (
+        build_team_stats, compute_league_averages, blended_match_probs,
+        DEFAULT_HOME_AVG, DEFAULT_AWAY_AVG,
+    )
+    from betbot.calibration import shrink_toward_market
+
+    samples: list[tuple[float, int]] = []
+    last_date: str | None = None
+    cache: dict = {}
+    lh = la = 0.0
+    for m in matches:
+        date = m["date"]
+        if date != last_date:
+            train = [x for x in matches if x["date"] < date]   # no same-day leakage
+            last_date = date
+            if len(train) < 40:
+                cache = {}
+                continue
+            lh, la = compute_league_averages(train)
+            teams = {x["home_team"] for x in train} | {x["away_team"] for x in train}
+            cache = {t: ts for t in teams if (ts := build_team_stats(t, train, lh, la))}
+        if not cache:
+            continue
+        h, a = cache.get(m["home_team"]), cache.get(m["away_team"])
+        if not h or not a:
+            continue
+        try:
+            probs = blended_match_probs(
+                home_stats=h, away_stats=a,
+                league_home_avg=lh or DEFAULT_HOME_AVG,
+                league_away_avg=la or DEFAULT_AWAY_AVG,
+            )
+        except Exception:
+            continue
+        hg, ag = m["home_goals"], m["away_goals"]
+        samples.append((shrink_toward_market(probs.home_win, m["close_home"]), 1 if hg > ag else 0))
+        samples.append((shrink_toward_market(probs.draw,     m["close_draw"]), 1 if hg == ag else 0))
+        samples.append((shrink_toward_market(probs.away_win, m["close_away"]), 1 if ag > hg else 0))
+    return samples
+
+
+def cold_start_train_real(
+    sport_keys: tuple[str, ...] = DEFAULT_COLD_START_LEAGUES,
+    n_seasons: int = 2,
+) -> dict:
+    """Bootstrap the calibrator from REAL closing-odds history (football-data.co.uk).
+
+    Superior to cold_start_train (synthetic base-rate market): probabilities are
+    shrunk toward genuine Pinnacle/market closing lines, so the isotonic map is
+    fitted on the same kind of probability production actually emits at bet time.
+    """
+    from betbot.data_sources import football_data_co_uk as fdc
+
+    all_samples: list[tuple[float, int]] = []
+    per_league: dict[str, int] = {}
+    notes: list[str] = []
+    for sk in sport_keys:
+        try:
+            matches = fdc.get_matches_with_odds(sk, n_seasons=n_seasons)
+        except Exception as exc:
+            notes.append(f"{sk}: error {exc}")
+            per_league[sk] = 0
+            continue
+        if len(matches) < 100:
+            notes.append(f"{sk}: only {len(matches)} matchs with closing odds")
+            per_league[sk] = 0
+            continue
+        s = _walk_forward_real_samples(matches)
+        all_samples.extend(s)
+        per_league[sk] = len(s)
+        notes.append(f"{sk}: {len(matches)} matchs → {len(s)} samples")
+
+    if len(all_samples) < MIN_SAMPLES_TO_TRUST:
+        return {"trained": False, "n_samples": len(all_samples), "per_league": per_league,
+                "reason": f"only {len(all_samples)} real-odds samples — need {MIN_SAMPLES_TO_TRUST}",
+                "notes": notes}
+
+    payload = _build_payload(
+        all_samples, {"football_h2h": all_samples}, MIN_SAMPLES_TO_TRUST,
+        source="cold_start_real_odds", extra={"per_league": per_league},
+    )
+    if payload is None:
+        return {"trained": False, "n_samples": len(all_samples), "per_league": per_league,
+                "reason": "sklearn unavailable"}
+    _persist(payload)
+    logger.info("Cold-start (REAL odds) on %d samples, Brier %.4f → %.4f",
+                len(all_samples), payload["brier_before"], payload["brier_after"])
+    return {"trained": True, "n_samples": len(all_samples), "per_league": per_league,
+            "path": str(CALIBRATOR_PATH), "brier_before": payload["brier_before"],
+            "brier_after": payload["brier_after"], "notes": notes,
+            "source": "cold_start_real_odds"}
+
+
+def bootstrap_calibrator(fd_api_key: str = "") -> dict:
+    """Best-available cold-start: try REAL closing odds (football-data.co.uk,
+    keyless) first; fall back to the synthetic-market backtest (football-data.org,
+    needs fd_api_key) only if the real path can't gather enough samples."""
+    real = cold_start_train_real()
+    if real.get("trained"):
+        return real
+    if not fd_api_key:
+        return real
+    logger.info("Cold-start réel indisponible (%s) → repli backtest synthétique.",
+                real.get("reason"))
+    synth = cold_start_train(fd_api_key)
+    synth["real_attempt"] = real.get("reason")
+    return synth
+
+
+# ---------------------------------------------------------------------------
 # Apply
 # ---------------------------------------------------------------------------
 

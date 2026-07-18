@@ -722,15 +722,15 @@ def main() -> None:
     # the weekly retrain later refines it on real resolved bets. One-shot 'date'
     # job → runs off the main thread, ~30-60 s.
     def _startup_calibrator_bootstrap():
-        from betbot.ml import calibrator_status, cold_start_train
-        if calibrator_status().get("available"):
-            logger.info("Calibrateur déjà présent — bootstrap ignoré.")
+        from betbot.ml import calibrator_status, bootstrap_calibrator
+        st = calibrator_status()
+        # Skip if a REAL-odds or resolved-bets calibrator is already fitted, but
+        # UPGRADE a synthetic-market cold-start to the real-odds one.
+        if st.get("available") and st.get("source") not in ("cold_start_backtest",):
+            logger.info("Calibrateur '%s' déjà présent — bootstrap ignoré.", st.get("source"))
             return
-        if not settings.football_data_api_key:
-            logger.info("Bootstrap calibrateur ignoré : pas de clé football-data.")
-            return
-        logger.info("Bootstrap calibrateur au démarrage (backtests historiques)…")
-        result = cold_start_train(settings.football_data_api_key)
+        logger.info("Bootstrap calibrateur au démarrage (cotes réelles football-data.co.uk)…")
+        result = bootstrap_calibrator(settings.football_data_api_key)
         logger.info("Bootstrap calibrateur : %s", result)
     scheduler.add_job(
         _wrap("startup_calibrator_bootstrap", _startup_calibrator_bootstrap),
