@@ -26,7 +26,8 @@ def health_sources(_: str = Depends(require_auth)) -> dict:
     import os
     import time
     from datetime import datetime, timezone
-    from betbot.data_sources import club_elo, understat
+    from betbot.data_sources import club_elo, api_football
+    from betbot.data_sources import xg as xg_source
     s = load_settings()
 
     # Per-probe timeout : a single slow source (Understat is notoriously
@@ -78,10 +79,10 @@ def health_sources(_: str = Depends(require_auth)) -> dict:
                lambda: bool(s.football_data_api_key)),
         _probe("club_elo",      "important", True,
                lambda: len(club_elo.get_all_elo_ratings()) > 100),
-        _probe("understat",     "optional",  True,
-               understat.is_available),
+        _probe("xg",            "optional",  True,
+               xg_source.is_available),
         _probe("api_football",  "optional",  bool(os.getenv("API_FOOTBALL_KEY")),
-               lambda: bool(os.getenv("API_FOOTBALL_KEY"))),
+               api_football.is_available),
         _probe("tavily",        "optional",  bool(os.getenv("TAVILY_API_KEY")),
                lambda: bool(os.getenv("TAVILY_API_KEY"))),
         _probe("anthropic",     "optional",  bool(s.anthropic_api_key),

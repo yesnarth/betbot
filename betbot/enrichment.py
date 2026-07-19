@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from betbot.data_sources import club_elo, understat
+from betbot.data_sources import club_elo, xg
 from betbot.db import Database
 
 logger = logging.getLogger("betbot.enrichment")
@@ -35,16 +35,17 @@ def enrich_team_stats(db: Database) -> dict[str, int]:
         logger.warning("Club Elo unavailable: %s — Elo enrichment skipped", exc)
         elo_snapshot = {}
 
-    # 2) For each league, pre-fetch Understat in one shot
+    # 2) For each league, pre-fetch xG in one shot (api-football when configured,
+    #    else Understat). Facade degrades to [] so enrichment never breaks.
     from betbot.api import SPORT_KEYS
     xg_by_league: dict[str, dict[str, dict]] = {}
     for sport_key in SPORT_KEYS:
         try:
-            teams = understat.get_league_xg(sport_key)
+            teams = xg.get_league_xg(sport_key)
             if teams:
                 xg_by_league[sport_key] = {t["title"].lower(): t for t in teams}
         except Exception as exc:
-            logger.warning("Understat unavailable for %s : %s", sport_key, exc)
+            logger.warning("xG source unavailable for %s : %s", sport_key, exc)
 
     # 3) Iterate rows + upsert
     now = datetime.now(timezone.utc).isoformat()

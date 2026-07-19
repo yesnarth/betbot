@@ -542,7 +542,7 @@ def get_xg_stats(team_name: str, sport_key: str) -> dict | None:
     Pull season-to-date xG / xGA / xPts for a team via Understat.
     xG (expected goals) outperforms raw goals as a predictive feature.
     """
-    from betbot.data_sources.understat import get_team_xg
+    from betbot.data_sources.xg import get_team_xg
     t = get_team_xg(team_name, sport_key)
     return dict(t) if t else None
 
@@ -1079,7 +1079,7 @@ def compare_two_teams(
     """
     from betbot.analysis import _fuzzy_lookup, _normalize_name
     from betbot.data_sources.club_elo import get_team_elo, elo_win_probability
-    from betbot.data_sources import understat
+    from betbot.data_sources import xg as understat
     from betbot.models import blended_match_probs
     from betbot.shared import load_team_stats_from_db
     from betbot.api import SPORT_KEYS
