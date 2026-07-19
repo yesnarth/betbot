@@ -15,12 +15,42 @@ def _reliability_badge(score: float) -> str:
     return "🔴 Faible"
 
 
-def render_picks_table(picks: list[dict]) -> None:
-    if not picks:
-        return
+def _pick_rank_key(p: dict) -> tuple:
+    return (float(p.get("value_edge") or 0), float(p.get("model_prob") or 0))
+
+
+def _match_key(p: dict) -> str:
+    return p.get("event_id") or f"{p.get('home_team')}|{p.get('away_team')}|{p.get('league')}"
+
+
+def group_picks_by_match(picks: list[dict]) -> tuple[list[dict], dict]:
+    """Collapse correlated same-match picks. 1X2 / totals / Double Chance / Draw
+    No Bet on ONE fixture are alternative expressions of the same view, NOT
+    independent bets. Returns (primary, alternatives): `primary` = the single best
+    pick per match (best edge, then prob), sorted best-first; `alternatives` =
+    {match_key: [the other markets on that match]}."""
+    groups: dict[str, list] = {}
+    order: list[str] = []
+    for p in picks:
+        key = _match_key(p)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(p)
+    primary: list[dict] = []
+    alternatives: dict[str, list] = {}
+    for key in order:
+        ranked = sorted(groups[key], key=_pick_rank_key, reverse=True)
+        primary.append(ranked[0])
+        if len(ranked) > 1:
+            alternatives[key] = ranked[1:]
+    primary.sort(key=_pick_rank_key, reverse=True)
+    return primary, alternatives
+
+
+def _render_picks_df(picks: list[dict]) -> None:
+    """Render a flat table of picks (no grouping)."""
     df = pd.DataFrame(picks)
-    # Build a display copy of the reliability column with the emoji prefix.
-    # The raw `reliability` column stays in `df` for the warning below.
     if "reliability" in df.columns:
         df["reliability_display"] = df["reliability"].apply(
             lambda s: f"{_reliability_badge(float(s))} ({float(s):.2f})"
@@ -59,17 +89,29 @@ def render_picks_table(picks: list[dict]) -> None:
         )
     st.dataframe(display, width='stretch', hide_index=True, column_config=column_config)
 
-    # Caveat on suspiciously large edges AND on low-reliability picks
-    if "value_edge" in df.columns:
-        big_edges = (df["value_edge"] > 0.20).sum()
+
+def render_picks_table(picks: list[dict]) -> None:
+    if not picks:
+        return
+    # ONE best pick per match. Same-match markets (Double Chance / Draw No Bet /
+    # totals on one fixture) are CORRELATED — showing them as separate rows made
+    # them look like independent (even contradictory) bets. They move to the
+    # expander below; the full list is still available to the combo builder.
+    primary, alternatives = group_picks_by_match(picks)
+    _render_picks_df(primary)
+
+    # Warnings apply to the picks you'd actually place (the primary set).
+    pdf = pd.DataFrame(primary)
+    if "value_edge" in pdf.columns:
+        big_edges = int((pdf["value_edge"] > 0.20).sum())
         if big_edges > 0:
             st.warning(
                 f"⚠️ **{big_edges} pari(s) ont un edge > 20%.** Le marché des cotes est "
                 "généralement bien calibré ; un edge aussi élevé révèle souvent un "
                 "**défaut de modèle**. Privilégie les paris à edge **2-10%** où la valeur est plus fiable."
             )
-    if "reliability" in df.columns:
-        low_rel = (df["reliability"] < 0.40).sum()
+    if "reliability" in pdf.columns:
+        low_rel = int((pdf["reliability"] < 0.40).sum())
         if low_rel > 0:
             st.warning(
                 f"🔴 **{low_rel} pari(s) ont une fiabilité < 0.40.** Soit la taille "
@@ -77,6 +119,28 @@ def render_picks_table(picks: list[dict]) -> None:
                 "probabilité tombent dans des zones où le modèle est historiquement "
                 "moins précis. Considère une mise réduite ou skip."
             )
+
+    # Correlated alternatives per match — grouped, clearly labelled.
+    n_alt = sum(len(v) for v in alternatives.values())
+    if n_alt:
+        prim_by_key = {_match_key(p): p for p in primary}
+        with st.expander(
+            f"🔀 {n_alt} marché(s) alternatif(s) sur {len(alternatives)} match(s) — "
+            "corrélés (mêmes matchs), à NE PAS cumuler"
+        ):
+            st.caption(
+                "Ces lignes portent sur les **mêmes matchs** que le tableau ci-dessus, "
+                "exprimés autrement (Double Chance, Draw No Bet, Under/Over…). Elles sont "
+                "**corrélées** au pari retenu : choisis-en **une** par match, ne les "
+                "empile pas comme des paris indépendants."
+            )
+            for key, alts in alternatives.items():
+                p0 = prim_by_key.get(key, {})
+                st.markdown(
+                    f"**{p0.get('home_team', '?')} — {p0.get('away_team', '?')}**  ·  "
+                    f"retenu : *{p0.get('selection_label', '?')}*"
+                )
+                _render_picks_df(alts)
 
 
 def render_parlays(parlays: list[dict]) -> None:
