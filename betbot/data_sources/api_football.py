@@ -269,6 +269,25 @@ def get_league_xg(sport_key: str, year: int | None = None, last: int = 6,
     return out
 
 
+def get_recent_fixture_dates(team_id: int, last: int = 6) -> list:
+    """Datetimes of a team's last `last` FINISHED fixtures across ALL competitions
+    (league + cups + Europe), sorted ascending. No league filter on purpose — a
+    midweek Champions League match must count toward fixture congestion."""
+    from datetime import datetime
+
+    fx = _get("fixtures", {"team": team_id, "last": last, "status": "FT"})
+    out: list = []
+    for f in fx.get("response", []):
+        d = (f.get("fixture") or {}).get("date")
+        if not d:
+            continue
+        try:
+            out.append(datetime.fromisoformat(str(d).replace("Z", "+00:00")))
+        except (ValueError, TypeError):
+            continue
+    return sorted(out)
+
+
 def is_available() -> bool:
     """Cheap liveness check for /health — confirms the key works via /status."""
     try:

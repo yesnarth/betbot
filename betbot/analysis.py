@@ -20,6 +20,10 @@ from betbot.injuries import (
     get_injury_factor as _injury_factor,
     reset_run_budget as _reset_injury_budget,
 )
+from betbot.fatigue import (
+    get_fatigue_factor as _fatigue_factor,
+    reset_run_budget as _reset_fatigue_budget,
+)
 from betbot.data_sources.weather import (
     get_weather_factor as _weather_factor,
     reset_weather_budget as _reset_weather_budget,
@@ -341,6 +345,7 @@ def detect_value_bets(
     from betbot.models import DEFAULT_HOME_AVG, DEFAULT_AWAY_AVG
     all_bets: list[ValueBet] = []
     _reset_injury_budget()  # fresh per-scan API-Football lookup budget (injuries)
+    _reset_fatigue_budget()  # fresh per-scan API-Football lookup budget (rest/congestion)
     _reset_weather_budget()  # fresh per-scan Open-Meteo lookup budget (weather)
     if probs_cache is None:
         probs_cache = {}
@@ -829,8 +834,11 @@ def _compute_probs(
                 league_home_avg=league_home_avg,
                 league_away_avg=league_away_avg,
                 weather_modifier=_weather_factor(home, event.get("commence_time"), sport_key),
-                home_attack_mod=_injury_factor(home, sport_key),
-                away_attack_mod=_injury_factor(away, sport_key),
+                # Attack modifier = injuries × rest/congestion fatigue (both ≤1.0).
+                home_attack_mod=_injury_factor(home, sport_key)
+                * _fatigue_factor(home, sport_key, event.get("commence_time")),
+                away_attack_mod=_injury_factor(away, sport_key)
+                * _fatigue_factor(away, sport_key, event.get("commence_time")),
                 sport_key=sport_key,   # propagates to per-league Dixon-Coles τ
                 h2h=h2h_oriented,
                 **({"elo_weight": _tuned[0], "xg_weight": _tuned[1]} if _tuned else {}),
