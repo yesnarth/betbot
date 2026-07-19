@@ -35,21 +35,18 @@ def enrich_team_stats(db: Database) -> dict[str, int]:
         logger.warning("Club Elo unavailable: %s — Elo enrichment skipped", exc)
         elo_snapshot = {}
 
-    # 2) For each league, pre-fetch xG in one shot (api-football when configured,
-    #    else Understat). Facade degrades to [] so enrichment never breaks.
+    # 2) Iterate leagues: fetch that league's xG, then upsert its rows IMMEDIATELY.
+    #    (Was: pre-fetch ALL leagues then persist — which lost everything if the
+    #    fetch died mid-way on a flaky link. Per-league persist keeps progress.)
     from betbot.api import SPORT_KEYS
-    xg_by_league: dict[str, dict[str, dict]] = {}
-    for sport_key in SPORT_KEYS:
-        try:
-            teams = xg.get_league_xg(sport_key)
-            if teams:
-                xg_by_league[sport_key] = {t["title"].lower(): t for t in teams}
-        except Exception as exc:
-            logger.warning("xG source unavailable for %s : %s", sport_key, exc)
-
-    # 3) Iterate rows + upsert
     now = datetime.now(timezone.utc).isoformat()
     for sport_key in SPORT_KEYS:
+        xg_map: dict[str, dict] = {}
+        try:
+            teams = xg.get_league_xg(sport_key)
+            xg_map = {t["title"].lower(): t for t in teams}
+        except Exception as exc:
+            logger.warning("xG source unavailable for %s : %s", sport_key, exc)
         rows = db.get_all_team_stats_for_league(sport_key)
         for row in rows:
             counts["teams_seen"] += 1
@@ -75,7 +72,6 @@ def enrich_team_stats(db: Database) -> dict[str, int]:
 
             # -------- xG --------
             xg_for = xg_against = npxg_for = npxg_against = xpts = None
-            xg_map = xg_by_league.get(sport_key, {})
             if xg_map:
                 # Match by lowercased team title with permissive contains
                 needle = team_name.lower()
@@ -111,6 +107,9 @@ def enrich_team_stats(db: Database) -> dict[str, int]:
                 xpts_per_match=xpts,
                 sources_updated_at=now,
             )
+
+        if xg_map:
+            logger.info("  %s : xG persisté (%d équipes en source)", sport_key, len(xg_map))
 
     logger.info(
         "Enrichissement terminé : %d équipes, %d ELO, %d xG, %d erreurs",
