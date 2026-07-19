@@ -85,12 +85,19 @@ def enrich_team_stats(db: Database) -> dict[str, int]:
                         match = t
                         break
                 if match:
-                    xg_for = match["xg_per_match"]
-                    xg_against = match["xga_per_match"]
-                    npxg_for = match["npxg"] / max(match["matches"], 1)
-                    npxg_against = match["npxga"] / max(match["matches"], 1)
-                    xpts = match["xpts"] / max(match["matches"], 1)
-                    counts["xg_filled"] += 1
+                    # Core signal (all sources provide it). npxG / xPts are
+                    # Understat-only extras — api-football exposes plain xG per
+                    # fixture, so guard them with .get() (stay None when absent).
+                    xg_for = match.get("xg_per_match")
+                    xg_against = match.get("xga_per_match")
+                    m = max(match.get("matches", 1), 1)
+                    if "npxg" in match:
+                        npxg_for = match["npxg"] / m
+                        npxg_against = match.get("npxga", 0.0) / m
+                    if "xpts" in match:
+                        xpts = match["xpts"] / m
+                    if xg_for is not None:
+                        counts["xg_filled"] += 1
 
             # -------- Persist --------
             db.update_team_enrichment(

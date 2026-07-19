@@ -48,7 +48,7 @@ def _get(endpoint: str, params: dict | None = None) -> dict:
         f"{BASE_URL}/{endpoint}",
         headers=_headers(),
         params=params or {},
-        timeout=15,
+        timeout=20,
     )
     if resp.status_code == 429:
         logger.warning("API-Football rate limit hit")
@@ -194,8 +194,11 @@ def get_recent_team_xg(
 ) -> dict | None:
     """Aggregate a team's xG for/against over its last `last` finished fixtures.
     Returns {matches, xg_per_match, xga_per_match} or None if no xG was found."""
-    fx = _get("fixtures", {"team": team_id, "league": league_id,
-                           "season": season, "last": last, "status": "FT"})
+    try:
+        fx = _get("fixtures", {"team": team_id, "league": league_id,
+                               "season": season, "last": last, "status": "FT"})
+    except Exception:
+        return None
     xgf = xga = 0.0
     n = 0
     for f in fx.get("response", []):
@@ -205,7 +208,10 @@ def get_recent_team_xg(
         opp_id = away_id if home_id == team_id else home_id
         if fid is None or opp_id is None:
             continue
-        xg = get_fixture_xg(fid)
+        try:  # a single fixture-stats timeout must not drop the whole team
+            xg = get_fixture_xg(fid)
+        except Exception:
+            continue
         if team_id in xg and opp_id in xg:
             xgf += xg[team_id]
             xga += xg[opp_id]
@@ -232,7 +238,11 @@ def get_league_xg(sport_key: str, year: int | None = None, last: int = 6,
     if ck in _XG_LEAGUE_CACHE:
         return _XG_LEAGUE_CACHE[ck]
 
-    teams = _get("teams", {"league": league_id, "season": season}).get("response", [])
+    try:
+        teams = _get("teams", {"league": league_id, "season": season}).get("response", [])
+    except Exception as exc:
+        logger.warning("api-football xG: teams list failed for %s (%s)", sport_key, exc)
+        return []
     out: list[dict] = []
     calls = 1
     for row in teams:
@@ -243,7 +253,10 @@ def get_league_xg(sport_key: str, year: int | None = None, last: int = 6,
         tid, name = team.get("id"), team.get("name", "")
         if tid is None:
             continue
-        agg = get_recent_team_xg(tid, league_id, season, last=last)
+        try:  # one team's failure must not abort the whole league
+            agg = get_recent_team_xg(tid, league_id, season, last=last)
+        except Exception:
+            agg = None
         calls += 1 + last
         if agg:
             out.append({"title": name, "matches": agg["matches"],
