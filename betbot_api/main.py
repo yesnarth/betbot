@@ -32,6 +32,7 @@ from betbot_api.routers import (
     predictions as predictions_router,
     promotions as promotions_router,
     recommend as recommend_router,
+    settings as settings_router,
     sources_health as sources_health_router,
     stats as stats_router,
     tennis as tennis_router,
@@ -107,6 +108,7 @@ app.include_router(ml_router.router)
 app.include_router(predictions_router.router)
 app.include_router(promotions_router.router)
 app.include_router(recommend_router.router)
+app.include_router(settings_router.router)
 app.include_router(sources_health_router.router)
 app.include_router(stats_router.router)
 app.include_router(tennis_router.router)

@@ -66,7 +66,12 @@ def load_settings() -> Settings:
             missing.append(name)
         return val
 
-    odds_key  = require("ODDS_API_KEY")
+    # Odds key: a dashboard-set runtime override wins over the env var (and
+    # satisfies the "required" check on its own). Lets the user rotate the key
+    # from the UI without editing .env / restarting.
+    from betbot.runtime_config import get_odds_api_key_override
+    _odds_override = get_odds_api_key_override()
+    odds_key = _odds_override if _odds_override else require("ODDS_API_KEY")
     fd_key    = os.getenv("FOOTBALL_DATA_API_KEY", "")
     gmail_user = require("GMAIL_USER")
     gmail_pass = require("GMAIL_APP_PASSWORD")

@@ -10,7 +10,48 @@ from betbot_dashboard.api_client import api_get, api_post
 from betbot_dashboard.styles import empty_state
 
 
+def render_odds_key_config() -> None:
+    """Self-service Odds API key rotation — no SSH, no restart."""
+    with st.expander("🔑 Clé Odds API — changer sans redémarrage", expanded=False):
+        try:
+            status = api_get("/settings/odds-key")
+        except Exception as exc:
+            status = None
+            st.warning(f"Statut indisponible : {exc}")
+        if status:
+            src = {"dashboard": "dashboard", "env": ".env", "none": "aucune"}.get(
+                status.get("source"), status.get("source"))
+            rem = status.get("remaining")
+            st.caption(
+                f"Clé actuelle : **{status.get('masked')}** (source : {src}) — "
+                f"quota restant : **{rem if rem is not None else '?'}**"
+            )
+        st.caption(
+            "Colle ta nouvelle clé gratuite (tous les ~4 jours). Elle est "
+            "**vérifiée contre l'API puis appliquée immédiatement** — le prochain "
+            "scan l'utilise, sans redémarrage ni SSH."
+        )
+        new_key = st.text_input("Nouvelle clé Odds API", type="password",
+                                key="odds_key_input", placeholder="ex : c67bf38b…")
+        if st.button("💾 Enregistrer & vérifier", type="primary", disabled=not new_key):
+            with st.spinner("Vérification de la clé contre The Odds API…"):
+                try:
+                    res = api_post("/settings/odds-key", json={"key": new_key.strip()})
+                except Exception as exc:
+                    res = None
+                    st.error(f"Erreur : {exc}")
+            if res and res.get("saved"):
+                st.success(
+                    f"✅ Clé enregistrée et **active immédiatement** — quota restant : "
+                    f"**{res.get('remaining')}**. Aucun redémarrage nécessaire."
+                )
+            elif res:
+                st.error(f"❌ Non enregistrée : {res.get('reason')}")
+    st.divider()
+
+
 def render_sources_tab() -> None:
+    render_odds_key_config()
     st.subheader("🔌 État des sources externes")
     st.caption(
         "Probe en temps réel. Les sources sont groupées par criticité : "

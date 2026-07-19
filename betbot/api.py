@@ -93,14 +93,28 @@ class OddsAPIServerError(Exception):
 
 
 class OddsAPIClient:
-    def __init__(self, api_key: str):
-        self._key = api_key
+    def __init__(self, api_key: str, *, force_key: bool = False):
+        # Store the passed key as a fallback. The effective key (`self._key`) is
+        # resolved dynamically per request so a dashboard-set runtime override
+        # takes effect WITHOUT restarting the client — see runtime_config.
+        # `force_key=True` pins this exact key (used to validate a NEW key before
+        # saving it, bypassing any existing override).
+        self._explicit_key = api_key
+        self._force_key = force_key
         # -1 = unknown until the first response with a x-requests-remaining
         # header is observed. A misleading default like 9999 used to surface
         # in the dashboard as "OK" even when the probe had failed.
         self.quota_remaining: int = -1
         self.quota_exhausted: bool = False
         self._session = requests.Session()
+
+    @property
+    def _key(self) -> str:
+        """Effective API key: runtime override → explicit key (unless force_key)."""
+        if self._force_key:
+            return self._explicit_key
+        from betbot.runtime_config import get_odds_api_key_override
+        return get_odds_api_key_override() or self._explicit_key
 
     @retry(
         stop=stop_after_attempt(3),
