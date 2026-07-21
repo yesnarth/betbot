@@ -19,11 +19,22 @@ def _pick_rank_key(p: dict) -> tuple:
     return (float(p.get("value_edge") or 0), float(p.get("model_prob") or 0))
 
 
+def _pick_prob_key(p: dict) -> tuple:
+    return (float(p.get("model_prob") or 0), float(p.get("value_edge") or 0))
+
+
+def is_early_resolving(selection_code: str | None) -> bool:
+    """Bets winnable BEFORE full-time: any Over goal-line (O05/O15/O25/O35 — won
+    the moment enough goals are scored) or BTTS-Yes (won once both teams score)."""
+    c = (selection_code or "").upper()
+    return (c.startswith("O") and c[1:].isdigit()) or c == "BTTSY"
+
+
 def _match_key(p: dict) -> str:
     return p.get("event_id") or f"{p.get('home_team')}|{p.get('away_team')}|{p.get('league')}"
 
 
-def group_picks_by_match(picks: list[dict]) -> tuple[list[dict], dict]:
+def group_picks_by_match(picks: list[dict], rank_by: str = "edge") -> tuple[list[dict], dict]:
     """Collapse correlated same-match picks. 1X2 / totals / Double Chance / Draw
     No Bet on ONE fixture are alternative expressions of the same view, NOT
     independent bets. Returns (primary, alternatives): `primary` = the single best
@@ -37,14 +48,15 @@ def group_picks_by_match(picks: list[dict]) -> tuple[list[dict], dict]:
             groups[key] = []
             order.append(key)
         groups[key].append(p)
+    key_fn = _pick_prob_key if rank_by == "prob" else _pick_rank_key
     primary: list[dict] = []
     alternatives: dict[str, list] = {}
     for key in order:
-        ranked = sorted(groups[key], key=_pick_rank_key, reverse=True)
+        ranked = sorted(groups[key], key=key_fn, reverse=True)
         primary.append(ranked[0])
         if len(ranked) > 1:
             alternatives[key] = ranked[1:]
-    primary.sort(key=_pick_rank_key, reverse=True)
+    primary.sort(key=key_fn, reverse=True)
     return primary, alternatives
 
 
@@ -141,6 +153,41 @@ def render_picks_table(picks: list[dict]) -> None:
                     f"retenu : *{p0.get('selection_label', '?')}*"
                 )
                 _render_picks_df(alts)
+
+
+def render_safe_picks(picks: list[dict]) -> None:
+    """Safe & fast view: one best pick per match ranked by PROBABILITY, with an
+    ⚡ badge on early-resolving markets (Over goal-lines / BTTS-Yes)."""
+    if not picks:
+        return
+    primary, _ = group_picks_by_match(picks, rank_by="prob")
+    rows = []
+    for p in primary:
+        rows.append({
+            "": "⚡" if is_early_resolving(p.get("selection_code")) else "",
+            "Match": f"{p.get('home_team', '?')} — {p.get('away_team', '?')}",
+            "Ligue": p.get("league", ""),
+            "Pari": p.get("selection_label", "?"),
+            "Proba": float(p.get("model_prob") or 0) * 100,
+            "Cote": float(p.get("best_odds") or 0),
+            "Edge": float(p.get("value_edge") or 0) * 100,
+            "Fiabilité": _reliability_badge(float(p.get("reliability") or 0)),
+            "Book": p.get("best_book", ""),
+        })
+    df = pd.DataFrame(rows)
+    cfg = {
+        "": st.column_config.TextColumn(
+            width="small", help="⚡ = validé AVANT la fin du match (Over buts / BTTS-Oui)"),
+        "Proba": st.column_config.NumberColumn(format="%.1f%%"),
+        "Cote": st.column_config.NumberColumn(format="%.2f"),
+        "Edge": st.column_config.NumberColumn(format="%+.1f%%"),
+    }
+    st.dataframe(df, width='stretch', hide_index=True, column_config=cfg)
+    n_early = sum(1 for p in primary if is_early_resolving(p.get("selection_code")))
+    st.caption(
+        f"⚡ **{n_early}** pari(s) se valident **avant la fin** du match (dès "
+        "qu'assez de buts tombent). Triés par probabilité décroissante."
+    )
 
 
 def render_parlays(parlays: list[dict]) -> None:

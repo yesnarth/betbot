@@ -4,7 +4,9 @@ from __future__ import annotations
 import streamlit as st
 
 from betbot_dashboard.api_client import api_get, api_post
-from betbot_dashboard.components.picks import render_picks_table, render_parlays
+from betbot_dashboard.components.picks import (
+    render_picks_table, render_parlays, render_safe_picks, is_early_resolving,
+)
 from betbot_dashboard.styles import empty_state
 
 
@@ -125,6 +127,54 @@ def render_scan_tab(filters: dict, health: dict) -> None:
                             st.info(f"ℹ️ {already} pick(s) déjà en DB (skipped).")
                         if errors:
                             st.error(f"❌ {errors} erreur(s) — voir logs API.")
+
+
+def render_safe_fast_tab(filters: dict) -> None:
+    st.subheader("🟢 Sûr & rapide — forte probabilité, validation précoce")
+    st.caption(
+        "Ne retient que les paris à **forte probabilité** (≥ 72 %) et **+EV**, "
+        "petites cotes autorisées. Priorité aux marchés **⚡ précoces** (Plus de "
+        "0.5 / 1.5 but) — gagnés dès qu'assez de buts tombent, **avant la fin**."
+    )
+    st.info(
+        "⚠️ **Forte proba ≠ profit garanti.** Ces paris sont bien pricés par le "
+        "marché : on ne les garde que quand le modèle y trouve une **vraie valeur** "
+        "(+EV). Une petite cote gagnée souvent rapporte peu ; la défaite efface "
+        "plusieurs gains. **Mise petit, vise la valeur — pas juste la fréquence.**",
+        icon="🎯",
+    )
+    if st.button("🟢 Lancer le scan sûr & rapide", type="primary", width='stretch'):
+        payload = _payload_from_filters(
+            filters, {"min_edge": 0.01, "min_prob": 0.72, "min_odds": 1.05})
+        with st.spinner("Récupération des cotes + calcul…"):
+            try:
+                st.session_state["safe_res"] = api_post("/recommend/manual", json=payload)
+            except Exception as exc:
+                st.error(f"Erreur : {exc}")
+                st.session_state["safe_res"] = None
+
+    res = st.session_state.get("safe_res")
+    if not res:
+        return
+    if res.get("odds_quota_exhausted"):
+        empty_state("🚫", f"Quota Odds API épuisé ({res.get('odds_quota_remaining', '?')} req)",
+                    "Recharge une clé dans **🔌 Sources → 🔑 Clé Odds API**.")
+        return
+    picks = res.get("picks", [])
+    early = sum(1 for p in picks if is_early_resolving(p.get("selection_code")))
+    cols = st.columns(3)
+    cols[0].metric("Matchs scannés", res.get("n_events_scanned", 0))
+    cols[1].metric("Paris sûrs (+EV)", res.get("n_picks", 0))
+    cols[2].metric("⚡ Validables avant la fin", early)
+    if not picks:
+        empty_state(
+            "🎯", "Aucun pari sûr ne passe le filtre",
+            "Aucun marché forte-proba **et** +EV pour l'instant — normal hors-saison, "
+            "ou le marché price déjà bien ces lignes. Reviens à la reprise.",
+        )
+        return
+    st.markdown("### 🟢 Paris sûrs (triés par probabilité)")
+    render_safe_picks(picks)
 
 
 def render_local_agent_tab(filters: dict, health: dict) -> None:

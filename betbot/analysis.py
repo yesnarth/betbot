@@ -423,9 +423,12 @@ def detect_value_bets(
                     ("X",   "Match nul",           "Draw",  "h2h",    None, probs.draw),
                     ("2",   "Victoire extérieur",  away,    "h2h",    None, probs.away_win),
                     # Totals — the `totals` market in Odds API returns multiple
-                    # points (typically 1.5, 2.5, 3.5). extract_best_odds
+                    # points (typically 0.5, 1.5, 2.5, 3.5). extract_best_odds
                     # silently returns None when a bookmaker doesn't quote the
                     # specific point, so the loop just skips those legs.
+                    # O05 (≥1 goal) is the highest-prob, earliest-resolving total.
+                    ("O05", "Plus de 0.5 but",     "Over",  "totals", 0.5,  probs.over_05),
+                    ("U05", "Moins de 0.5 but",    "Under", "totals", 0.5,  probs.under_05),
                     ("O15", "Plus de 1.5 buts",    "Over",  "totals", 1.5,  probs.over_15),
                     ("U15", "Moins de 1.5 buts",   "Under", "totals", 1.5,  probs.under_15),
                     ("O25", "Plus de 2.5 buts",    "Over",  "totals", 2.5,  probs.over_25),

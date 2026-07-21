@@ -101,6 +101,8 @@ class MatchProbs:
     # Additional totals lines — same Poisson score matrix, different cuts.
     # Bookmakers don't always quote 1.5 / 3.5 ; extract_best_odds returns
     # None silently when missing, so value detection naturally skips them.
+    over_05: float = 0.0       # ≥1 goal — highest-prob, earliest-resolving total
+    under_05: float = 0.0
     over_15: float = 0.0
     under_15: float = 0.0
     over_35: float = 0.0
@@ -289,6 +291,7 @@ def poisson_match_probs(lambda_home: float, lambda_away: float,
     prob_home = 0.0
     prob_draw = 0.0
     prob_away = 0.0
+    prob_over05 = 0.0
     prob_over15 = 0.0
     prob_over25 = 0.0
     prob_over35 = 0.0
@@ -308,6 +311,8 @@ def poisson_match_probs(lambda_home: float, lambda_away: float,
             else:
                 prob_away += p
             total_goals = i + j
+            if total_goals > 0:
+                prob_over05 += p
             if total_goals > 1:
                 prob_over15 += p
             if total_goals > 2:
@@ -324,6 +329,7 @@ def poisson_match_probs(lambda_home: float, lambda_away: float,
         prob_home    /= total_mass
         prob_draw    /= total_mass
         prob_away    /= total_mass
+        prob_over05  /= total_mass
         prob_over15  /= total_mass
         prob_over25  /= total_mass
         prob_over35  /= total_mass
@@ -337,6 +343,8 @@ def poisson_match_probs(lambda_home: float, lambda_away: float,
         under_25=round(1.0 - prob_over25, 6),
         btts_yes=round(prob_btts_yes, 6),
         btts_no=round(1.0 - prob_btts_yes, 6),
+        over_05=round(prob_over05, 6),
+        under_05=round(1.0 - prob_over05, 6),
         over_15=round(prob_over15, 6),
         under_15=round(1.0 - prob_over15, 6),
         over_35=round(prob_over35, 6),
@@ -429,6 +437,8 @@ def consensus_match_probs(event: dict) -> MatchProbs | None:
         under_25=probs.under_25,
         btts_yes=probs.btts_yes,
         btts_no=probs.btts_no,
+        over_05=probs.over_05,
+        under_05=probs.under_05,
         over_15=probs.over_15,
         under_15=probs.under_15,
         over_35=probs.over_35,
@@ -685,6 +695,8 @@ def blended_match_probs(
         under_25=poisson_probs.under_25,
         btts_yes=poisson_probs.btts_yes,
         btts_no=poisson_probs.btts_no,
+        over_05=poisson_probs.over_05,
+        under_05=poisson_probs.under_05,
         over_15=poisson_probs.over_15,
         under_15=poisson_probs.under_15,
         over_35=poisson_probs.over_35,
