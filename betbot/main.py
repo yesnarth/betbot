@@ -33,7 +33,7 @@ from betbot.clv import snapshot_closing_odds
 from betbot.db import Database
 from betbot.enrichment import enrich_team_stats
 from betbot.notifier import EmailNotifier
-from betbot.resolver import resolve_pending, resolve_stale_pending
+from betbot.resolver import resolve_pending, resolve_stale_pending, resolve_proposed_picks
 from betbot.source_health import check_and_alert as source_health_check
 from betbot.worker_health import WorkerHealthState, start_health_server
 
@@ -612,6 +612,23 @@ def main() -> None:
         misfire_grace_time=3600,
     )
 
+    # Shadow-grade PROPOSED (never-bet) picks daily — 05h15 UTC — so the model's
+    # FULL would-have track record is measured, not just the picks the user
+    # confirmed. This is how we learn whether the predictions are actually good and
+    # improving. FREE (football-data), NO bankroll effect (update_result only sets
+    # `result` for non-confirmed picks). Also feeds the weekly calibrator retrain
+    # with far more real (proposed) outcomes → it warms up faster.
+    def _resolve_proposed_job():
+        r = resolve_proposed_picks(db, settings.football_data_api_key)
+        logger.info("Résolution shadow (proposed, mesure modèle) : %s", r)
+    scheduler.add_job(
+        _wrap("resolve_proposed", _resolve_proposed_job),
+        trigger=CronTrigger(hour=5, minute=15),
+        id="resolve_proposed_daily",
+        name="resolve-proposed",
+        misfire_grace_time=3600,
+    )
+
     # ML calibrator retrain — Sunday 03:30 UTC, AFTER the daily resolve job has
     # had a chance to populate fresh resolved bets. Below MIN_SAMPLES_TO_TRUST
     # the function is a no-op, so safe to schedule from day 1.
@@ -703,8 +720,9 @@ def main() -> None:
         oc = OddsAPIClient(settings.odds_api_key)
         live = resolve_pending(db, oc)
         stale = resolve_stale_pending(db, settings.football_data_api_key)
-        logger.info("Catch-up démarrage : %s | tardifs résolus : %s",
-                    live, stale.get("resolved", 0))
+        shadow = resolve_proposed_picks(db, settings.football_data_api_key)
+        logger.info("Catch-up démarrage : %s | tardifs : %s | shadow proposés : %s",
+                    live, stale.get("resolved", 0), shadow.get("resolved", 0))
     scheduler.add_job(
         _wrap("startup_catchup", _startup_catchup_job),
         trigger="date",                 # no run_date → fires asap after start()

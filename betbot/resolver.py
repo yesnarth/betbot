@@ -324,3 +324,56 @@ def resolve_stale_pending(db: Database, fd_api_key: str, min_age_days: int = 2) 
 
     logger.info("Résolution tardive : %d résolu(s) via football-data.org", resolved)
     return {"resolved": resolved, "still_pending": len(pending) - resolved}
+
+
+def resolve_proposed_picks(db: Database, fd_api_key: str, min_age_days: int = 1) -> dict:
+    """Shadow-grade PROPOSED (never-bet) FOOTBALL picks from football-data.org —
+    FREE, no Odds quota — so the model's FULL would-have track record is measured,
+    not just the picks the user confirmed. This is what tells us whether the
+    predictions are actually good and improving (feeds model_performance + the
+    weekly calibrator retrain).
+
+    NO bankroll effect: db.update_result only writes the `result` field for
+    non-confirmed picks (its `is_money_at_stake = stake>0 AND confirmed` guard).
+    A pick, once graded, leaves the validation queue (filtered on result IS NULL),
+    so it can never be confirmed-then-double-settled.
+    """
+    from datetime import datetime, timezone
+
+    from betbot.football_api import LEAGUE_MAP, FootballDataClient, parse_match_results
+
+    if not fd_api_key or "REMPLACE" in fd_api_key:
+        return {"resolved": 0, "reason": "football-data key not configured"}
+
+    proposed = db.get_proposed_predictions()
+    now = datetime.now(timezone.utc)
+
+    def _age_days(iso: str) -> float:
+        try:
+            return (now - datetime.fromisoformat(iso.replace("Z", "+00:00"))).days
+        except (ValueError, TypeError, AttributeError):
+            return 0.0
+
+    by_sport: dict[str, list[dict]] = {}
+    for p in proposed:
+        if p.get("sport_key") in LEAGUE_MAP and _age_days(p.get("created_at", "")) >= min_age_days:
+            by_sport.setdefault(p["sport_key"], []).append(p)
+    if not by_sport:
+        return {"resolved": 0, "still_proposed": len(proposed)}
+
+    fd = FootballDataClient(fd_api_key)
+    resolved = 0
+    for sport_key, preds in by_sport.items():
+        comp = LEAGUE_MAP.get(sport_key)
+        if not comp:
+            continue
+        try:
+            parsed = parse_match_results(fd.get_recent_matches(comp, limit=300))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("shadow-resolve: fetch %s échoué : %s", sport_key, exc)
+            continue
+        for eid, market, selection, outcome in _resolve_from_results(preds, parsed):
+            db.update_result(event_id=eid, market=market, selection=selection, result=outcome)
+            resolved += 1
+    logger.info("Résolution shadow (proposed) : %d pick(s) notés via football-data.org", resolved)
+    return {"resolved": resolved, "still_proposed": len(proposed) - resolved}
