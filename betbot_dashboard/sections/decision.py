@@ -182,20 +182,46 @@ def render_over_tab(filters: dict) -> None:
     st.subheader("⚽ Over — spécial buts (jamais Under)")
     st.caption(
         "Scanne **uniquement** les paris **Plus de X buts** (total du match). Le "
-        "signal clé est les **buts attendus** (λ) du modèle : plus il est haut, "
-        "plus l'Over est probable. On ne garde que les Over à **valeur réelle** "
-        "(+EV) — pas juste les probables. Meilleure ligne par match, triée par valeur."
+        "signal clé = les **buts attendus** (λ) du modèle. On ne garde que les Over "
+        "à **valeur réelle** (+EV). Meilleure ligne par match, triée par valeur."
     )
     choice = st.radio("Ligne minimale", ["Toutes", "≥ 1.5", "≥ 2.5", "≥ 3.5"],
                       horizontal=True, index=0, key="over_line_choice")
     min_line = {"Toutes": 0.0, "≥ 1.5": 1.5, "≥ 2.5": 2.5, "≥ 3.5": 3.5}[choice]
 
+    # Self-contained controls (Over-appropriate defaults) so you see + choose
+    # exactly what's scanned — no hidden reliance on the sidebar.
+    c1, c2, c3 = st.columns(3)
+    today_only = c1.checkbox(
+        "📅 Aujourd'hui seulement", value=bool(filters.get("today_only", True)),
+        key="over_today", help="Décoche pour scanner TOUS les matchs à venir.")
+    min_prob = c2.slider(
+        "Proba minimum", 0.30, 0.95, 0.50, 0.05, key="over_minprob",
+        help="Probabilité minimale du modèle pour retenir un Over.")
+    min_edge = c3.slider(
+        "Edge minimum (%)", 0.0, 10.0, 2.0, 0.5, key="over_minedge",
+        help="Valeur minimale vs le marché. 0 = tous les Over probables, sans exiger de value.") / 100.0
+    league = filters.get("sport", "Toutes")
+    st.caption(
+        f"Ligue : **{league}** · petites cotes autorisées (nature de l'Over). "
+        "Change la **ligue** dans la barre latérale de gauche."
+    )
+
     if st.button("⚽ Lancer le scan Over", type="primary", width='stretch'):
-        payload = _payload_from_filters(
-            filters, {"min_edge": 0.02, "min_prob": 0.40, "min_odds": 1.05})
+        payload = {
+            "sport_key": None if league == "Toutes" else league,
+            "today_only": today_only,
+            "min_edge": round(min_edge, 4),
+            "min_prob": min_prob,
+            "min_odds": 1.05,
+        }
         with st.spinner("Récupération des cotes + calcul des buts attendus…"):
             try:
                 st.session_state["over_res"] = api_post("/recommend/manual", json=payload)
+                st.session_state["over_scan_meta"] = {
+                    "league": league, "today_only": today_only,
+                    "min_prob": min_prob, "min_edge": min_edge,
+                }
             except Exception as exc:
                 st.error(f"Erreur : {exc}")
                 st.session_state["over_res"] = None
@@ -214,6 +240,13 @@ def render_over_tab(filters: dict) -> None:
         for p in overs
         if (float(p.get("lambda_home") or 0) + float(p.get("lambda_away") or 0)) > 0
     ]
+    meta = st.session_state.get("over_scan_meta", {})
+    if meta:
+        when = "matchs d'**aujourd'hui**" if meta.get("today_only") else "**tous** les matchs à venir"
+        st.caption(
+            f"Scanné : {when} · ligue **{meta.get('league', 'Toutes')}** · "
+            f"proba ≥ **{meta.get('min_prob', 0):.0%}** · edge ≥ **{meta.get('min_edge', 0):.1%}**."
+        )
     cols = st.columns(3)
     cols[0].metric("Matchs scannés", res.get("n_events_scanned", 0))
     cols[1].metric("Paris Over (+EV)", len(overs))
@@ -222,7 +255,7 @@ def render_over_tab(filters: dict) -> None:
         empty_state(
             "⚽", "Aucun pari Over à valeur pour l'instant",
             "Aucun Over +EV — normal hors-saison, ou le marché price déjà bien les "
-            "totaux. Reviens à la reprise, ou baisse « Edge minimum » dans la sidebar.",
+            "totaux. Reviens à la reprise, ou baisse « Edge minimum » ou « Proba minimum » ci-dessus.",
         )
         return
     st.markdown("### ⚽ Meilleurs Over (triés par valeur)")
