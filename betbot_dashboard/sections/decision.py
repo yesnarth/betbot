@@ -133,8 +133,8 @@ def render_scan_tab(filters: dict, health: dict) -> None:
 def render_safe_fast_tab(filters: dict) -> None:
     st.subheader("🟢 Sûr & rapide — forte probabilité, validation précoce")
     st.caption(
-        "Ne retient que les paris à **forte probabilité** (≥ 72 %) et **+EV**, "
-        "petites cotes autorisées. Priorité aux marchés **⚡ précoces** (Plus de "
+        "Ne retient que les paris à **forte probabilité** (seuil réglable, défaut "
+        "≥ 72 %) et **+EV**, petites cotes autorisées. Priorité aux marchés **⚡ précoces** (Plus de "
         "0.5 / 1.5 but) — gagnés dès qu'assez de buts tombent, **avant la fin**."
     )
     st.info(
@@ -144,12 +144,39 @@ def render_safe_fast_tab(filters: dict) -> None:
         "plusieurs gains. **Mise petit, vise la valeur — pas juste la fréquence.**",
         icon="🎯",
     )
+    # Self-contained controls (safe-preset defaults) so you see + choose exactly
+    # what's scanned — no hidden reliance on the sidebar.
+    c1, c2, c3 = st.columns(3)
+    today_only = c1.checkbox(
+        "📅 Aujourd'hui seulement", value=bool(filters.get("today_only", True)),
+        key="safe_today", help="Décoche pour scanner TOUS les matchs à venir.")
+    min_prob = c2.slider(
+        "Proba minimum", 0.55, 0.95, 0.72, 0.01, key="safe_minprob",
+        help="Seuil « forte proba ». Plus haut = plus sûr mais moins d'options.")
+    min_edge = c3.slider(
+        "Edge minimum (%)", 0.0, 10.0, 1.0, 0.5, key="safe_minedge",
+        help="Valeur minimale vs le marché. 0 = tous les paris probables, sans exiger de value.") / 100.0
+    league = filters.get("sport", "Toutes")
+    st.caption(
+        f"Ligue : **{league}** · petites cotes autorisées (paris sûrs). "
+        "Change la **ligue** dans la barre latérale de gauche."
+    )
+
     if st.button("🟢 Lancer le scan sûr & rapide", type="primary", width='stretch'):
-        payload = _payload_from_filters(
-            filters, {"min_edge": 0.01, "min_prob": 0.72, "min_odds": 1.05})
+        payload = {
+            "sport_key": None if league == "Toutes" else league,
+            "today_only": today_only,
+            "min_edge": round(min_edge, 4),
+            "min_prob": min_prob,
+            "min_odds": 1.05,
+        }
         with st.spinner("Récupération des cotes + calcul…"):
             try:
                 st.session_state["safe_res"] = api_post("/recommend/manual", json=payload)
+                st.session_state["safe_scan_meta"] = {
+                    "league": league, "today_only": today_only,
+                    "min_prob": min_prob, "min_edge": min_edge,
+                }
             except Exception as exc:
                 st.error(f"Erreur : {exc}")
                 st.session_state["safe_res"] = None
@@ -161,6 +188,13 @@ def render_safe_fast_tab(filters: dict) -> None:
         empty_state("🚫", f"Quota Odds API épuisé ({res.get('odds_quota_remaining', '?')} req)",
                     "Recharge une clé dans **🔌 Sources → 🔑 Clé Odds API**.")
         return
+    meta = st.session_state.get("safe_scan_meta", {})
+    if meta:
+        when = "matchs d'**aujourd'hui**" if meta.get("today_only") else "**tous** les matchs à venir"
+        st.caption(
+            f"Scanné : {when} · ligue **{meta.get('league', 'Toutes')}** · "
+            f"proba ≥ **{meta.get('min_prob', 0):.0%}** · edge ≥ **{meta.get('min_edge', 0):.1%}**."
+        )
     picks = res.get("picks", [])
     early = sum(1 for p in picks if is_early_resolving(p.get("selection_code")))
     cols = st.columns(3)
