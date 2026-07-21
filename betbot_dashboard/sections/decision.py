@@ -6,6 +6,7 @@ import streamlit as st
 from betbot_dashboard.api_client import api_get, api_post
 from betbot_dashboard.components.picks import (
     render_picks_table, render_parlays, render_safe_picks, is_early_resolving,
+    render_over_picks, is_over_goals,
 )
 from betbot_dashboard.styles import empty_state
 
@@ -175,6 +176,57 @@ def render_safe_fast_tab(filters: dict) -> None:
         return
     st.markdown("### 🟢 Paris sûrs (triés par probabilité)")
     render_safe_picks(picks)
+
+
+def render_over_tab(filters: dict) -> None:
+    st.subheader("⚽ Over — spécial buts (jamais Under)")
+    st.caption(
+        "Scanne **uniquement** les paris **Plus de X buts** (total du match). Le "
+        "signal clé est les **buts attendus** (λ) du modèle : plus il est haut, "
+        "plus l'Over est probable. On ne garde que les Over à **valeur réelle** "
+        "(+EV) — pas juste les probables. Meilleure ligne par match, triée par valeur."
+    )
+    choice = st.radio("Ligne minimale", ["Toutes", "≥ 1.5", "≥ 2.5", "≥ 3.5"],
+                      horizontal=True, index=0, key="over_line_choice")
+    min_line = {"Toutes": 0.0, "≥ 1.5": 1.5, "≥ 2.5": 2.5, "≥ 3.5": 3.5}[choice]
+
+    if st.button("⚽ Lancer le scan Over", type="primary", width='stretch'):
+        payload = _payload_from_filters(
+            filters, {"min_edge": 0.02, "min_prob": 0.40, "min_odds": 1.05})
+        with st.spinner("Récupération des cotes + calcul des buts attendus…"):
+            try:
+                st.session_state["over_res"] = api_post("/recommend/manual", json=payload)
+            except Exception as exc:
+                st.error(f"Erreur : {exc}")
+                st.session_state["over_res"] = None
+
+    res = st.session_state.get("over_res")
+    if not res:
+        return
+    if res.get("odds_quota_exhausted"):
+        empty_state("🚫", f"Quota Odds API épuisé ({res.get('odds_quota_remaining', '?')} req)",
+                    "Recharge une clé dans **🔌 Sources → 🔑 Clé Odds API**.")
+        return
+    picks = res.get("picks", [])
+    overs = [p for p in picks if is_over_goals(p.get("selection_code"))]
+    lambdas = [
+        float(p.get("lambda_home") or 0) + float(p.get("lambda_away") or 0)
+        for p in overs
+        if (float(p.get("lambda_home") or 0) + float(p.get("lambda_away") or 0)) > 0
+    ]
+    cols = st.columns(3)
+    cols[0].metric("Matchs scannés", res.get("n_events_scanned", 0))
+    cols[1].metric("Paris Over (+EV)", len(overs))
+    cols[2].metric("⌀ Buts attendus", round(sum(lambdas) / len(lambdas), 2) if lambdas else "—")
+    if not overs:
+        empty_state(
+            "⚽", "Aucun pari Over à valeur pour l'instant",
+            "Aucun Over +EV — normal hors-saison, ou le marché price déjà bien les "
+            "totaux. Reviens à la reprise, ou baisse « Edge minimum » dans la sidebar.",
+        )
+        return
+    st.markdown("### ⚽ Meilleurs Over (triés par valeur)")
+    render_over_picks(picks, min_line)
 
 
 def render_local_agent_tab(filters: dict, health: dict) -> None:

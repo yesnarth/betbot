@@ -190,6 +190,58 @@ def render_safe_picks(picks: list[dict]) -> None:
     )
 
 
+def is_over_goals(selection_code: str | None) -> bool:
+    """True for an OVER total-goals line (O05/O15/O25/O35) — never Under, never
+    other markets."""
+    c = (selection_code or "").upper()
+    return c.startswith("O") and c[1:].isdigit()
+
+
+def _over_line(selection_code: str | None) -> float:
+    c = (selection_code or "")
+    try:
+        return int(c[1:]) / 10.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def render_over_picks(picks: list[dict], min_line: float = 0.0) -> None:
+    """OVER-only specialist view: best Over line per match, ranked by VALUE, with
+    the model's expected goals (λ total) — the key Over signal — shown."""
+    overs = [
+        p for p in picks
+        if is_over_goals(p.get("selection_code")) and _over_line(p.get("selection_code")) >= min_line
+    ]
+    if not overs:
+        st.info("Aucun pari **Over** (+EV) sur ces matchs pour la ligne choisie.")
+        return
+    primary, _ = group_picks_by_match(overs, rank_by="edge")   # best Over line/match, by value
+    rows = []
+    for p in primary:
+        lam = float(p.get("lambda_home") or 0) + float(p.get("lambda_away") or 0)
+        rows.append({
+            "Match": f"{p.get('home_team', '?')} — {p.get('away_team', '?')}",
+            "Ligue": p.get("league", ""),
+            "Pari": p.get("selection_label", "?"),
+            "Buts attendus": round(lam, 2) if lam > 0 else None,
+            "Proba": float(p.get("model_prob") or 0) * 100,
+            "Cote": float(p.get("best_odds") or 0),
+            "Edge": float(p.get("value_edge") or 0) * 100,
+            "Fiabilité": _reliability_badge(float(p.get("reliability") or 0)),
+            "Book": p.get("best_book", ""),
+        })
+    df = pd.DataFrame(rows)
+    cfg = {
+        "Buts attendus": st.column_config.NumberColumn(
+            format="%.2f", help="λ total du modèle = buts attendus dans le match. "
+            "Plus il est haut, plus l'Over est probable — LE signal Over."),
+        "Proba": st.column_config.NumberColumn(format="%.1f%%"),
+        "Cote": st.column_config.NumberColumn(format="%.2f"),
+        "Edge": st.column_config.NumberColumn(format="%+.1f%%"),
+    }
+    st.dataframe(df, width='stretch', hide_index=True, column_config=cfg)
+
+
 def render_parlays(parlays: list[dict]) -> None:
     if not parlays:
         return

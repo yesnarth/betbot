@@ -1,6 +1,16 @@
 """Over 0.5 market + early-resolving classification (safe & fast preset)."""
 from betbot.models import poisson_match_probs
-from betbot_dashboard.components.picks import is_early_resolving, group_picks_by_match
+from betbot_dashboard.components.picks import (
+    is_early_resolving, group_picks_by_match, is_over_goals, _over_line,
+)
+
+
+def test_is_over_goals_and_line():
+    for c in ("O05", "O15", "O25", "O35"):
+        assert is_over_goals(c)
+    for c in ("U05", "U25", "1", "X", "2", "1X", "DNB1", "BTTSY", "BTTSN"):
+        assert not is_over_goals(c)          # Under / 1X2 / DC / DNB / BTTS excluded
+    assert _over_line("O05") == 0.5 and _over_line("O25") == 2.5 and _over_line("O35") == 3.5
 
 
 def test_over05_computed_and_monotonic():

@@ -29,6 +29,7 @@ from betbot_dashboard.sections.decision import (
     render_ai_agent_tab,
     render_live_tab,
     render_local_agent_tab,
+    render_over_tab,
     render_safe_fast_tab,
     render_scan_tab,
     render_target_parlay_tab,
@@ -64,6 +65,7 @@ render_tennis_tab = guarded(render_tennis_tab)
 render_basket_tab = guarded(render_basket_tab)
 render_scan_tab = guarded(render_scan_tab)
 render_safe_fast_tab = guarded(render_safe_fast_tab)
+render_over_tab = guarded(render_over_tab)
 render_local_agent_tab = guarded(render_local_agent_tab)
 render_ai_agent_tab = guarded(render_ai_agent_tab)
 render_target_parlay_tab = guarded(render_target_parlay_tab)
@@ -190,10 +192,11 @@ with section_tools:
         "par défaut), diagnostic infra et historique des invocations IA. Utilise "
         "ces outils pour explorer, pas pour ton workflow quotidien."
     )
-    (tab_scan, tab_safe, tab_local, tab_agent, tab_parlay, tab_live,
+    (tab_scan, tab_safe, tab_over, tab_local, tab_agent, tab_parlay, tab_live,
      tab_events, tab_sources, tab_agent_runs) = st.tabs([
         "🎯 Scan manuel",
         "🟢 Sûr & rapide",
+        "⚽ Over (buts)",
         "🧠 Agent local",
         "🤖 Agent IA (Claude)",
         "🎰 Combiné ×1000",
@@ -206,6 +209,8 @@ with section_tools:
         render_scan_tab(filters, health)
     with tab_safe:
         render_safe_fast_tab(filters)
+    with tab_over:
+        render_over_tab(filters)
     with tab_local:
         render_local_agent_tab(filters, health)
     with tab_agent:
