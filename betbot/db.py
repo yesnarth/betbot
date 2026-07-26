@@ -111,6 +111,27 @@ class Database:
             ).scalars().all()
             return [_to_dict(r) for r in rows]
 
+    def team_stats_coverage(self) -> dict:
+        """Lightweight coverage summary for the health panel.
+
+        Returns how many teams / leagues have modelled stats and how many
+        carry an internal ELO rating. This is the signal that actually gates
+        prediction quality: when it's low (e.g. only off-season European
+        leagues loaded), scans of in-season leagues degrade to the consensus
+        fallback.
+        """
+        with session_scope() as s:
+            total = s.execute(select(func.count(TeamStat.team_name))).scalar() or 0
+            with_elo = s.execute(
+                select(func.count(TeamStat.team_name))
+                .where(TeamStat.elo_rating.is_not(None))
+            ).scalar() or 0
+            leagues = s.execute(
+                select(func.count(func.distinct(TeamStat.sport_key)))
+            ).scalar() or 0
+        return {"teams": int(total), "with_elo": int(with_elo),
+                "leagues": int(leagues)}
+
     def update_team_enrichment(
         self,
         team_name: str,

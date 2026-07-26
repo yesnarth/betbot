@@ -26,9 +26,19 @@ def health_sources(_: str = Depends(require_auth)) -> dict:
     import os
     import time
     from datetime import datetime, timezone
-    from betbot.data_sources import club_elo, api_football
+    from betbot.data_sources import api_football
     from betbot.data_sources import xg as xg_source
+    from betbot.db import Database
     s = load_settings()
+
+    # Internal ELO is self-computed from football-data results (no external API).
+    # What actually matters for prediction quality is team-stats COVERAGE: how
+    # many leagues currently have modelled stats. Probe that instead of the
+    # deprecated clubelo.com endpoint (which we no longer depend on).
+    try:
+        _cov = Database(s.database_url).team_stats_coverage()
+    except Exception:  # noqa: BLE001
+        _cov = {"teams": 0, "with_elo": 0, "leagues": 0}
 
     # Per-probe timeout : a single slow source (Understat is notoriously
     # flaky) must not block the whole health endpoint. Each probe runs in
@@ -77,8 +87,21 @@ def health_sources(_: str = Depends(require_auth)) -> dict:
                lambda: bool(s.odds_api_key)),
         _probe("football_data", "important", bool(s.football_data_api_key),
                lambda: bool(s.football_data_api_key)),
-        _probe("club_elo",      "important", True,
-               lambda: len(club_elo.get_all_elo_ratings()) > 100),
+        # Internal ELO + team-stats coverage (replaces the deprecated clubelo.com
+        # probe). OK when at least one league has modelled stats with ELO.
+        {
+            "name": "elo_interne / couverture équipes",
+            "criticality": "important",
+            "status": "ok" if _cov["with_elo"] > 0 else "ko",
+            "ok": _cov["with_elo"] > 0,
+            "latency_ms": 0,
+            "reason": (
+                f"{_cov['teams']} équipes · {_cov['leagues']} ligues · "
+                f"{_cov['with_elo']} avec ELO"
+                if _cov["with_elo"] > 0
+                else "aucune stat d'équipe en base — lance la MAJ des stats"
+            ),
+        },
         _probe("xg",            "optional",  True,
                xg_source.is_available),
         _probe("api_football",  "optional",  bool(os.getenv("API_FOOTBALL_KEY")),
