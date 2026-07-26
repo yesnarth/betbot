@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
-from betbot.api import OddsAPIClient, SPORT_KEYS
+from betbot.api import OddsAPIClient
 from betbot.config import load_settings
 from betbot.db import Database
 from betbot_api.auth import require_auth
@@ -172,7 +172,11 @@ def health(db: Database = Depends(get_db)) -> HealthResponse:
         logger.error("Health DB probe failed: %s", exc)
         raise HTTPException(status_code=503, detail=f"database unreachable: {exc}")
 
-    n_teams = sum(len(db.get_all_team_stats_for_league(k)) for k in SPORT_KEYS)
+    # Total team_stats coverage across ALL leagues (curated European + in-season
+    # via api-football). Was summed over SPORT_KEYS only, so it under-reported
+    # (showed 192 while the in-season refresh had loaded 426) — inconsistent with
+    # the Sources coverage panel.
+    n_teams = db.team_stats_coverage()["teams"]
     bankroll_state = get_state()
 
     # Probe the Odds API quota + active sports — both use the free /v4/sports endpoint

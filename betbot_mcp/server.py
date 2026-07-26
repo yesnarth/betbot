@@ -96,9 +96,7 @@ def list_sports() -> list[dict]:
 def health_check() -> dict:
     """Quick liveness probe — verifies DB and that the Odds API key responds."""
     try:
-        n = sum(
-            len(db().get_all_team_stats_for_league(s)) for s in SPORT_KEYS
-        )
+        n = db().team_stats_coverage()["teams"]  # total across all leagues
         return {
             "ok": True,
             "teams_in_db": n,
