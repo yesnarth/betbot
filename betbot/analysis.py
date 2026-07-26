@@ -111,6 +111,25 @@ _KNOWN_ALIASES: dict[str, str] = {
     'athletic club':         'athletic',
 }
 
+# Direct full-name aliases: normalized Odds name → EXACT stored team_name.
+# Used for clubs that api-football stores under a renamed / abbreviated /
+# differently-transliterated name that token & fuzzy matching can't bridge
+# (verified same club each). Resolved against the current league's cache only,
+# so these never cross-match between leagues. Extend as new misses surface.
+_TEAM_NAME_ALIASES: dict[str, str] = {
+    # Finland
+    'tps turku':             'Turku PS',
+    # Brazil
+    'atletico mineiro':      'Atletico-MG',
+    'clube regatas brasil':  'CRB',          # "Clube de Regatas Brasil"
+    # South Korea (club renamed Sangju Sangmu → Gimcheon Sangmu in 2021)
+    'sangju sangmu':         'Gimcheon Sangmu FC',
+    # China (renames / alternate English names — verified same club)
+    'chengdu rongcheng':     'Chengdu Better City',
+    'zhejiang':              'Hangzhou Greentown',
+    'dalian yingbo':         'Dalian Zhixing',
+}
+
 
 def _normalize_name(name: str) -> str:
     """Lowercase, strip accents, remove common football suffixes/words."""
@@ -180,6 +199,14 @@ def _fuzzy_lookup(name: str, cache: dict):
     # 1. Exact normalized match
     if norm_query in norm_index:
         return cache[norm_index[norm_query]], norm_index[norm_query]
+
+    # 1b. Direct full-name alias → exact stored name (renamed/abbreviated clubs).
+    #     Resolved against THIS cache only, so it can't cross-match leagues.
+    alias_target = _TEAM_NAME_ALIASES.get(norm_query)
+    if alias_target:
+        target_norm = _normalize_name(alias_target)
+        if target_norm in norm_index:
+            return cache[norm_index[target_norm]], norm_index[target_norm]
 
     # 2. Known alias (different names between Odds API and football-data)
     alias_fragment = _KNOWN_ALIASES.get(norm_query)
