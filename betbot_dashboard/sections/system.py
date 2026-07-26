@@ -50,8 +50,70 @@ def render_odds_key_config() -> None:
     st.divider()
 
 
+def render_inseason_coverage() -> None:
+    """Team-stats coverage + one-click refresh of in-season leagues.
+
+    The blended model only runs on leagues that have team_stats. During the
+    European summer break that's near-zero for playable matches, so this lets
+    the user populate the in-season leagues (Scandinavia, Brazil, MLS, Asia…)
+    from api-football on demand — turning consensus-fallback picks into real
+    modelled picks."""
+    with st.expander("📊 Couverture données équipes + ligues d'été (api-football)",
+                     expanded=False):
+        try:
+            cov = api_get("/stats/coverage")
+        except Exception as exc:
+            cov = None
+            st.warning(f"Couverture indisponible : {exc}")
+        if cov:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Équipes", cov.get("teams", 0))
+            c2.metric("Ligues", cov.get("leagues", 0))
+            c3.metric("Avec ELO", cov.get("with_elo", 0))
+        st.caption(
+            "Le modèle blended (Dixon-Coles + xG + ELO) ne tourne QUE sur les "
+            "ligues ayant des stats d'équipe. Les grands championnats européens "
+            "sont en pause l'été → les matchs jouables (Norvège, Suède, Brésil, "
+            "MLS, Corée, Chine, Argentine…) n'ont pas de données et retombent sur "
+            "le **consensus** (bruit). Ce bouton peuple ces ligues depuis "
+            "api-football Pro → **le modèle tourne enfin sur les matchs du jour**."
+        )
+        if st.button("🔄 Rafraîchir les stats des ligues en cours", type="primary",
+                     key="refresh_inseason"):
+            with st.spinner("Récupération des matchs terminés + calcul ELO/attaque-défense "
+                            "(20-60 s)…"):
+                try:
+                    res = api_post("/stats/refresh-inseason", json={})
+                except Exception as exc:
+                    res = None
+                    st.error(f"Erreur : {exc}")
+            if res is not None:
+                if res.get("error"):
+                    st.error(f"❌ {res['error']}")
+                else:
+                    done = res.get("leagues_done", 0)
+                    teams = res.get("teams_upserted", 0)
+                    st.success(
+                        f"✅ {done} ligue(s) peuplée(s), **{teams} équipes** — le "
+                        f"modèle blended tourne maintenant dessus. Relance ton scan."
+                    )
+                    leagues = res.get("leagues", {})
+                    if leagues:
+                        st.dataframe(pd.DataFrame([
+                            {"Ligue": k, "Matchs": v["matches"], "Équipes": v["teams"],
+                             "Moy. dom.": v["home_avg"], "Moy. ext.": v["away_avg"]}
+                            for k, v in leagues.items()
+                        ]), hide_index=True, width='stretch')
+                    skipped = res.get("leagues_skipped", {})
+                    if skipped:
+                        st.caption("Ignorées (trop peu de matchs / erreur) : "
+                                   + ", ".join(f"{k} ({v})" for k, v in skipped.items()))
+    st.divider()
+
+
 def render_sources_tab() -> None:
     render_odds_key_config()
+    render_inseason_coverage()
     st.subheader("🔌 État des sources externes")
     st.caption(
         "Probe en temps réel. Les sources sont groupées par criticité : "

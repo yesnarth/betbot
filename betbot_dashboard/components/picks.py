@@ -131,6 +131,22 @@ def render_picks_table(picks: list[dict]) -> None:
                 "probabilité tombent dans des zones où le modèle est historiquement "
                 "moins précis. Considère une mise réduite ou skip."
             )
+    # Consensus guard : a football pick in "consensus" mode has NO team stats
+    # (uncovered league) → the Dixon-Coles+xG+ELO model never ran, only the
+    # market is used, so its "edge" is noise. Flag it loudly so it isn't bet.
+    if "model_type" in pdf.columns and "sport_key" in pdf.columns:
+        cons_football = int(pdf[
+            (pdf["model_type"] == "consensus")
+            & (pdf["sport_key"].astype(str).str.startswith("soccer"))
+        ].shape[0])
+        if cons_football > 0:
+            st.warning(
+                f"⚠️ **{cons_football} pari(s) foot en mode « consensus »** — sans "
+                "données d'équipe (ligue non couverte). Le modèle Dixon-Coles+xG+ELO "
+                "**ne tourne pas** dessus, seul le marché sert → l'« edge » n'est pas "
+                "fiable. Peuple la ligue via **🔌 Sources → 📊 Couverture données équipes** "
+                "puis relance, ou évite ces paris."
+            )
 
     # Correlated alternatives per match — grouped, clearly labelled.
     n_alt = sum(len(v) for v in alternatives.values())

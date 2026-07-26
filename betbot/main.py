@@ -436,6 +436,16 @@ def main() -> None:
 
     update_team_stats(settings, db, logger)
     health.record_job_fired("update_team_stats:boot")
+    # In-season leagues (api-football) — best-effort at boot so the summer
+    # calendars have team data immediately, not only after the first daily job.
+    try:
+        from betbot.stats_inseason import refresh_inseason_stats
+        _is = refresh_inseason_stats(db)
+        logger.info("Boot in-season stats : %d ligues, %d équipes",
+                    _is.get("leagues_done", 0), _is.get("teams_upserted", 0))
+        health.record_job_fired("inseason_stats:boot")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Boot in-season refresh échoué (non-fatal): %s", exc)
     # Skip the boot scan when auto-scan is disabled (SCAN_HOURS=) — the user
     # explicitly wants to control when Odds API requests happen.
     if settings.scan_hours:
@@ -557,6 +567,23 @@ def main() -> None:
         trigger=CronTrigger(day_of_week="tue", hour=6, minute=0),
         id="enrich_weekly",
         name="enrich",
+        misfire_grace_time=3600,
+    )
+
+    # Stats des ligues EN COURS via api-football — QUOTIDIEN (les ligues d'été
+    # jouent toute la semaine, contrairement au refresh hebdo football-data des
+    # championnats européens). Comble le trou de couverture estival : sans ça le
+    # modèle blended n'a aucune donnée sur les matchs jouables l'été.
+    def _inseason_refresh_job():
+        from betbot.stats_inseason import refresh_inseason_stats
+        result = refresh_inseason_stats(db)
+        logger.info("Refresh in-season : %d ligues, %d équipes",
+                    result.get("leagues_done", 0), result.get("teams_upserted", 0))
+    scheduler.add_job(
+        _wrap("inseason_stats_refresh", _inseason_refresh_job),
+        trigger=CronTrigger(hour=6, minute=15),
+        id="inseason_stats_daily",
+        name="inseason-stats",
         misfire_grace_time=3600,
     )
 

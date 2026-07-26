@@ -161,6 +161,87 @@ SPORT_TO_LEAGUE_ID: dict[str, int] = {
     "soccer_england_championship": 40,
 }
 
+# The Odds API sport_key → api-football league id, for IN-SEASON leagues that
+# football-data.org's free tier does NOT cover (Scandinavian / Asian / South-
+# American summer calendars, plus a few smaller European ones). These play
+# through the European off-season (June-August), so without them the model
+# has NO team data mid-summer and degrades to the market-consensus fallback.
+#
+# Every id below was verified against api-football /leagues (correct country)
+# on 2026-07-26. Leagues whose current season is still thin (just kicked off)
+# are included too — the refresh skips them via its min_matches guard and they
+# activate automatically once they accumulate enough finished matches.
+IN_SEASON_LEAGUE_ID: dict[str, int] = {
+    "soccer_norway_eliteserien": 103,
+    "soccer_sweden_allsvenskan": 113,
+    "soccer_sweden_superettan": 114,
+    "soccer_finland_veikkausliiga": 244,
+    "soccer_brazil_campeonato": 71,        # Brazil Série A
+    "soccer_brazil_serie_b": 72,
+    "soccer_usa_mls": 253,
+    "soccer_mexico_ligamx": 262,
+    "soccer_japan_j_league": 98,           # J1 League
+    "soccer_korea_kleague1": 292,
+    "soccer_china_superleague": 169,
+    "soccer_switzerland_superleague": 207,
+    "soccer_russia_premier_league": 235,
+    "soccer_poland_ekstraklasa": 106,
+    "soccer_denmark_superliga": 119,
+    "soccer_austria_bundesliga": 218,
+    "soccer_belgium_first_div": 144,
+    "soccer_argentina_primera_division": 128,
+    "soccer_chile_campeonato": 265,
+    "soccer_greece_super_league": 197,
+    "soccer_italy_serie_b": 136,
+    "soccer_league_of_ireland": 357,
+    "soccer_spl": 179,                     # Scottish Premiership
+}
+
+
+def get_finished_matches(
+    league_id: int, season: int, max_pages: int = 10,
+) -> list[dict]:
+    """Finished (FT) fixtures for a league+season, in the SAME shape as
+    football_api.parse_match_results: {home_team, away_team, home_goals,
+    away_goals, date}, sorted most-recent first.
+
+    Feeds the exact same downstream pipeline as the football-data path
+    (compute_league_averages → build_team_stats → compute_elo_ratings), so the
+    blended model runs on these leagues with zero model-code duplication.
+    """
+    out: list[dict] = []
+    page = 1
+    while page <= max_pages:
+        params = {"league": league_id, "season": season, "status": "FT"}
+        if page > 1:  # api-football returns 0 results if page=1 is sent explicitly
+            params["page"] = page
+        data = _get("fixtures", params)
+        resp = data.get("response", [])
+        for f in resp:
+            teams = f.get("teams", {})
+            goals = f.get("goals", {})
+            home = (teams.get("home") or {}).get("name")
+            away = (teams.get("away") or {}).get("name")
+            hg, ag = goals.get("home"), goals.get("away")
+            if not home or not away or hg is None or ag is None:
+                continue
+            try:
+                out.append({
+                    "home_team": home,
+                    "away_team": away,
+                    "home_goals": int(hg),
+                    "away_goals": int(ag),
+                    "date": (f.get("fixture") or {}).get("date", ""),
+                })
+            except (ValueError, TypeError):
+                continue
+        paging = data.get("paging", {}) or {}
+        if page >= int(paging.get("total", 1) or 1):
+            break
+        page += 1
+    out.sort(key=lambda m: m["date"], reverse=True)
+    return out
+
 _XG_LEAGUE_CACHE: dict[tuple, list] = {}
 
 

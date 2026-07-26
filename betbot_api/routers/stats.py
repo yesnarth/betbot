@@ -75,6 +75,42 @@ def model_performance(
     return _mp(days=days, only_placed=only_placed)
 
 
+@router.get("/coverage")
+def coverage(
+    db: Database = Depends(get_db),
+    _: str = Depends(require_auth),
+) -> dict:
+    """Team-stats coverage — how many teams / leagues have modelled stats and
+    ELO. Low coverage during the European off-season is why in-season leagues
+    fall back to the consensus model; the /stats/refresh-inseason endpoint fills
+    that gap from api-football."""
+    return db.team_stats_coverage()
+
+
+@router.post("/refresh-inseason")
+@limiter.limit("2/minute")  # each league = 1-2 api-football calls; keep it gentle
+def refresh_inseason(
+    request: Request,
+    body: dict | None = None,
+    db: Database = Depends(get_db),
+    _: str = Depends(require_auth),
+) -> dict:
+    """Populate team_stats for the currently in-season leagues (Scandinavia,
+    Brazil, MLS, Asia…) from api-football, so the blended Dixon-Coles model runs
+    on them instead of the market-consensus fallback.
+
+    Body (all optional):
+      only_keys:   list[str] of sport_keys to restrict to (default = all mapped)
+      min_matches: skip leagues thinner than this (default 30)
+
+    Requires API_FOOTBALL_KEY. Synchronous — typically 20-60 s. Idempotent."""
+    from betbot.stats_inseason import refresh_inseason_stats
+    body = body or {}
+    only = body.get("only_keys") or None
+    min_matches = int(body.get("min_matches", 30))
+    return refresh_inseason_stats(db, only_keys=only, min_matches=min_matches)
+
+
 @router.post("/ab-test")
 @limiter.limit("5/minute")
 def ab_test(
