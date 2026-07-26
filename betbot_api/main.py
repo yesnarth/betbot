@@ -154,7 +154,9 @@ def health(db: Database = Depends(get_db)) -> HealthResponse:
     from time import monotonic
     from sqlalchemy import text
     from betbot.bankroll import get_state
-    from betbot.api import OddsAPIClient, _quota_minimum, _enabled_sport_keys
+    from betbot.api import (
+        OddsAPIClient, _quota_minimum, _enabled_sport_keys, _scan_all_soccer,
+    )
     from betbot.database import session_scope
 
     s = load_settings()
@@ -190,7 +192,16 @@ def health(db: Database = Depends(get_db)) -> HealthResponse:
         quota_remaining = client.quota_remaining
         quota_exhausted = quota_remaining >= 0 and quota_remaining < quota_min
         wishlist = _enabled_sport_keys()
-        active_sports = [k for k in wishlist if k in active]
+        # With SCAN_ALL_SOCCER, a "Toutes" scan reaches EVERY active soccer
+        # league (incl. the summer calendars we now model), not just the curated
+        # wishlist — reflect that so "Sports actifs" isn't under-counted.
+        if _scan_all_soccer():
+            active_sports = sorted(
+                {k for k in active if k.startswith("soccer_")}
+                | {k for k in wishlist if not k.startswith("soccer_") and k in active}
+            )
+        else:
+            active_sports = [k for k in wishlist if k in active]
     except Exception:
         pass
 

@@ -123,6 +123,22 @@ def render_sidebar(
                     "soccer_efl_champ",
                     "soccer_netherlands_eredivisie",
                     "soccer_portugal_primeira_liga",
+                    # Football — ligues d'été (couverture api-football :
+                    # modèle blended complet, actives pendant la pause estivale
+                    # européenne). Voir 🔌 Sources → Couverture données équipes.
+                    "soccer_norway_eliteserien",
+                    "soccer_sweden_allsvenskan",
+                    "soccer_sweden_superettan",
+                    "soccer_finland_veikkausliiga",
+                    "soccer_brazil_campeonato",
+                    "soccer_brazil_serie_b",
+                    "soccer_usa_mls",
+                    "soccer_japan_j_league",
+                    "soccer_korea_kleague1",
+                    "soccer_china_superleague",
+                    "soccer_argentina_primera_division",
+                    "soccer_chile_campeonato",
+                    "soccer_league_of_ireland",
                     # Tennis (auto-skipped si Grand Slam pas en cours)
                     "tennis_atp_aus_open", "tennis_atp_french_open",
                     "tennis_atp_wimbledon", "tennis_atp_us_open",
