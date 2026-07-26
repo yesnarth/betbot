@@ -25,7 +25,6 @@ from betbot.analysis import (
 )
 from betbot.api import SPORT_KEYS
 from betbot.football_api import LEAGUE_MAP
-from betbot.models import poisson_match_probs
 from betbot.resolver import resolve_pending
 from betbot_mcp.context import db, football_client, odds_client, settings
 
@@ -191,52 +190,46 @@ def get_league_averages(sport_key: str) -> dict | None:
 @mcp.tool()
 def predict_match(home_team: str, away_team: str, sport_key: str) -> dict:
     """
-    Run the Dixon-Coles Poisson model for a fixture and return probabilities
-    for home win, draw, away win, and over 2.5 goals.
+    Run the full BLENDED model for a fixture — Dixon-Coles goals + xG + internal
+    ELO + head-to-head — and return probabilities for 1/X/2, Over/Under and BTTS.
+    This is the same model the value scanner uses (not a Poisson-only subset).
 
-    Team names are matched fuzzily — "Inter Milan" resolves to "FC Internazionale Milano",
-    "Arsenal" to "Arsenal FC", etc. Returns {"ok": false, "reason": ...} if either
-    team has no stats in DB even after fuzzy matching.
+    Team names are matched fuzzily (accents, abbreviations, renamed clubs).
+    Works for every league that has team stats — the big European leagues AND
+    the in-season summer leagues loaded from api-football. Returns
+    {"ok": false, "reason": ...} if either team has no stats even after matching.
     """
     from betbot.analysis import _fuzzy_lookup
-    from betbot.models import DEFAULT_HOME_AVG, DEFAULT_AWAY_AVG, TeamStats
+    from betbot.models import blended_match_probs
+    from betbot.shared import load_team_stats_from_db
 
-    rows = db().get_all_team_stats_for_league(sport_key)
-    cache: dict[str, TeamStats] = {
-        r["team_name"]: TeamStats(
-            name=r["team_name"],
-            attack_home=r["attack_home"],
-            defense_home=r["defense_home"],
-            attack_away=r["attack_away"],
-            defense_away=r["defense_away"],
-            matches_analyzed=r["matches_analyzed"],
-        )
-        for r in rows
-    }
+    entry = load_team_stats_from_db(db(), [sport_key]).get(sport_key)
+    if not entry:
+        return {
+            "ok": False, "reason": "team_stats_missing",
+            "missing": [home_team, away_team],
+            "hint": "Aucune stat pour cette ligue — lance la MAJ des stats "
+                    "(europe) ou le refresh in-season (ligues d'été).",
+        }
+    cache = entry["teams"]
     home_obj, home_match = _fuzzy_lookup(home_team, cache)
     away_obj, away_match = _fuzzy_lookup(away_team, cache)
-
     if not home_obj or not away_obj:
         missing = [t for t, r in [(home_team, home_obj), (away_team, away_obj)] if not r]
         return {
-            "ok": False,
-            "reason": "team_stats_missing",
-            "missing": missing,
-            "hint": "Run --update-stats or check the league supports football-data.org",
+            "ok": False, "reason": "team_stats_missing", "missing": missing,
+            "hint": "Nom d'équipe non résolu — vérifie l'orthographe / la ligue.",
         }
 
-    avgs = db().get_league_averages(sport_key) or (DEFAULT_HOME_AVG, DEFAULT_AWAY_AVG)
-    league_home_avg, league_away_avg = avgs
-
-    lambda_home = home_obj.attack_home * away_obj.defense_away * league_home_avg
-    lambda_away = away_obj.attack_away * home_obj.defense_home * league_away_avg
-    lambda_home = max(0.2, min(lambda_home, 5.0))
-    lambda_away = max(0.2, min(lambda_away, 5.0))
-    probs = poisson_match_probs(lambda_home, lambda_away)
-
+    h2h = db().get_head_to_head(sport_key, home_match, away_match)
+    probs = blended_match_probs(
+        home_stats=home_obj, away_stats=away_obj,
+        league_home_avg=entry["home_avg"], league_away_avg=entry["away_avg"],
+        sport_key=sport_key, h2h=h2h,
+    )
     return {
         "ok": True,
-        "model": "dixon_coles_poisson",
+        "model": probs.model or "blended",
         "matched_home": home_match,
         "matched_away": away_match,
         "lambda_home": probs.lambda_home,
@@ -244,7 +237,13 @@ def predict_match(home_team: str, away_team: str, sport_key: str) -> dict:
         "home_win": probs.home_win,
         "draw": probs.draw,
         "away_win": probs.away_win,
+        "over_05": probs.over_05,
+        "over_15": probs.over_15,
         "over_25": probs.over_25,
+        "over_35": probs.over_35,
+        "btts_yes": probs.btts_yes,
+        "elo_home": home_obj.elo_rating,
+        "elo_away": away_obj.elo_rating,
     }
 
 
@@ -1076,7 +1075,7 @@ def compare_two_teams(
     it the function attempts a heuristic lookup across known leagues.
     """
     from betbot.analysis import _fuzzy_lookup, _normalize_name
-    from betbot.data_sources.club_elo import get_team_elo, elo_win_probability
+    from betbot.data_sources.club_elo import elo_win_probability
     from betbot.data_sources import xg as understat
     from betbot.models import blended_match_probs
     from betbot.shared import load_team_stats_from_db
@@ -1089,8 +1088,15 @@ def compare_two_teams(
         "ok": True,
     }
 
-    # 1. Sport key resolution — find which league each team belongs to if not given
-    candidate_keys = [sport_key] if sport_key else [k for k in SPORT_KEYS if k.startswith("soccer_")]
+    # 1. Sport key resolution — find which league each team belongs to if not given.
+    #    Search the big European leagues AND the in-season summer leagues (loaded
+    #    from api-football), so teams outside the curated European set resolve too.
+    if sport_key:
+        candidate_keys = [sport_key]
+    else:
+        from betbot.data_sources.api_football import IN_SEASON_LEAGUE_ID
+        candidate_keys = ([k for k in SPORT_KEYS if k.startswith("soccer_")]
+                          + list(IN_SEASON_LEAGUE_ID.keys()))
     prebuilt = load_team_stats_from_db(db(), candidate_keys)
     found_key, home_stats, away_stats, home_matched, away_matched = None, None, None, None, None
     for sk in candidate_keys:
@@ -1161,9 +1167,11 @@ def compare_two_teams(
             "xg_against":    away_stats.xg_against,
         }
 
-    # 4. ELO comparison
-    elo_h = get_team_elo(home_matched or home_team)
-    elo_a = get_team_elo(away_matched or away_team)
+    # 4. ELO comparison — INTERNAL ELO from team_stats (self-computed; the
+    #    external ClubElo API is deprecated/down and the blended model already
+    #    relies on this internal rating).
+    elo_h = home_stats.elo_rating if home_stats else None
+    elo_a = away_stats.elo_rating if away_stats else None
     out["elo"] = {
         "home":  round(elo_h, 1) if elo_h is not None else None,
         "away":  round(elo_a, 1) if elo_a is not None else None,

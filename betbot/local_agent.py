@@ -355,12 +355,12 @@ def evaluate_picks(
           "tavily_available": bool,
         }
     """
-    # Pre-fetch the global ELO snapshot once (single HTTP call)
-    try:
-        elo_snapshot = club_elo.get_all_elo_ratings()
-    except Exception as exc:
-        logger.warning("Local agent: ELO unavailable (%s)", exc)
-        elo_snapshot = {}
+    # ELO-contradiction rule = redundant safety net: the BLENDED model that
+    # produced these picks already folds internal ELO (from team_stats) into
+    # model_prob. The external ClubElo API is deprecated/down, so we don't call
+    # it (it would just fail + log noise every run) — the rule stays dormant
+    # (elo=None → no-op), avoiding double-counting the ELO signal.
+    elo_snapshot: dict = {}
 
     results: list[PickEvaluation] = []
     n_news_calls = 0
