@@ -33,7 +33,10 @@ from betbot.clv import snapshot_closing_odds
 from betbot.db import Database
 from betbot.enrichment import enrich_team_stats
 from betbot.notifier import EmailNotifier
-from betbot.resolver import resolve_pending, resolve_stale_pending, resolve_proposed_picks
+from betbot.resolver import (
+    resolve_pending, resolve_stale_pending, resolve_proposed_picks,
+    resolve_proposed_picks_api_football,
+)
 from betbot.source_health import check_and_alert as source_health_check
 from betbot.worker_health import WorkerHealthState, start_health_server
 
@@ -647,7 +650,11 @@ def main() -> None:
     # with far more real (proposed) outcomes → it warms up faster.
     def _resolve_proposed_job():
         r = resolve_proposed_picks(db, settings.football_data_api_key)
-        logger.info("Résolution shadow (proposed, mesure modèle) : %s", r)
+        # Also grade the in-season leagues (Scandinavia, Brazil, MLS, Asia…) that
+        # football-data.org doesn't cover — via api-football finished fixtures.
+        r_af = resolve_proposed_picks_api_football(db)
+        logger.info("Résolution shadow (proposed, mesure modèle) : fd=%s | api-football=%s",
+                    r, r_af)
     scheduler.add_job(
         _wrap("resolve_proposed", _resolve_proposed_job),
         trigger=CronTrigger(hour=5, minute=15),
@@ -748,8 +755,10 @@ def main() -> None:
         live = resolve_pending(db, oc)
         stale = resolve_stale_pending(db, settings.football_data_api_key)
         shadow = resolve_proposed_picks(db, settings.football_data_api_key)
-        logger.info("Catch-up démarrage : %s | tardifs : %s | shadow proposés : %s",
-                    live, stale.get("resolved", 0), shadow.get("resolved", 0))
+        shadow_af = resolve_proposed_picks_api_football(db)
+        logger.info("Catch-up démarrage : %s | tardifs : %s | shadow proposés : fd=%s af=%s",
+                    live, stale.get("resolved", 0), shadow.get("resolved", 0),
+                    shadow_af.get("resolved", 0))
     scheduler.add_job(
         _wrap("startup_catchup", _startup_catchup_job),
         trigger="date",                 # no run_date → fires asap after start()

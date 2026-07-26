@@ -8,7 +8,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from betbot.api import OddsAPIClient
 from betbot.config import load_settings
 from betbot.db import Database
-from betbot.resolver import resolve_pending, resolve_stale_pending
+from betbot.resolver import (
+    resolve_pending, resolve_stale_pending, resolve_proposed_picks,
+    resolve_proposed_picks_api_football,
+)
 from betbot_api.auth import require_auth
 from betbot_api.deps import get_db, limiter
 from betbot_api.schemas import (
@@ -182,4 +185,14 @@ def resolve(
     # Fallback: resolve bets too old for the /scores window via football-data.org
     # (so confirmed bets never become permanent 'zombies').
     stale = resolve_stale_pending(db, s.football_data_api_key)
-    return {**live, "stale_resolved": stale.get("resolved", 0)}
+    # Also grade PROPOSED (never-bet) picks whose match has finished — FREE (no
+    # Odds quota), NO bankroll effect (update_result only settles confirmed
+    # picks). Grades European leagues via football-data + in-season leagues via
+    # api-football, so finished picks leave the queue and feed model measurement.
+    graded_fd = resolve_proposed_picks(db, s.football_data_api_key, min_age_days=0)
+    graded_af = resolve_proposed_picks_api_football(db, min_age_days=0)
+    return {
+        **live,
+        "stale_resolved": stale.get("resolved", 0),
+        "proposed_graded": graded_fd.get("resolved", 0) + graded_af.get("resolved", 0),
+    }

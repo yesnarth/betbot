@@ -94,11 +94,14 @@ def render_sidebar(
 
         # ─── Section 2 : Actions rapides ──────────────────────────────────
         st.header("Actions")
-        if st.button("🔄 Résoudre les paris terminés", width='stretch'):
+        if st.button("🔄 Résoudre / noter les matchs terminés", width='stretch',
+                     help="Note aussi les picks proposés dont le match est fini "
+                          "(mesure du modèle, sans toucher à la bankroll)."):
             try:
                 res = api_post("/predictions/resolve")
-                st.success(f"Résolus : {res.get('resolved')} · "
-                           f"En attente : {res.get('still_pending')}")
+                st.success(f"Paris résolus : {res.get('resolved')} · "
+                           f"picks notés : {res.get('proposed_graded', 0)} · "
+                           f"en attente : {res.get('still_pending')}")
             except Exception as exc:
                 st.error(f"Erreur : {exc}")
 

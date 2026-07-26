@@ -377,3 +377,64 @@ def resolve_proposed_picks(db: Database, fd_api_key: str, min_age_days: int = 1)
             resolved += 1
     logger.info("Résolution shadow (proposed) : %d pick(s) notés via football-data.org", resolved)
     return {"resolved": resolved, "still_proposed": len(proposed) - resolved}
+
+
+def resolve_proposed_picks_api_football(
+    db: Database, only_keys: list[str] | None = None, min_age_days: int = 0,
+) -> dict:
+    """Shadow-grade PROPOSED (never-bet) picks for the IN-SEASON leagues that
+    football-data.org doesn't cover (Scandinavia, Brazil, MLS, Asia, South
+    America…) using api-football finished fixtures. Complements
+    ``resolve_proposed_picks`` (which only covers the 9 European leagues), so the
+    model's would-have track record is measured on the summer calendars too —
+    exactly the leagues that are playable during the European off-season.
+
+    Reuses ``_resolve_from_results`` (name-matching + outcome logic), so the
+    team-name aliases benefit grading as well. NO bankroll effect: db.update_result
+    only writes `result` for non-confirmed picks. A graded pick leaves the
+    validation queue (filtered on result IS NULL).
+
+    Requires API_FOOTBALL_KEY. Idempotent (already-graded picks aren't re-fetched
+    since get_proposed_predictions filters result IS NULL)."""
+    import os
+    from datetime import datetime, timezone
+
+    from betbot.data_sources import api_football
+
+    if not os.getenv("API_FOOTBALL_KEY", "").strip():
+        return {"resolved": 0, "reason": "API_FOOTBALL_KEY non configurée"}
+
+    proposed = db.get_proposed_predictions()
+    now = datetime.now(timezone.utc)
+    season = now.year  # summer leagues are calendar-year
+
+    def _age_days(iso: str) -> float:
+        try:
+            return (now - datetime.fromisoformat(iso.replace("Z", "+00:00"))).days
+        except (ValueError, TypeError, AttributeError):
+            return 0.0
+
+    by_sport: dict[str, list[dict]] = {}
+    for p in proposed:
+        sk = p.get("sport_key")
+        if (sk in api_football.IN_SEASON_LEAGUE_ID
+                and (not only_keys or sk in only_keys)
+                and _age_days(p.get("created_at", "")) >= min_age_days):
+            by_sport.setdefault(sk, []).append(p)
+    if not by_sport:
+        return {"resolved": 0, "still_proposed": len(proposed)}
+
+    resolved = 0
+    for sport_key, preds in by_sport.items():
+        league_id = api_football.IN_SEASON_LEAGUE_ID[sport_key]
+        try:
+            parsed = api_football.get_finished_matches(league_id, season)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("shadow-resolve api-football: fetch %s échoué : %s",
+                           sport_key, exc)
+            continue
+        for eid, market, selection, outcome in _resolve_from_results(preds, parsed):
+            db.update_result(event_id=eid, market=market, selection=selection, result=outcome)
+            resolved += 1
+    logger.info("Résolution shadow (proposed) api-football : %d pick(s) notés", resolved)
+    return {"resolved": resolved, "still_proposed": len(proposed) - resolved}
