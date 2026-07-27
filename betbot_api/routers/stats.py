@@ -102,6 +102,23 @@ def weekly_report(
     return send_weekly_report(notif)
 
 
+@router.get("/report-history")
+def report_history(
+    full: bool = Query(default=False),
+    _: str = Depends(require_auth),
+) -> dict:
+    """Archived weekly-report snapshots — the history kept for optimisation.
+    Default returns the compact TREND (one row per report: win rate, ROI, and
+    the calibration gap that should shrink over time). full=true returns every
+    complete snapshot."""
+    from betbot.weekly_report import report_history_trend, load_report_history
+    trend = report_history_trend()
+    out: dict = {"n_reports": len(trend), "trend": trend}
+    if full:
+        out["snapshots"] = load_report_history()
+    return out
+
+
 @router.post("/refresh-inseason")
 @limiter.limit("2/minute")  # each league = 1-2 api-football calls; keep it gentle
 def refresh_inseason(

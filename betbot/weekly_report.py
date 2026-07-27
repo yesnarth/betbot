@@ -12,9 +12,12 @@ actually improving (or not).
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from sqlalchemy import text
 
@@ -25,6 +28,82 @@ logger = logging.getLogger("betbot.weekly_report")
 _POS = "#1f9d6b"
 _NEG = "#d1495b"
 _BUCKETS = [(0.40, 0.50), (0.50, 0.60), (0.60, 0.70), (0.70, 0.80), (0.80, 1.01)]
+
+# Append-only archive of every report snapshot (persisted in the data volume, so
+# it survives restarts + is backed up). Studying the TREND across snapshots —
+# does the calibration gap shrink? which leagues stay green? — is how we learn
+# to optimise the predictor over time.
+_HISTORY_PATH = Path(os.getenv("REPORT_HISTORY_PATH", "data/report_history.jsonl"))
+
+
+def _archive_report(data: dict) -> None:
+    """Append the snapshot to the history log — at most one entry per UTC day
+    (an on-demand re-send updates the day's entry instead of duplicating)."""
+    try:
+        _HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        entry = json.dumps({"date": today, **data}, ensure_ascii=False)
+        lines = []
+        if _HISTORY_PATH.exists():
+            lines = [ln for ln in _HISTORY_PATH.read_text(encoding="utf-8").splitlines()
+                     if ln.strip()]
+        same_day = False
+        if lines:
+            try:
+                same_day = json.loads(lines[-1]).get("date") == today
+            except (ValueError, TypeError):
+                same_day = False
+        if same_day:
+            lines[-1] = entry
+        else:
+            lines.append(entry)
+        _HISTORY_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        logger.info("Report snapshot archived (%s) — %d entries total",
+                    today, len(lines))
+    except Exception as exc:  # noqa: BLE001 — archiving must never break sending
+        logger.warning("report archive failed: %s", exc)
+
+
+def load_report_history() -> list[dict]:
+    """Return every archived snapshot (oldest first)."""
+    if not _HISTORY_PATH.exists():
+        return []
+    out = []
+    for line in _HISTORY_PATH.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            try:
+                out.append(json.loads(line))
+            except (ValueError, TypeError):
+                pass
+    return out
+
+
+def _calib_gap(calib: list[dict]) -> float | None:
+    """Sample-weighted mean of (actual − predicted) across buckets. Closer to 0 =
+    better-calibrated; the KEY trend metric to watch shrink week over week."""
+    num = den = 0.0
+    for c in calib or []:
+        if c.get("n") and c.get("predicted") is not None and c.get("actual") is not None:
+            num += (c["actual"] - c["predicted"]) * c["n"]
+            den += c["n"]
+    return round(num / den, 1) if den else None
+
+
+def report_history_trend() -> list[dict]:
+    """Compact trend across all snapshots — one row per report: the headline
+    numbers + the calibration gap, so the evolution is readable at a glance."""
+    out = []
+    for s in load_report_history():
+        ov = s.get("overall", {})
+        out.append({
+            "date": s.get("date"),
+            "n": ov.get("n"),
+            "win_rate": ov.get("win_rate"),
+            "roi": ov.get("roi"),
+            "pl": ov.get("pl"),
+            "calib_gap": _calib_gap(s.get("calibration")),
+        })
+    return out
 
 
 def _fetch(days: int | None = None) -> list[dict]:
@@ -240,6 +319,7 @@ def _render_email(d: dict) -> str:
 def send_weekly_report(notifier, subject: str | None = None) -> dict:
     """Build the report and email it. Returns {sent, total}."""
     data = build_report_data()
+    _archive_report(data)  # keep the full history for trend analysis
     if data["total"] == 0:
         html = ('<p style="font-family:Arial;">Aucun pronostic noté cette période — '
                 'rien à rapporter. Lance des scans, les résultats arriveront à la fin des matchs.</p>')
