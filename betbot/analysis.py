@@ -287,7 +287,15 @@ def kelly_stake(
 # Value detection
 # ---------------------------------------------------------------------------
 
-def _derive_dc_dnb_odds(event: dict, home: str, away: str) -> dict:
+# A derived DC/DNB "best" price above (median × this) is treated as a stale /
+# placeholder-line outlier and rejected. Normal book-to-book line-shopping on a
+# coherent derived market stays well under +20% over the cross-book median; the
+# fake edges we're killing (e.g. a symmetric 1X2 → DNB=2.00 on an illiquid
+# league) sit 40-60%+ above it, so 1.20 catches them with margin.
+DERIVED_ODDS_OUTLIER_MAX = 1.20
+
+
+def _derive_dc_dnb_odds(event: dict, home: str, away: str) -> tuple[dict, dict]:
     """
     Best available Double Chance / Draw No Bet decimal odds, DERIVED from each
     bookmaker's own 1/X/2 prices. Zero extra API quota — bookmakers construct
@@ -302,8 +310,14 @@ def _derive_dc_dnb_odds(event: dict, home: str, away: str) -> dict:
     quote the FULL 1/X/2 are used (coherent derivation). Returns
     {code: BestOdds} taking the best price per selection across books.
     """
+    from statistics import median
+
     from betbot.models import BestOdds
-    best: dict = {}
+    # Collect EVERY book's derived price per code, so we can both line-shop (best)
+    # AND sanity-check the best against the cross-book consensus (median). On
+    # illiquid leagues a single stale/placeholder book (symmetric 1X2 → DNB=2.00)
+    # would otherwise set an outlier "best" and invent a fake edge.
+    prices: dict[str, list[tuple[float, str]]] = {}
     for bm in event.get("bookmakers", []):
         o: dict[str, float] = {}
         for mkt in bm.get("markets", []):
@@ -337,10 +351,16 @@ def _derive_dc_dnb_odds(event: dict, home: str, away: str) -> dict:
         for code, price in derived.items():
             if price <= 1.0:
                 continue
-            price = round(price, 3)
-            if code not in best or price > best[code].price:
-                best[code] = BestOdds(outcome_name=code, price=price, bookmaker=title)
-    return best
+            prices.setdefault(code, []).append((round(price, 3), title))
+
+    best: dict = {}
+    consensus: dict = {}
+    for code, lst in prices.items():
+        bp, bb = max(lst, key=lambda x: x[0])
+        best[code] = BestOdds(outcome_name=code, price=bp, bookmaker=bb)
+        consensus[code] = {"median": round(median(p for p, _ in lst), 3),
+                           "n": len(lst)}
+    return best, consensus
 
 
 def detect_value_bets(
@@ -578,14 +598,20 @@ def detect_value_bets(
             # each book's own 1X2 (vig-inclusive). They add lower-variance options
             # and ideal favorite legs for combos at ZERO extra quota. Skipped for
             # tennis/basketball (no draw) and when 1/X/2 wasn't fully produced.
-            if derive_dc_dnb and not is_tennis and not is_basketball:
+            # Derived DC/DNB amplify model error on leagues WITHOUT team stats
+            # (the consensus fallback): the model's disagreement with a coherent
+            # market is just noise there, and the derivation turns it into a large
+            # phantom edge (e.g. a symmetric 1X2 → DNB=2.0). Only derive when the
+            # blended model actually had team data for this match.
+            _is_consensus = str(probs.model or "").startswith("consensus")
+            if derive_dc_dnb and not is_tennis and not is_basketball and not _is_consensus:
                 h2h_members = {m["code"]: m for m in groups.get(("h2h", None), [])}
                 if {"1", "X", "2"} <= h2h_members.keys():
                     p1 = h2h_members["1"]["model_prob"]
                     px = h2h_members["X"]["model_prob"]
                     p2 = h2h_members["2"]["model_prob"]
                     win_no_draw = p1 + p2
-                    dc_dnb_odds = _derive_dc_dnb_odds(event, home, away)
+                    dc_dnb_odds, dc_dnb_cons = _derive_dc_dnb_odds(event, home, away)
                     derived_specs = [
                         ("1X",   "Double chance 1X (domicile ou nul)",       "double_chance", p1 + px),
                         ("X2",   "Double chance X2 (nul ou extérieur)",      "double_chance", px + p2),
@@ -603,13 +629,22 @@ def detect_value_bets(
                         # floor, not min_book_odds which is tuned for 1X2/totals.
                         if best is None or best.price < derived_min_odds:
                             continue
+                        # Fake-edge guard for DERIVED markets on illiquid leagues:
+                        # a single stale/placeholder book (symmetric 1X2 → DNB=2.00)
+                        # would set an outlier "best" and invent a huge phantom edge.
+                        # Require ≥2 books to derive coherently, and reject a best
+                        # price that's an outlier above the cross-book median.
+                        cons = dc_dnb_cons.get(code)
+                        if cons is None or cons["n"] < 2:
+                            continue
+                        if best.price > cons["median"] * DERIVED_ODDS_OUTLIER_MAX:
+                            continue
                         if max_book_odds > 0.0 and best.price > max_book_odds:
                             continue
                         if underdog_odds > 0.0 and best.price >= underdog_odds and model_prob < underdog_min_prob:
                             continue
-                        # No no-vig gate here: the price is already the book's own
-                        # vig-inclusive 1X2 recombined, so there is no separate
-                        # consensus to beat — the edge below is the honest EV.
+                        # Edge is computed on the median-consistent best price —
+                        # the outlier filter above is what keeps it honest.
                         edge = round(model_prob * best.price - 1.0, 4)
                         if edge < derived_min_edge:
                             continue
