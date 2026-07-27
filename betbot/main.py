@@ -655,10 +655,13 @@ def main() -> None:
         r_af = resolve_proposed_picks_api_football(db)
         logger.info("Résolution shadow (proposed, mesure modèle) : fd=%s | api-football=%s",
                     r, r_af)
+    # Every 3 hours (not just once daily) so a pick is graded within a few hours
+    # of its match finishing — the user asked to see success/failure promptly
+    # after matches end. FREE (football-data + api-football, no Odds quota).
     scheduler.add_job(
         _wrap("resolve_proposed", _resolve_proposed_job),
-        trigger=CronTrigger(hour=5, minute=15),
-        id="resolve_proposed_daily",
+        trigger=CronTrigger(hour="*/3", minute=15),
+        id="resolve_proposed_frequent",
         name="resolve-proposed",
         misfire_grace_time=3600,
     )
