@@ -705,6 +705,24 @@ def main() -> None:
         misfire_grace_time=3600,
     )
 
+    # Weekly performance report by email — Monday 07:00 UTC (after Sunday's
+    # calibrator retrain). Pure measurement, no bankroll effect: win rate, ROI,
+    # calibration (predicted vs actual) so the user tracks whether the predictor
+    # is actually improving week over week.
+    def _weekly_report_job():
+        from betbot.notifier import EmailNotifier
+        from betbot.weekly_report import send_weekly_report
+        notif = EmailNotifier(settings.gmail_user, settings.gmail_app_password,
+                              settings.gmail_recipient)
+        logger.info("Weekly report: %s", send_weekly_report(notif))
+    scheduler.add_job(
+        _wrap("weekly_report", _weekly_report_job),
+        trigger=CronTrigger(day_of_week="mon", hour=7, minute=0),
+        id="weekly_report_email",
+        name="weekly-report",
+        misfire_grace_time=3600,
+    )
+
     # Tennis ELO refresh — every Monday 05:00 UTC. Pulls latest ATP/WTA matches
     # from Sackmann and rebuilds player ratings. Fast (~6k matches in <1s).
     from betbot.tennis_bootstrap import refresh_ratings as _refresh_tennis_ratings

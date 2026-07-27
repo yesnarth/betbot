@@ -87,6 +87,21 @@ def coverage(
     return db.team_stats_coverage()
 
 
+@router.post("/weekly-report")
+@limiter.limit("3/minute")
+def weekly_report(
+    request: Request,
+    _: str = Depends(require_auth),
+) -> dict:
+    """Build the weekly performance report and email it now (same content as the
+    scheduled Monday 07:00 UTC send). Pure measurement — no bankroll effect."""
+    from betbot.notifier import EmailNotifier
+    from betbot.weekly_report import send_weekly_report
+    s = load_settings()
+    notif = EmailNotifier(s.gmail_user, s.gmail_app_password, s.gmail_recipient)
+    return send_weekly_report(notif)
+
+
 @router.post("/refresh-inseason")
 @limiter.limit("2/minute")  # each league = 1-2 api-football calls; keep it gentle
 def refresh_inseason(
