@@ -20,6 +20,7 @@ from betbot.orm_models import (
     HeadToHead,
     LeagueAverage,
     Prediction,
+    ReportSnapshot,
     TeamStat,
 )
 
@@ -60,6 +61,12 @@ class Database:
             Base.metadata.create_all(self._engine)
             logger.info("Schéma initialisé via Base.metadata (greenfield) : %s",
                         self._engine.url.render_as_string(hide_password=True))
+        elif not ins.has_table("report_snapshots"):
+            # Table added after the initial schema (report layer). Create just
+            # this one — idempotent, and reaches alembic-managed prod DBs without
+            # needing a migration for a pure-additive, self-contained table.
+            ReportSnapshot.__table__.create(self._engine, checkfirst=True)
+            logger.info("Table report_snapshots créée")
 
     # ------------------------------------------------------------------
     # Team stats
@@ -131,6 +138,45 @@ class Database:
             ).scalar() or 0
         return {"teams": int(total), "with_elo": int(with_elo),
                 "leagues": int(leagues)}
+
+    # ------------------------------------------------------------------
+    # Report snapshots (weekly-performance history — the report layer)
+    # ------------------------------------------------------------------
+
+    def upsert_report_snapshot(
+        self, snapshot_date: str, data: dict, *,
+        total: int, win_rate: float | None, roi: float | None,
+        pl: float | None, calib_gap: float | None, period: str | None,
+    ) -> None:
+        """Store one report snapshot per day (update the day's row if it exists)."""
+        with session_scope() as s:
+            row = s.execute(
+                select(ReportSnapshot).where(ReportSnapshot.snapshot_date == snapshot_date)
+            ).scalar_one_or_none()
+            if row is None:
+                row = ReportSnapshot(snapshot_date=snapshot_date)
+                s.add(row)
+            row.generated_at = _utcnow_iso()
+            row.period = period
+            row.total = int(total or 0)
+            row.win_rate = win_rate
+            row.roi = roi
+            row.pl = pl
+            row.calib_gap = calib_gap
+            row.data = data
+
+    def get_report_snapshots(self) -> list[dict]:
+        """All archived report snapshots, oldest first (full `data` included)."""
+        with session_scope() as s:
+            rows = s.execute(
+                select(ReportSnapshot).order_by(ReportSnapshot.snapshot_date)
+            ).scalars().all()
+            return [{
+                "date": r.snapshot_date, "generated_at": r.generated_at,
+                "period": r.period, "total": r.total, "win_rate": r.win_rate,
+                "roi": r.roi, "pl": r.pl, "calib_gap": r.calib_gap,
+                "data": r.data,
+            } for r in rows]
 
     def update_team_enrichment(
         self,

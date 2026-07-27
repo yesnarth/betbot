@@ -287,6 +287,34 @@ class BankrollEntry(Base):
     note: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
 
+class ReportSnapshot(Base):
+    """
+    One archived weekly-performance report per day (upserted, so an on-demand
+    re-send updates the day's row instead of duplicating). The key trend metrics
+    are stored as indexed columns for cheap SQL analysis; the full report dict is
+    kept in `data` (JSON) for detail.
+
+    Studying the trend across snapshots — does `calib_gap` shrink? which
+    segments stay green? — is how we learn to optimise the predictor over time.
+    The raw picks live in `predictions`; this table is the report layer on top.
+    """
+    __tablename__ = "report_snapshots"
+    __table_args__ = (
+        Index("ix_report_snapshots_date", "snapshot_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_date: Mapped[str] = mapped_column(String(10), nullable=False, unique=True)  # YYYY-MM-DD
+    generated_at: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)
+    period: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    win_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    roi: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    pl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    calib_gap: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    data: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
 class IdempotencyKey(Base):
     """
     Client-provided idempotency keys for mutating endpoints.
