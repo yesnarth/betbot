@@ -65,10 +65,10 @@ class Settings:
     # injouable, et se lit en TAUX DE RÉUSSITE (best_odds vaut 0, un ROI n'y a
     # aucun sens).
     blind_channel: bool = True
-    blind_min_prob: float = 0.70
-    blind_max_per_match: int = 3
+    blind_min_prob: float = 0.0
+    blind_max_per_match: int = 4
     blind_include_half_line: bool = False
-    blind_top_n: int = 0          # 0 = pas de plafond
+    blind_top_n: int = 0          # plafond de MATCHS ; 0 = tous
     novig_required: bool = False        # drop a pick when no-vig consensus is unavailable
     # Derived markets (Double Chance + Draw No Bet), computed from the 1X2 we
     # already fetch — 0 extra quota. More options + lower-variance combo legs.
@@ -131,13 +131,15 @@ def load_settings() -> Settings:
     # chose tant que ce canal n'a pas son propre calibrateur : les probabilités
     # sont BRUTES ici (pas de rétrécissement vers le marché), donc plus sûres
     # d'elles. Les premières semaines mesurent, elles ne promettent pas.
-    blind_min_prob    = float(os.getenv("BLIND_MIN_PROB", "0.70"))
-    blind_max_per_match = int(os.getenv("BLIND_MAX_PER_MATCH", "3"))
+    blind_min_prob    = float(os.getenv("BLIND_MIN_PROB", "0.0"))
+    blind_max_per_match = int(os.getenv("BLIND_MAX_PER_MATCH", "4"))
     # « Plus de 0,5 but » vaut ~0,91 partout : elle ne distingue aucun
     # match et raflait la quasi-totalité des pronostics. Écartée par
     # défaut, réactivable sans reconstruction d'image.
     blind_include_half_line = os.getenv("BLIND_INCLUDE_HALF_LINE", "0") == "1"
-    blind_top_n       = int(os.getenv("BLIND_TOP_N", "0"))
+    # Plafond de MATCHS (0 = tous), jamais de pronostics : couper dans la
+    # liste à plat rendrait des affiches à moitié analysées.
+    blind_top_n       = int(os.getenv("BLIND_TOP_MATCHES", os.getenv("BLIND_TOP_N", "0")))
     min_book_odds     = float(os.getenv("MIN_BOOK_ODDS", "1.50"))
     top_bets          = int(os.getenv("TOP_BETS", "10"))
     min_combos        = int(os.getenv("MIN_COMBOS", "3"))

@@ -146,8 +146,12 @@ def test_one_match_does_not_flood_the_list(patched):
     # Sans plafond : au plus une option par famille, jamais huit variantes de
     # totals corrélées entre elles.
     assert len(toutes) == len({b.market.split("_")[0] for b in toutes})
-    # Avec le plafond par défaut, le bulletin reste court.
-    assert len(detect_blind_picks({"soccer_epl": [_event()]}, min_prob=0.0)) == 3
+    # Avec le plafond par défaut, le bulletin reste court. Le nombre est lu
+    # dans la signature plutôt que recopié : ce test figeait 3, le défaut est
+    # passé à 4, et il a cassé pour une raison qui n'était pas un défaut.
+    import inspect
+    defaut = inspect.signature(detect_blind_picks).parameters["max_per_match"].default
+    assert len(detect_blind_picks({"soccer_epl": [_event()]}, min_prob=0.0)) == defaut
 
 
 def test_the_floor_is_the_only_selection_criterion(patched):
@@ -237,3 +241,50 @@ def test_the_winner_call_survives_the_default_cap(patched):
     picks = detect_blind_picks({"soccer_epl": [_event()]}, min_prob=0.70)
     assert any(b.market == "h2h" for b in picks), \
         [(b.market, b.model_prob) for b in picks]
+
+
+# ---------------------------------------------------------------------------
+# Couverture : un pronostic par match, toujours
+# ---------------------------------------------------------------------------
+
+def test_every_modelled_match_gets_its_pronostic(patched):
+    """Sa précision du 2026-09-13 : « s'il y a 100 matchs à jouer, tu devrais
+    pouvoir me donner 100 pronostics ». Aucun plancher de probabilité ne doit
+    pouvoir faire disparaître une affiche — un plancher supprime des MATCHS
+    quand il devrait au pire supprimer des options."""
+    patched(_probs(home=0.34, draw=0.33, away=0.33))   # match parfaitement ouvert
+    evts = [dict(_event(f"e{i}")) for i in range(100)]
+    picks = detect_blind_picks({"soccer_epl": evts})
+    assert len({b.event_id for b in picks}) == 100
+    # « au moins 3 ou 4 options de paris par match »
+    for eid in {b.event_id for b in picks}:
+        assert len([b for b in picks if b.event_id == eid]) >= 3
+
+
+def test_capping_keeps_whole_matches_never_half_of_one(patched):
+    """« À la rigueur, tu pourrais sélectionner les 100 matchs les plus
+    privilégiés. » Trancher dans la liste à plat laisserait des affiches avec
+    deux options sur quatre — à moitié analysées, donc pires qu'absentes."""
+    patched(_probs())
+    evts = [dict(_event(f"e{i}")) for i in range(10)]
+    picks = detect_blind_picks({"soccer_epl": evts}, top_matches=3)
+    par_match = {}
+    for b in picks:
+        par_match.setdefault(b.event_id, []).append(b)
+    assert len(par_match) == 3
+    tailles = {len(v) for v in par_match.values()}
+    assert len(tailles) == 1, f"matchs tronqués : {tailles}"
+
+
+def test_the_kept_matches_are_the_most_confident_ones(monkeypatch):
+    """« les plus privilégiés » = ceux sur lesquels le modèle est le plus sûr,
+    pas les premiers rencontrés."""
+    import betbot.blind as blind
+    sûrs = {"e_sur"}
+    monkeypatch.setattr(
+        blind, "_compute_probs",
+        lambda h, a, e, *args, **k: _probs(home=0.92, draw=0.05, away=0.03)
+        if e.get("id") in sûrs else _probs(home=0.34, draw=0.33, away=0.33))
+    evts = [dict(_event("e_ouvert")), dict(_event("e_sur")), dict(_event("e_ouvert2"))]
+    picks = blind.detect_blind_picks({"soccer_epl": evts}, top_matches=1)
+    assert {b.event_id for b in picks} == {"e_sur"}

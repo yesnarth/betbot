@@ -806,10 +806,15 @@ d'équipe api-football, xG, ELO, confrontations directes, blessures, fatigue.
 Les matchs sans statistiques d'équipe sont **écartés**, pas repliés sur le
 consensus : un pronostic consensus ne fait que recopier le bookmaker.
 
-Les options proposées peuvent être **injouables** (Over 0,5, BTTS, ligne 1,5 —
-que Betclic ne cote pas). C'est voulu : l'indisponibilité au pari ne dit rien
-sur la probabilité que l'événement se produise. Tu places ce que tu peux, au
-prix que tu vois chez ton book."""
+Les options proposées peuvent être **injouables** (BTTS, ligne 1,5 — que
+Betclic ne cote pas). C'est voulu : l'indisponibilité au pari ne dit rien sur la
+probabilité que l'événement se produise. Tu places ce que tu peux, au prix que
+tu vois chez ton book.
+
+**Tous les matchs disponibles sont couverts**, chacun avec 3 à 4 options — une
+par famille de marché : qui gagne, combien de buts, les deux équipes marquent,
+double chance. Aucun plancher de probabilité ne fait disparaître une affiche ;
+la probabilité affichée te laisse juger."""
 
 _BLIND_WARNING = """**Période de mesure, pas de promesse.** Le 74,7 % de
 réussite mesuré au-dessus de 0,70 l'a été sur des picks passés par les portes
@@ -841,23 +846,46 @@ def render_blind_tab(filters: dict) -> None:
         )
         return
 
-    picks.sort(key=lambda r: r.get("model_prob") or 0, reverse=True)
-    c = st.columns(3)
-    c[0].metric("Pronostics", len(picks))
-    c[1].metric("Proba moyenne",
-                f"{100 * sum(p.get('model_prob') or 0 for p in picks) / len(picks):.1f} %")
-    c[2].metric("Proba max", f"{100 * max(p.get('model_prob') or 0 for p in picks):.1f} %")
+    # GROUPÉ PAR MATCH, pas en liste classée par confiance.
+    #
+    # Sa demande : « donner les pronostics pour chacun des matchs de la journée,
+    # ainsi pour chaque match tu pourras donner 3 ou 4 options. J'ai pas besoin
+    # de combinaison, je ferai mes combinaisons moi-même dans la liste. »
+    # Une liste triée par probabilité mélange les matchs et oblige à chercher ;
+    # groupée, elle se lit comme un bulletin et se compose à la main.
+    matchs: dict[tuple, list[dict]] = {}
+    for p in picks:
+        cle = (p.get("commence_time") or "", p.get("home_team"), p.get("away_team"))
+        matchs.setdefault(cle, []).append(p)
 
-    st.dataframe(
-        [{
-            "Proba": f"{100 * (p.get('model_prob') or 0):.1f} %",
-            "Match": f"{p.get('home_team')} – {p.get('away_team')}",
-            "Pari": p.get("selection"),
-            "Marché": p.get("market"),
-            "Coup d'envoi": (p.get("commence_time") or "")[:16].replace("T", " "),
-            "Modèle": p.get("model_type"),
-        } for p in picks],
-        width="stretch", hide_index=True,
+    c = st.columns(3)
+    c[0].metric("Matchs", len(matchs))
+    c[1].metric("Options", len(picks))
+    c[2].metric("Options par match", f"{len(picks) / max(len(matchs), 1):.1f}")
+
+    for (ct, home, away), options in sorted(matchs.items()):
+        options.sort(key=lambda r: r.get("model_prob") or 0, reverse=True)
+        heure = ct[:16].replace("T", " ") if ct else "horaire inconnu"
+        st.markdown(f"**{home} – {away}**  ·  {heure}")
+        st.dataframe(
+            [{
+                "Proba": f"{100 * (o.get('model_prob') or 0):.1f} %",
+                "Pari": o.get("selection"),
+                "Marché": o.get("market"),
+                "Modèle": o.get("model_type"),
+            } for o in options],
+            width="stretch", hide_index=True,
+        )
+
+    st.warning(
+        "**Une option de pari n'est pas une jambe de combiné.** Les lignes d'un "
+        "même bloc décrivent le MÊME match sous plusieurs angles : elles se "
+        "recouvrent, et certaines s'excluent. « Victoire domicile » et « 1X » "
+        "gagnent souvent ensemble — les combiner ne multiplie pas tes chances, "
+        "ça les concentre sur un seul résultat tout en payant deux marges. "
+        "Pour composer un combiné, prends **une seule option par bloc**, sur "
+        "des matchs différents.",
+        icon="⚠️",
     )
     st.caption(
         "Aucune colonne de cote : ce canal n'en consulte pas. Ses statistiques "

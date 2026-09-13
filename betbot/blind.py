@@ -140,17 +140,48 @@ def _btts_options(p: MatchProbs) -> list[tuple]:
 def detect_blind_picks(
     events_by_sport: dict[str, list[dict]],
     prebuilt_stats_by_sport: dict[str, dict] | None = None,
-    min_prob: float = 0.70,
-    max_per_match: int = 3,
+    min_prob: float = 0.0,
+    max_per_match: int = 4,
     include_half_line: bool = False,
+    top_matches: int = 0,
 ) -> list[ValueBet]:
     """
     Pronostics purement statistiques, un par match par défaut.
 
-    max_per_match limite le nombre d'options retenues sur un même match. À 1, on
-    garde la plus probable — sinon un seul match trusterait la liste avec ses
-    huit variantes de totals, toutes corrélées : ce ne sont pas huit pronostics,
-    c'est le même énoncé huit fois.
+    UN PRONOSTIC PAR MATCH, TOUJOURS — la couverture prime sur la sélection.
+
+    Sa précision du 2026-09-13 : « s'il y a 100 matchs à jouer, tu devrais
+    pouvoir me donner 100 pronostics (avec au moins 3 ou 4 options de paris par
+    match). À la rigueur, tu pourrais sélectionner les 100 matchs les plus
+    privilégiés. »
+
+    D'où `min_prob=0.0` PAR DÉFAUT : aucun plancher de probabilité ne doit
+    pouvoir faire disparaître un match de la liste. Un plancher, même bas,
+    supprime des affiches entières au lieu de supprimer des options — et c'est
+    exactement ce qui rendait le bulletin inutilisable. Le tri par confiance
+    n'ordonne plus que les options À L'INTÉRIEUR d'un match.
+
+    Réduire la liste, quand il le faut, se fait par `top_matches` : on garde les
+    N matchs les plus sûrs ENTIERS, avec toutes leurs options. Couper dans le
+    nombre de pronostics plutôt que dans le nombre de matchs rendrait des
+    affiches à moitié analysées.
+
+    Sa demande du 2026-09-13 : « ce qui m'aurait plus accroché, c'est de te voir
+    donner les pronostics pour chacun des matchs de la journée dont tu disposes,
+    ainsi pour chaque match tu pourras donner 3 ou 4 options. J'ai pas besoin de
+    combinaison, je ferai mes combinaisons moi-même dans la liste. »
+
+    D'où un plancher BAS (0,50 : une option moins probable que son contraire
+    n'est pas un pronostic) plutôt qu'un plancher sélectif à 0,70. Le tri par
+    confiance ne sert plus à écarter des matchs, seulement à ordonner les
+    options À L'INTÉRIEUR d'un match. Un match dont aucune option ne dépassait
+    0,70 disparaissait entièrement de la liste — c'est précisément ce qui
+    rendait le bulletin inutilisable pour composer soi-même.
+
+    max_per_match limite le nombre d'options retenues sur un même match : sinon
+    un seul match trusterait la liste avec ses variantes de totals, toutes
+    corrélées entre elles — ce ne sont pas huit pronostics, c'est le même énoncé
+    huit fois.
     """
     picks: list[ValueBet] = []
     n_consensus = 0
@@ -250,10 +281,23 @@ def detect_blind_picks(
                     channel=CHANNEL,
                 ))
 
+    # PLAFOND PAR MATCH, jamais par pronostic. Trancher dans la liste à plat
+    # laisserait des affiches avec deux options sur quatre — à moitié
+    # analysées, ce qui est pire qu'absentes.
+    if top_matches > 0:
+        meilleur: dict[str, float] = {}
+        for b in picks:
+            if b.model_prob > meilleur.get(b.event_id, 0.0):
+                meilleur[b.event_id] = b.model_prob
+        gardes = {e for e, _ in sorted(meilleur.items(), key=lambda kv: -kv[1])[:top_matches]}
+        picks = [b for b in picks if b.event_id in gardes]
+
     picks.sort(key=lambda b: b.model_prob, reverse=True)
+    n_matchs = len({b.event_id for b in picks})
     logger.info(
         "Canal aveugle : %d match(s) modélisé(s), %d écarté(s) (repli consensus) "
-        "-> %d pronostic(s) >= %.0f%%",
-        n_modelled, n_consensus, len(picks), min_prob * 100,
+        "-> %d match(s) couvert(s), %d option(s) (%.1f par match)",
+        n_modelled, n_consensus, n_matchs, len(picks),
+        len(picks) / max(n_matchs, 1),
     )
     return picks

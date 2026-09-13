@@ -514,9 +514,8 @@ def run_daily_scan(
             min_prob=settings.blind_min_prob,
             max_per_match=settings.blind_max_per_match,
             include_half_line=settings.blind_include_half_line,
+            top_matches=settings.blind_top_n,
         )
-        if settings.blind_top_n > 0:
-            blind_picks = blind_picks[:settings.blind_top_n]
         for bet in blind_picks:
             db.save_prediction(
                 event_id=bet.event_id, sport_key=bet.sport_key,
