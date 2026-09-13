@@ -35,7 +35,22 @@ logger = logging.getLogger("betbot.ml")
 
 # How many resolved bets we want before we trust a calibrator (per segment, and
 # for the global map). Below this the isotonic fit is high-variance.
-MIN_SAMPLES_TO_TRUST = 50
+# Isotonic regression is NON-PARAMETRIC: it fits a step function with as many
+# steps as the data suggests, and on a small sample those steps land on 0.0 and
+# 1.0 at the extremes. That is not a corner case here, it is the failure that
+# already happened twice on this very dataset:
+#
+#   * fitted on 114 clean samples, the global map sends 0.80 -> 0.997 — the
+#     certainty-fabrication that produced 59 picks at model_prob = 1.000;
+#   * fitted on the polluted set, the football_h2h segment flattened EVERYTHING
+#     above 0.496 to 0.529, which made the 0.70 confidence floor unreachable on
+#     1X2 and silently reduced the bot to derived markets alone (h2h: 2 picks
+#     against 38 draw-no-bet and 32 double-chance).
+#
+# 50 resolved bets cannot support this estimator. Several hundred can. Until
+# then the honest behaviour is to pass the model's own probability through
+# untouched — see `calibrate()` — rather than to correct it with noise.
+MIN_SAMPLES_TO_TRUST = 300
 
 # Derived markets (Double Chance / Draw No Bet) are computed FROM the already
 # calibrated 1X2 — they are never calibrated themselves at scan time. Training a
@@ -75,6 +90,24 @@ def segment_for(sport_key: str | None, market: str | None) -> str:
 # Training-data collection
 # ---------------------------------------------------------------------------
 
+# Probabilities this close to 0 or 1 are not model output, they are damage.
+# The 05/08-10/08 calibration bug stamped model_prob = 1.000 on 59 picks; left
+# in the training set they would teach the next calibrator that "certainty
+# means a coin flip", and the corruption would outlive its own fix.
+_DEGENERATE_EPS = 1e-3
+
+# Hard bounds on anything the calibrator is allowed to output. A probability of
+# 0 or 1 is a claim no statistical fit on a few hundred football matches can
+# support, and it is the shape the group renormalisation turns into a fabricated
+# certainty.
+_CAL_OUTPUT_MIN = 0.02
+_CAL_OUTPUT_MAX = 0.98
+
+
+def _is_usable(prob: float) -> bool:
+    return _DEGENERATE_EPS < float(prob) < 1.0 - _DEGENERATE_EPS
+
+
 def _collect_training_data() -> list[tuple[float, int]]:
     """Pull (model_prob, won_or_lost) pairs from resolved predictions (all
     segments pooled). Used for the resolved-bet COUNT and the global fit.
@@ -86,9 +119,13 @@ def _collect_training_data() -> list[tuple[float, int]]:
                 Prediction.result.is_not(None),
                 Prediction.result.in_(("win", "loss")),
                 ~Prediction.market.in_(_DERIVED_MARKETS),
+                # Belt and braces: `_is_usable` already drops degenerate
+                # probabilities, but a quarantined pick must never train the
+                # model that produced it.
+                Prediction.excluded_reason.is_(None),
             )
         ).all()
-    return [(float(p), 1 if r == "win" else 0) for p, r in rows]
+    return [(float(p), 1 if r == "win" else 0) for p, r in rows if _is_usable(p)]
 
 
 def _collect_segmented_training_data() -> list[tuple[float, int, str]]:
@@ -102,11 +139,12 @@ def _collect_segmented_training_data() -> list[tuple[float, int, str]]:
                 Prediction.result.is_not(None),
                 Prediction.result.in_(("win", "loss")),
                 ~Prediction.market.in_(_DERIVED_MARKETS),
+                Prediction.excluded_reason.is_(None),
             )
         ).all()
     return [
         (float(p), 1 if r == "win" else 0, segment_for(sk, mk))
-        for p, r, sk, mk in rows
+        for p, r, sk, mk in rows if _is_usable(p)
     ]
 
 
@@ -459,15 +497,36 @@ def _load_calibrator() -> dict | None:
     segments: dict[str, tuple[list, list]] = {}
     try:
         if fmt == "isotonic-segmented-v1":
+            # A map already on disk must clear the SAME sample floor as a new
+            # one. Raising MIN_SAMPLES_TO_TRUST only governs future training,
+            # so without this the pathological map stays live for as long as
+            # the file exists — and it was fitted on picks we have since
+            # quarantined as invalid. Enforcing the rule at load time makes it
+            # self-correcting instead of a one-off cleanup.
             g = payload.get("global")
             if g and g.get("x") and g.get("y"):
-                glob = (list(g["x"]), list(g["y"]))
+                if int(g.get("n") or 0) >= MIN_SAMPLES_TO_TRUST:
+                    glob = (list(g["x"]), list(g["y"]))
+                else:
+                    logger.info("Calibrateur global ignoré : %s échantillons "
+                                "< %d requis", g.get("n"), MIN_SAMPLES_TO_TRUST)
             for seg, m in (payload.get("segments") or {}).items():
-                if m.get("x") and m.get("y"):
-                    segments[seg] = (list(m["x"]), list(m["y"]))
+                if not (m.get("x") and m.get("y")):
+                    continue
+                if int(m.get("n") or 0) < MIN_SAMPLES_TO_TRUST:
+                    logger.info("Segment '%s' ignoré : %s échantillons < %d requis",
+                                seg, m.get("n"), MIN_SAMPLES_TO_TRUST)
+                    continue
+                segments[seg] = (list(m["x"]), list(m["y"]))
         elif fmt == "isotonic-thresholds-v1":  # legacy single map → global
             if payload.get("x_thresholds") and payload.get("y_thresholds"):
-                glob = (list(payload["x_thresholds"]), list(payload["y_thresholds"]))
+                if int(payload.get("n_samples") or 0) >= MIN_SAMPLES_TO_TRUST:
+                    glob = (list(payload["x_thresholds"]),
+                            list(payload["y_thresholds"]))
+                else:
+                    logger.info("Calibrateur legacy ignoré : %s échantillons "
+                                "< %d requis", payload.get("n_samples"),
+                                MIN_SAMPLES_TO_TRUST)
         else:
             logger.warning("Calibrator file format mismatch: %s", fmt)
             return None
@@ -508,11 +567,61 @@ def calibrate(prob: float, segment: str | None = None) -> float:
         xy = cal["global"]
     if not xy or not xy[0] or not xy[1]:
         return prob
+    xs, ys = xy[0], xy[1]
+    # OUTSIDE THE TRAINED DOMAIN, DO NOT CALIBRATE.
+    #
+    # Both sklearn's `out_of_bounds="clip"` and `np.interp` answer an
+    # out-of-range input with the nearest endpoint's y — extrapolation wearing
+    # interpolation's clothes. It is not harmless here: the calibrator is
+    # fitted on RESOLVED PICKS, which only exist above MIN_MODEL_PROB, so its
+    # domain started at 0.454 while it was applied to every outcome of the
+    # 1X2 distribution. A draw at 0.28 and an underdog at 0.17 were both handed
+    # the first point's y — which was 0.0 — and the group renormalisation that
+    # follows then turned "two zeros and one survivor" into a 100% certainty.
+    # Measured 2026-08-10: 59 of the 60 picks made since 05/08 carried
+    # model_prob = 1.000 on matches the market priced near 1.75.
+    if prob < xs[0] or prob > xs[-1]:
+        return prob
     try:
         import numpy as np
-        return max(0.0, min(float(np.interp(prob, xy[0], xy[1])), 1.0))
+        out = float(np.interp(prob, xs, ys))
     except (ValueError, TypeError):
         return prob
+    # NEVER let a calibrator assert certainty.
+    #
+    # An isotonic map legitimately contains 0.0 and 1.0 knots — those are the
+    # extreme bins of its training sample, not statements about the world. Once
+    # such a value reaches the group renormalisation, "two zeros and one
+    # survivor" becomes a 100% probability on a match the market prices near
+    # 1.75. That is exactly how 59 counted bets were fabricated.
+    #
+    # The clamp costs nothing when the fit is sane and is the last line of
+    # defence when it is not: no amount of data justifies a bookmaker-beating
+    # certainty from a step function.
+    return max(_CAL_OUTPUT_MIN, min(out, _CAL_OUTPUT_MAX))
+
+
+def in_domain(prob: float, segment: str | None = None) -> bool:
+    """True when `prob` falls inside the range the calibrator was FITTED on.
+
+    Callers that calibrate a coherent group of outcomes (1/X/2, Over/Under)
+    must calibrate all of it or none of it: correcting the favourite while
+    leaving the draw untouched, then renormalising, silently reshapes the
+    distribution by an amount nobody chose. And since the calibrator is fitted
+    on selected PICKS, its domain never reaches down to a draw's probability —
+    so for a full 1X2 the honest answer is almost always "none of it".
+    """
+    cal = _load_calibrator()
+    if cal is None:
+        return False
+    xy = None
+    if segment and segment in cal["segments"]:
+        xy = cal["segments"][segment]
+    elif cal["global"] is not None:
+        xy = cal["global"]
+    if not xy or not xy[0]:
+        return False
+    return xy[0][0] <= float(prob) <= xy[0][-1]
 
 
 def calibrator_status() -> dict:

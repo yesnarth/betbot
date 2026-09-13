@@ -50,11 +50,46 @@ _SELECTION_TO_OUTCOME = {
 }
 
 
-def _outcome_name(pred: Prediction) -> str:
+# selection_code -> (outcome_name_builder, market_key, point)
+# The Odds API names totals outcomes "Over" / "Under" and carries the line in
+# `point`; 1X2 outcomes are named after the team (or "Draw").
+_TOTALS_CODES: dict[str, tuple[str, float]] = {
+    "O05": ("Over", 0.5),  "U05": ("Under", 0.5),
+    "O15": ("Over", 1.5),  "U15": ("Under", 1.5),
+    "O25": ("Over", 2.5),  "U25": ("Under", 2.5),
+    "O35": ("Over", 3.5),  "U35": ("Under", 3.5),
+}
+
+
+def _closing_lookup(pred: Prediction) -> tuple[str, str, float | None] | None:
+    """(outcome_name, market_key, point) to price this pick at closing time.
+
+    Returns None when the pick cannot be priced from the markets we fetch —
+    which is the honest answer for derived selections (Double Chance, Draw No
+    Bet): they have no quoted outcome of their own, they were computed from the
+    1X2, and there is no single closing price to compare against.
+
+    This used to be a three-line function that returned `away_team` for
+    ANYTHING that was not "1" or "X". A totals pick therefore asked for the
+    away team's price, and the caller looked it up in the h2h market because
+    `extract_best_odds` defaults to `market_key="h2h"`. On the 297 production
+    picks that is 229 totals + 30 DNB + 5 DC = 264 rows, i.e. 88.9%, that would
+    have been stamped with a completely unrelated price — not left empty, but
+    filled with signed noise that `get_roi_stats` would then average into a CLV
+    figure with no sanity check whatsoever.
+    """
     code = pred.selection
+    if code in _TOTALS_CODES:
+        name, point = _TOTALS_CODES[code]
+        return name, "totals", point
     if code == "X":
-        return "Draw"
-    return pred.home_team if code == "1" else pred.away_team
+        return "Draw", "h2h", None
+    if code == "1":
+        return pred.home_team, "h2h", None
+    if code == "2":
+        return pred.away_team, "h2h", None
+    # 1X / X2 / 12 / DNB1 / DNB2 — derived, never quoted directly.
+    return None
 
 
 # Snap window relative to kickoff. The pre-window has to cover at least 3
@@ -87,6 +122,8 @@ def snapshot_closing_odds(
         "updated": 0,        # snap overwrote an earlier snap (closer to kickoff)
         "missing_event": 0,  # Odds API didn't serve the event in this cycle
         "errors": 0,
+        "skipped_no_kickoff": 0,  # legacy rows with no commence_time
+        "unpriceable": 0,         # derived markets with no quoted outcome
     }
 
     with session_scope() as s:
@@ -109,9 +146,57 @@ def snapshot_closing_odds(
     if not pending:
         return counts
 
+    # QUOTA GATE — narrow to matches actually inside the snap window BEFORE
+    # touching the API.
+    #
+    # One /odds call is made per distinct sport_key below. Without this filter
+    # every league holding any unresolved pick was queried on every cycle:
+    # measured on production, 25 leagues x 2 regions x 2 markets = 100 credits
+    # per 10-minute cycle, against a 500/month quota. The whole month died in
+    # two cycles, which is why CLV shipped disabled.
+    #
+    # Rows created before the `commence_time` column exists carry NULL. They are
+    # skipped rather than assumed in-window: guessing would restore exactly the
+    # quota burn this gate exists to prevent. They simply never get a CLV — the
+    # kickoff is unknowable after the fact.
+    now = datetime.now(timezone.utc)
+    window_start = now + timedelta(minutes=pre_window_min)
+    window_end = now - timedelta(minutes=post_window_min)
+    in_window: list[Prediction] = []
+    skipped_no_kickoff = 0
+    for p in pending:
+        raw = getattr(p, "commence_time", None)
+        if not raw:
+            skipped_no_kickoff += 1
+            continue
+        try:
+            ko = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            skipped_no_kickoff += 1
+            continue
+        if ko.tzinfo is None:
+            ko = ko.replace(tzinfo=timezone.utc)
+        # Kickoff within the next `pre_window_min`, or started less than
+        # `post_window_min` ago.
+        if window_end <= ko <= window_start:
+            in_window.append(p)
+
+    counts["skipped_no_kickoff"] = skipped_no_kickoff
+    if not in_window:
+        logger.debug(
+            "CLV : aucun match dans la fenêtre (%d en attente, %d sans coup d'envoi)",
+            len(pending), skipped_no_kickoff,
+        )
+        return counts
+
+    logger.info(
+        "CLV : %d pick(s) dans la fenêtre sur %d en attente → %d ligue(s) interrogée(s)",
+        len(in_window), len(pending), len({p.sport_key for p in in_window}),
+    )
+
     # Group predictions by sport_key so we make one /odds call per league max
     by_sport: dict[str, list[Prediction]] = {}
-    for p in pending:
+    for p in in_window:
         by_sport.setdefault(p.sport_key, []).append(p)
 
     for sport_key, preds in by_sport.items():
@@ -152,7 +237,18 @@ def snapshot_closing_odds(
             if not (in_pre_window or in_post_window):
                 continue
 
-            best = extract_best_odds(event, _outcome_name(pred))
+            lookup = _closing_lookup(pred)
+            if lookup is None:
+                # Derived market with no directly quoted outcome — leaving
+                # closing_odds NULL is correct. Writing a 1X2 price here would
+                # produce a CLV number that means nothing.
+                counts["unpriceable"] += 1
+                continue
+            outcome_name, market_key, point = lookup
+            best = extract_best_odds(
+                event, outcome_name, market_key=market_key, point=point,
+                ignore_whitelist=True,
+            )
             if best is None:
                 continue
 

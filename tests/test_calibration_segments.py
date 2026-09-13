@@ -29,8 +29,8 @@ def test_calibrate_prefers_segment_then_global(tmp_path, monkeypatch):
     # global = identity ; tennis segment pins everything to 0.9
     _install(tmp_path, monkeypatch, {
         "format": "isotonic-segmented-v1",
-        "global": {"x": [0.0, 1.0], "y": [0.0, 1.0], "n": 100},
-        "segments": {"tennis": {"x": [0.0, 1.0], "y": [0.9, 0.9], "n": 60}},
+        "global": {"x": [0.0, 1.0], "y": [0.0, 1.0], "n": 4000},
+        "segments": {"tennis": {"x": [0.0, 1.0], "y": [0.9, 0.9], "n": 4000}},
         "trained_at": "2026-01-01T00:00:00+00:00",
         "source": "resolved_bets",
     })
@@ -47,6 +47,8 @@ def test_calibrate_legacy_v1_is_treated_as_global(tmp_path, monkeypatch):
         "format": "isotonic-thresholds-v1",
         "x_thresholds": [0.0, 1.0],
         "y_thresholds": [0.5, 0.5],
+        # A map already on disk must clear the same sample floor as a new one.
+        "n_samples": 4000,
         "trained_at": "2026-01-01T00:00:00+00:00",
     })
     try:
@@ -68,8 +70,8 @@ def test_calibrate_identity_when_no_file(tmp_path, monkeypatch):
 def test_calibrator_status_reports_segments(tmp_path, monkeypatch):
     _install(tmp_path, monkeypatch, {
         "format": "isotonic-segmented-v1",
-        "global": {"x": [0.0, 1.0], "y": [0.0, 1.0], "n": 100},
-        "segments": {"tennis": {"x": [0.0, 1.0], "y": [0.9, 0.9], "n": 60}},
+        "global": {"x": [0.0, 1.0], "y": [0.0, 1.0], "n": 4000},
+        "segments": {"tennis": {"x": [0.0, 1.0], "y": [0.9, 0.9], "n": 4000}},
         "trained_at": "2026-01-01T00:00:00+00:00",
         "source": "resolved_bets",
     })

@@ -169,11 +169,32 @@ def build_team_stats(
     """
     Build TeamStats from parsed match results for a single team.
 
-    parsed_matches: list of {home_team, away_team, home_goals, away_goals, date}
-    sorted most-recent first.
+    parsed_matches: list of {home_team, away_team, home_goals, away_goals, date}.
+
+    Recency ordering is ENFORCED here rather than assumed from the caller.
+    `_exp_weight(k)` gives weight 1.0 to index 0 and decays from there, so the
+    list order silently decides which matches drive the estimate. The contract
+    used to be a docstring only, and every caller violated it in some way:
+
+      - `football_api.parse_match_results` returns the API order, which is
+        chronologically ASCENDING → the OLDEST match got weight 1.0 and the
+        most recent 0.165. Measured on the 20 EPL teams: mean deviation of
+        0.148 on `attack_home`, max 0.438.
+      - `backtest.py` and `tuning.py` sort ascending before calling this, so
+        the calibrator and the weight optimiser were tuned against the
+        inverted model.
+
+    Sorting here fixes every call site at once and cannot regress again.
+    Matches without a usable date sort last (treated as oldest) instead of
+    silently landing at index 0.
     """
-    home_games = [m for m in parsed_matches if m["home_team"] == team_name]
-    away_games = [m for m in parsed_matches if m["away_team"] == team_name]
+    ordered = sorted(
+        parsed_matches,
+        key=lambda m: (m.get("date") or ""),
+        reverse=True,
+    )
+    home_games = [m for m in ordered if m["home_team"] == team_name]
+    away_games = [m for m in ordered if m["away_team"] == team_name]
 
     if len(home_games) + len(away_games) < MIN_MATCHES:
         return None
@@ -423,10 +444,31 @@ def consensus_match_probs(event: dict) -> MatchProbs | None:
     prob_draw /= total
     prob_away /= total
 
-    # Estimate Over 2.5 from consensus home/away probs heuristically
-    # (average lambdas implied by prob distributions)
+    # Expected goals: LEVEL from the totals market, SPLIT from the 1X2.
+    #
+    # The 1X2 consensus above tells us who is favoured — that is a real signal
+    # and it drives the home/away ratio. It says nothing useful about how many
+    # goals will be scored, yet `_prob_to_lambda` used to derive the total from
+    # the draw probability alone (`lambda_total = -2*ln(p_draw)`), announcing
+    # 4.61 expected goals on a heavy favourite where reality is ~2.9.
+    #
+    # The bookmakers' own totals market is already in this event — the scan
+    # requests `markets=h2h,totals` — so the level is available for free and
+    # needs no guessing. Anchoring on it while keeping the heuristic's ratio
+    # uses each market for what it actually prices.
     lh = _prob_to_lambda(prob_home, prob_draw, prob_away, home=True)
     la = _prob_to_lambda(prob_home, prob_draw, prob_away, home=False)
+    market_total = _market_total_lambda(event)
+    model_name = "consensus"
+    if market_total is not None and (lh + la) > 0:
+        scale = market_total / (lh + la)
+        lh, la = round(lh * scale, 3), round(la * scale, 3)
+        model_name = "consensus_mkt"
+    else:
+        logger.debug(
+            "Pas de marché totals pour %s vs %s — repli sur l'heuristique 1X2",
+            home_name, away_name,
+        )
     probs = poisson_match_probs(lh, la)
 
     return MatchProbs(
@@ -445,22 +487,181 @@ def consensus_match_probs(event: dict) -> MatchProbs | None:
         under_35=probs.under_35,
         lambda_home=lh,
         lambda_away=la,
-        model="consensus",
+        # "consensus_mkt" when the goal level came from the bookmakers' own
+        # totals market, "consensus" when it fell back to the 1X2 heuristic.
+        # Distinguishing them is what makes the fix measurable per segment.
+        model=model_name,
     )
 
 
-def _prob_to_lambda(p_home: float, p_draw: float, p_away: float, home: bool) -> float:
+# Plausible range for a football match's expected total goals. Used to bound
+# both the market inversion and the fallback heuristic. Real league averages sit
+# between ~2.2 (Serie A of the 2010s) and ~3.4 (Eredivisie); anything outside
+# [1.5, 4.5] is an artifact, not a forecast.
+MIN_TOTAL_LAMBDA = 1.5
+MAX_TOTAL_LAMBDA = 4.5
+
+
+def _poisson_prob_over(lambda_total: float, line: float) -> float:
+    """P(total goals > line) for a Poisson with mean `lambda_total`.
+
+    Lines are always .5, so "over the line" means "at least ceil(line)" and
+    there is no push to handle.
     """
-    Crude inverse: estimate lambda from H2H probs.
-    Uses empirical approximation: lambda ≈ -ln(p_draw) * share
+    threshold = int(math.floor(line)) + 1
+    cdf_below = sum(scipy_poisson.pmf(k, lambda_total) for k in range(threshold))
+    return max(0.0, min(1.0, 1.0 - cdf_below))
+
+
+def lambda_total_from_over_prob(p_over: float, line: float) -> float:
+    """Invert the Poisson: find the expected total goals implied by P(over).
+
+    Strictly increasing in lambda, so plain bisection converges. Bounded to
+    [MIN_TOTAL_LAMBDA, MAX_TOTAL_LAMBDA] — an extreme market price (or a stale
+    quote) must not produce an absurd goal expectation.
+    """
+    lo, hi = MIN_TOTAL_LAMBDA, MAX_TOTAL_LAMBDA
+    if p_over <= _poisson_prob_over(lo, line):
+        return lo
+    if p_over >= _poisson_prob_over(hi, line):
+        return hi
+    for _ in range(60):
+        mid = (lo + hi) / 2.0
+        if _poisson_prob_over(mid, line) < p_over:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
+
+
+def _market_total_lambda(event: dict) -> float | None:
+    """Expected total goals implied by the bookmakers' OWN totals market.
+
+    This is the number the consensus model needs and never had. Each book's
+    Over/Under pair on a given line is de-vigged on its own (the pair is a
+    complete two-outcome market), the fair P(over) is averaged across books
+    with the usual weights, then inverted through the Poisson.
+
+    Prefers the 2.5 line — the deepest and most liquid — and otherwise takes
+    the line quoted by the most books. Returns None when no book quotes totals,
+    which is the only case where the caller should fall back to a heuristic.
+    """
+    # NO BOOKMAKER FILTER HERE, DELIBERATELY.
+    #
+    # This function estimates how many goals the market expects — it is
+    # INFORMATION about the match, not a price anyone bets. The whitelist
+    # answers a different question: where the owner can actually place. Those
+    # two must not be conflated, and everywhere else in this file they are
+    # not: `consensus_match_probs` and `_novig_fair_prob` both read every book.
+    #
+    # This one filtered, and with the whitelist narrowed to a single
+    # bookmaker it was estimating the goals level from ONE opinion — losing
+    # Pinnacle, which carries the heaviest weight in BOOK_WEIGHTS precisely
+    # because it is the sharpest reference available. Restricting where you
+    # bet must never restrict what the model is allowed to know.
+    #
+    # `extract_best_odds` and `_derive_dc_dnb_odds` still filter, and should:
+    # those return a price the bet is actually struck at.
+    by_line: dict[float, list[tuple[float, float]]] = {}
+    for bm in event.get("bookmakers", []):
+        weight = BOOK_WEIGHTS.get(bm.get("key", ""), DEFAULT_BOOK_WEIGHT)
+        for mkt in bm.get("markets", []):
+            if mkt.get("key") != "totals":
+                continue
+            # Group this book's outcomes by line so Over and Under are de-vigged
+            # against their own counterpart, never across lines.
+            per_line: dict[float, dict[str, float]] = {}
+            for out in mkt.get("outcomes", []):
+                try:
+                    point = float(out.get("point"))
+                    price = float(out.get("price"))
+                except (TypeError, ValueError):
+                    continue
+                if price <= 1.0:
+                    continue
+                name = str(out.get("name", ""))
+                if name in ("Over", "Under"):
+                    per_line.setdefault(point, {})[name] = price
+            for point, prices in per_line.items():
+                if "Over" not in prices or "Under" not in prices:
+                    continue  # a half-quoted line carries the book's margin unevenly
+                q_over = 1.0 / prices["Over"]
+                q_under = 1.0 / prices["Under"]
+                overround = q_over + q_under
+                if overround <= 0:
+                    continue
+                by_line.setdefault(point, []).append((q_over / overround, weight))
+
+    if not by_line:
+        return None
+
+    # 2.5 when available (deepest market), else the most widely quoted line.
+    line = 2.5 if 2.5 in by_line else max(by_line, key=lambda k: len(by_line[k]))
+    samples = by_line[line]
+    total_weight = sum(w for _, w in samples)
+    if total_weight <= 0:
+        return None
+    p_over = sum(p * w for p, w in samples) / total_weight
+    return lambda_total_from_over_prob(p_over, line)
+
+
+def _prob_to_lambda(p_home: float, p_draw: float, p_away: float, home: bool) -> float:
+    """FALLBACK ONLY — expected goals guessed from the 1X2 probabilities.
+
+    `lambda_total` here is exactly `-2*ln(p_draw)`: the goal expectation depends
+    on NOTHING but the draw probability, and never looks at the totals market.
+    On a heavy favourite it announces 4.61 expected goals where reality is ~2.9.
+
+    Production consequence, measured on 87 graded totals picks: Over selections
+    predicted 0.592 and realised 0.286 (ROI -52.0%), Under predicted 0.566 and
+    realised 0.400 (ROI -22.5%). 39 of 67 totals picks came through this path.
+
+    `consensus_match_probs` now anchors the LEVEL on the bookmakers' own totals
+    market (`_market_total_lambda`) and only uses this function for the SPLIT
+    between home and away — the shape it produces is reasonable, the level was
+    not. This remains the sole path when no book quotes totals at all, so the
+    result is bounded to a plausible range instead of running free.
+    """
+    lh, la = _heuristic_lambda_pair(p_home, p_draw, p_away)
+    return lh if home else la
+
+
+# Absolute floor per side. A team is never literally incapable of scoring, and a
+# zero lambda would make the Poisson degenerate.
+MIN_SIDE_LAMBDA = 0.3
+
+
+def _heuristic_lambda_pair(
+    p_home: float, p_draw: float, p_away: float
+) -> tuple[float, float]:
+    """The fallback pair, bounded as a PAIR rather than side by side.
+
+    Clamping each side independently fights the total bound: flooring the
+    weaker side back up to MIN_SIDE_LAMBDA after scaling pushed the sum past
+    MAX_TOTAL_LAMBDA again. Here the floor is applied first, then the total is
+    scaled, then any residual excess is taken from the stronger side only — so
+    both the floor and the ceiling hold, and the supremacy survives.
     """
     if p_draw <= 0:
-        return DEFAULT_HOME_AVG if home else DEFAULT_AWAY_AVG
+        return DEFAULT_HOME_AVG, DEFAULT_AWAY_AVG
     base = -math.log(max(p_draw, 0.01))
-    if home:
-        return round(max(0.3, base * (p_home + 0.5 * p_draw) / 0.5), 3)
-    else:
-        return round(max(0.3, base * (p_away + 0.5 * p_draw) / 0.5), 3)
+    lh = max(MIN_SIDE_LAMBDA, base * (p_home + 0.5 * p_draw) / 0.5)
+    la = max(MIN_SIDE_LAMBDA, base * (p_away + 0.5 * p_draw) / 0.5)
+
+    total = lh + la
+    if total > MAX_TOTAL_LAMBDA:
+        scale = MAX_TOTAL_LAMBDA / total
+        lh, la = lh * scale, la * scale
+        # Scaling may have pushed a side under the floor; restore it and pay
+        # for it from the other side, which is by construction the larger one.
+        if lh < MIN_SIDE_LAMBDA:
+            lh, la = MIN_SIDE_LAMBDA, MAX_TOTAL_LAMBDA - MIN_SIDE_LAMBDA
+        elif la < MIN_SIDE_LAMBDA:
+            la, lh = MIN_SIDE_LAMBDA, MAX_TOTAL_LAMBDA - MIN_SIDE_LAMBDA
+    elif total < MIN_TOTAL_LAMBDA:
+        scale = MIN_TOTAL_LAMBDA / total
+        lh, la = lh * scale, la * scale
+    return round(lh, 3), round(la, 3)
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +680,7 @@ def extract_best_odds(
     outcome_name: str,
     market_key: str = "h2h",
     point: float | None = None,
+    ignore_whitelist: bool = False,
 ) -> BestOdds | None:
     """
     Find the best (highest) decimal odds for a given outcome across all bookmakers.
@@ -487,9 +689,24 @@ def extract_best_odds(
         outcome_name: e.g. "Real Madrid", "Draw", "Over", "Yes" (BTTS)
         market_key:   "h2h" (default), "totals" (Over/Under), "btts"
         point:        for "totals" markets, the line (e.g. 2.5)
+
+    Only bookmakers passing `BOOKMAKER_WHITELIST` are considered — the best
+    price is worthless if it sits on an operator the user has no account
+    with. Returns None when no whitelisted bookmaker prices this outcome.
     """
+    from betbot.bookmaker_filter import is_allowed
+
     best: BestOdds | None = None
     for bm in event.get("bookmakers", []):
+        # `ignore_whitelist` exists for ONE caller: the CLV snapshot.
+        # CLV compares your entry price to where the MARKET closed. Restricting
+        # the closing reference to the two books you bet with would measure
+        # "how Betclic moved" instead — and a bettor who takes favourites early
+        # would show a positive CLV with no skill at all. The reference has to
+        # be the broad market; the whitelist belongs to bet SELECTION, not to
+        # measurement.
+        if not ignore_whitelist and not is_allowed(bm):
+            continue
         for mkt in bm.get("markets", []):
             if mkt.get("key") != market_key:
                 continue
@@ -646,10 +863,13 @@ def blended_match_probs(
     has_elo = home_stats.elo_rating is not None and away_stats.elo_rating is not None
     elo_home_prob = None
     if has_elo:
-        from betbot.data_sources.club_elo import elo_win_probability
-        # P(home doesn't lose) ≈ home_win + draw
-        elo_home_no_loss = elo_win_probability(home_stats.elo_rating, away_stats.elo_rating)
-        elo_home_prob = elo_home_no_loss   # we'll redistribute home/draw later
+        from betbot.data_sources.club_elo import elo_expected_score
+        # Elo EXPECTED SCORE = P(home win) + 0.5*P(draw). It is NOT the no-loss
+        # probability the shrinkage below needs — the conversion needs a draw
+        # estimate, which only exists once Poisson has run. Carry the raw
+        # expected score here and convert at the point of use.
+        elo_expected = elo_expected_score(home_stats.elo_rating, away_stats.elo_rating)
+        elo_home_prob = elo_expected
     else:
         elo_weight = 0.0  # no ELO → all weight back on Dixon-Coles + xG
 
@@ -670,7 +890,14 @@ def blended_match_probs(
         poisson_no_loss = poisson_probs.home_win + poisson_probs.draw
         if poisson_no_loss > 0:
             draw_share = poisson_probs.draw / poisson_no_loss
-            blended_no_loss = (1 - elo_weight) * poisson_no_loss + elo_weight * elo_home_prob
+            # Convert the Elo expected score into a no-loss probability using
+            # the Poisson draw estimate: E = P(win) + 0.5*d  =>  P(win) + d
+            # = E + 0.5*d. Without this the prior was systematically 0.5*draw
+            # (≈ +3.6 points) too low, and since away_win is the residual
+            # `1 - home_win - draw`, that deficit was credited to the away
+            # side on 100% of matches.
+            elo_no_loss = min(1.0, max(0.0, elo_home_prob + 0.5 * poisson_probs.draw))
+            blended_no_loss = (1 - elo_weight) * poisson_no_loss + elo_weight * elo_no_loss
             home_win = blended_no_loss * (1 - draw_share)
             draw     = blended_no_loss * draw_share
             away_win = 1.0 - home_win - draw

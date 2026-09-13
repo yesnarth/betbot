@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from betbot.api import OddsAPIClient, QuotaExhaustedError
@@ -146,8 +147,38 @@ def resolve_pending(
         logger.info("Aucune prédiction en attente.")
         return {"resolved": 0, "still_pending": 0, "errors": 0}
 
+    # QUOTA GATE — drop picks the /scores endpoint can no longer answer for,
+    # BEFORE grouping by sport (one billed call per sport).
+    #
+    # The Odds API caps `daysFrom` at 3. A pick older than that will never be
+    # matched here no matter how often we ask, yet every call still bills.
+    # Measured on production: 110 of 118 pending picks were out of window, and
+    # the catch-up job at every worker boot spent ~50 credits across 25 leagues
+    # to resolve exactly zero. Several deploys in one day are enough to drain a
+    # 500/month quota on questions that have no answer.
+    #
+    # Out-of-window football picks are still recoverable — `resolve_stale_pending`
+    # grades them from football-data.org, which is free.
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=days_from)
+    ).isoformat()
+    in_window = [p for p in pending if (p.get("created_at") or "") >= cutoff]
+    out_of_window = len(pending) - len(in_window)
+    if out_of_window:
+        logger.info(
+            "Résolution : %d pick(s) hors fenêtre /scores (> %d j) ignoré(s) — "
+            "ils seront traités par la résolution tardive (football-data, gratuite)",
+            out_of_window, days_from,
+        )
+    if not in_window:
+        logger.info(
+            "Aucune prédiction dans la fenêtre /scores — 0 requête consommée "
+            "(%d en attente).", len(pending),
+        )
+        return {"resolved": 0, "still_pending": len(pending), "errors": 0}
+
     by_sport: dict[str, list[dict]] = defaultdict(list)
-    for p in pending:
+    for p in in_window:
         by_sport[p["sport_key"]].append(p)
 
     resolved = 0
@@ -345,7 +376,7 @@ def resolve_proposed_picks(db: Database, fd_api_key: str, min_age_days: int = 1)
     if not fd_api_key or "REMPLACE" in fd_api_key:
         return {"resolved": 0, "reason": "football-data key not configured"}
 
-    proposed = db.get_proposed_predictions()
+    proposed = db.get_gradable_predictions()
     now = datetime.now(timezone.utc)
 
     def _age_days(iso: str) -> float:
@@ -404,7 +435,7 @@ def resolve_proposed_picks_api_football(
     if not os.getenv("API_FOOTBALL_KEY", "").strip():
         return {"resolved": 0, "reason": "API_FOOTBALL_KEY non configurée"}
 
-    proposed = db.get_proposed_predictions()
+    proposed = db.get_gradable_predictions()
     now = datetime.now(timezone.utc)
     season = now.year  # summer leagues are calendar-year
 

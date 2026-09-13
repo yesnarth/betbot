@@ -7,7 +7,11 @@ class _FakeDB:
         self._proposed = proposed
         self.updates = []
 
-    def get_proposed_predictions(self):
+    def get_gradable_predictions(self):
+        # Renamed from get_proposed_predictions: the free graders must see
+        # every unresolved pick, not only status == 'proposed'. Under
+        # AUTO_CONFIRM_PICKS there are no 'proposed' rows at all.
+
         return self._proposed
 
     def update_result(self, event_id, market, selection, result):

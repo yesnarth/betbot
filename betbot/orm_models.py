@@ -111,6 +111,39 @@ class Prediction(Base):
     # Per-pick reliability score in [0, 1] — qualifies the edge. NULL on legacy
     # rows; new rows always set it via betbot.reliability.compute_reliability.
     reliability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Kickoff, ISO-8601, as served by the Odds API. Needed to (a) narrow the CLV
+    # snapshot to matches actually near kickoff instead of querying every league
+    # that has a pending pick, and (b) tell the user which bets are still
+    # placeable. NULL on rows created before 2026-08-01.
+    commence_time: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    # De-vigged consensus probability of THIS selection at pick time. Already
+    # computed on every pick as the adverse-selection gate, then discarded.
+    # Storing it is what lets Brier(model_prob) be compared against
+    # Brier(market_prob) on the same graded picks — the one test that says
+    # whether the model adds anything over the price. It cannot be
+    # reconstructed afterwards: de-vigging needs the whole outcome group, and
+    # only the selected side's price survives the scan.
+    market_prob: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # QUARANTINE. Non-NULL means "this pick is real and kept, but must not
+    # count in any statistic", with the reason recorded in plain text.
+    #
+    # 59 picks were born at model_prob >= 0.99 from a broken calibrator that
+    # mapped ordinary matches to certainty. They are genuine bets, so deleting
+    # them is out of the question — but leaving them in poisons the ROI, the
+    # hit rate and the calibrator's own training set, which is how a
+    # measurement bug becomes a modelling bug.
+    #
+    # A named column rather than an implicit `model_prob >= 0.99` filter: the
+    # rule is auditable, reversible, and future quarantines can state their
+    # own reason instead of borrowing this one's coincidence.
+    excluded_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Which promise the pick was made under. 'valeur' claims an edge over the
+    # price; 'favoris' claims only that model and market AGREE at high
+    # confidence (long-run expectation: minus the margin — the owner's
+    # explicit, informed trade for hit rate). Stored so the two records can
+    # never blur: a flood of favourites must not mask the value channel.
+    channel: Mapped[str] = mapped_column(String, nullable=False,
+                                         server_default="valeur")
     result: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     closing_odds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     resolved_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)

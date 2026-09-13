@@ -17,6 +17,7 @@ from sqlalchemy.engine import Engine
 from betbot.database import Base, get_engine, reset_engine, session_scope
 from betbot.orm_models import (
     AgentRun,
+    BankrollEntry,
     HeadToHead,
     LeagueAverage,
     Prediction,
@@ -25,6 +26,32 @@ from betbot.orm_models import (
 )
 
 logger = logging.getLogger("betbot.db")
+
+
+def default_placement_status() -> str:
+    """Placement status a freshly scanned pick is born with.
+
+    Two operating modes:
+
+    - ``AUTO_CONFIRM_PICKS=0`` (default, legacy): picks start as 'proposed'
+      and wait in the dashboard validation queue. The user confirms the ones
+      they actually bet; unconfirmed picks are archived to 'skipped' after
+      36h and never counted in the track record.
+
+    - ``AUTO_CONFIRM_PICKS=1``: picks start as 'confirmed'. This is the
+      honest setting when the user systematically places every scanned pick
+      at their bookmaker — the archive-to-'skipped' path was silently
+      excluding 84% of production from every statistic, making the measured
+      ROI a record of the user's manual selection rather than of the model.
+
+    Auto-confirming records the bet for STATISTICS only: no bankroll ledger
+    movement is created, because `save_prediction` never knows what the user
+    actually staked. See `update_result` — money only moves for predictions
+    carrying a real 'bet_placed' ledger entry.
+    """
+    import os
+
+    return "confirmed" if os.getenv("AUTO_CONFIRM_PICKS", "0") == "1" else "proposed"
 
 
 def _utcnow_iso() -> str:
@@ -365,6 +392,10 @@ class Database:
         lambda_away: float | None = None,
         model_type: str = "poisson",
         reliability: float | None = None,
+        commence_time: str | None = None,
+        market_prob: float | None = None,
+        shadow: bool = False,
+        channel: str = "valeur",
         enforce_funds: bool = True,  # noqa: ARG002 — kept for caller-API stability
     ) -> bool:
         """
@@ -414,7 +445,16 @@ class Database:
                     lambda_away=lambda_away,
                     model_type=model_type,
                     reliability=reliability,
-                    placement_status="proposed",
+                    commence_time=commence_time,
+                    market_prob=market_prob,
+                    channel=channel or "valeur",
+                    # A shadow pick is a MEASUREMENT, not a recommendation:
+                    # it is born 'proposed' even under AUTO_CONFIRM_PICKS=1, so
+                    # it never enters the placed-bet record or the ROI. It is
+                    # still graded, which is the entire point — it rebuilds the
+                    # evidence a cut market needs, at zero stake.
+                    placement_status=("proposed" if shadow
+                                      else default_placement_status()),
                     placement_status_at=_utcnow_iso(),
                 )
                 s.add(pred)
@@ -442,13 +482,39 @@ class Database:
     def get_proposed_predictions(self) -> list[dict]:
         """Picks the bot has proposed but the user hasn't acted on yet.
         Newest first so the dashboard shows the most recent recommendations
-        at the top of the validation queue."""
+        at the top of the validation queue.
+
+        STRICTLY 'proposed' — this feeds the dashboard validation queue. For
+        grading, use `get_gradable_predictions()`."""
         with session_scope() as s:
             rows = s.execute(
                 select(Prediction)
                 .where(Prediction.placement_status == "proposed",
                        Prediction.result.is_(None))
                 .order_by(Prediction.created_at.desc())
+            ).scalars().all()
+            return [_to_dict(r) for r in rows]
+
+    def get_gradable_predictions(self) -> list[dict]:
+        """Every unresolved pick, whatever its placement status.
+
+        The free graders (football-data.org, api-football) used to read
+        `get_proposed_predictions()`, i.e. status == 'proposed' only. Under
+        AUTO_CONFIRM_PICKS every pick is born 'confirmed', so that query
+        returns nothing and the graders reported "fd=0 af=0" while 118 picks
+        sat unresolved — including 110 past the Odds API /scores window, whose
+        ONLY remaining path these graders are.
+
+        Placement status says whether money moved. It has no bearing on whether
+        a match has a score, so it must not gate grading. These sources cost no
+        quota, hence no cost argument for restricting the population either.
+        Oldest first: the longest-waiting picks get graded first.
+        """
+        with session_scope() as s:
+            rows = s.execute(
+                select(Prediction)
+                .where(Prediction.result.is_(None))
+                .order_by(Prediction.created_at)
             ).scalars().all()
             return [_to_dict(r) for r in rows]
 
@@ -566,18 +632,35 @@ class Database:
             pred_id = row.id
 
             row.result = result
-            row.closing_odds = closing_odds
+            # NEVER clear a snapshot at settlement. The four resolver call
+            # sites (resolver.py) invoke update_result WITHOUT closing_odds, so
+            # an unguarded assignment wipes the CLV the snapshotter spent quota
+            # capturing — the exact reason 0/310 rows carried one. One-way door:
+            # the closing line cannot be recovered after the match.
+            if closing_odds is not None:
+                row.closing_odds = closing_odds
             row.resolved_at = _utcnow_iso()
 
-            # Bankroll movement ONLY for predictions the user actually
-            # confirmed at the bookmaker. 'proposed' or 'skipped' picks
-            # never debited the bankroll, so they shouldn't credit it
-            # either when their match resolves. We still record the
-            # `result` field for analytics ("would-have ROI" on skipped
-            # picks, raw model accuracy on proposed picks).
-            is_money_at_stake = (
-                stake > 0 and row.placement_status == "confirmed"
-            )
+            # Bankroll movement ONLY for predictions that actually debited
+            # the bankroll when they were placed — i.e. those carrying a
+            # 'bet_placed' ledger entry. We test the ledger itself rather
+            # than `placement_status == 'confirmed'`: under
+            # AUTO_CONFIRM_PICKS=1 every scanned pick is born 'confirmed'
+            # for statistics, but only the ones the user explicitly staked
+            # through the dashboard ever debited the bankroll. Keying the
+            # credit on placement_status would pay out winnings on stakes
+            # that were never deducted and inflate the balance without
+            # bound.
+            #
+            # The `result` field is always written regardless, so ROI /
+            # calibration / Brier see the full production.
+            has_placement_debit = s.execute(
+                select(BankrollEntry.id).where(
+                    BankrollEntry.prediction_id == pred_id,
+                    BankrollEntry.kind == "bet_placed",
+                ).limit(1)
+            ).first() is not None
+            is_money_at_stake = stake > 0 and has_placement_debit
             if is_money_at_stake:
                 if result == "win":
                     payout = stake * odds
@@ -622,6 +705,8 @@ class Database:
             ).where(
                 Prediction.result.is_not(None),
                 Prediction.created_at >= cutoff_iso,
+                # Quarantined picks are kept in the table but never counted.
+                Prediction.excluded_reason.is_(None),
             )
             if only_placed:
                 stmt = stmt.where(Prediction.placement_status == "confirmed")
@@ -633,14 +718,30 @@ class Database:
                 "n_with_clv": 0, "avg_clv_pct": 0.0, "positive_clv_share": 0.0,
             }
 
-        n = len(preds)
-        wins = [p for p in preds if p.result == "win"]
-        staked = sum(p.kelly_stake for p in preds)
+        # Voided bets ("push") refund the stake — they are NO ACTION, not
+        # losses. Counting them in `n` and `staked` while never adding them to
+        # `returned` treated every push as a total loss: with 19 voids (all
+        # draw_no_bet, ~32% of that market) the reported ROI read -18.6%
+        # against a true -6.4%, and the hit rate 43.2% against 48.7%.
+        # They are excluded from the settled population and surfaced
+        # separately as `n_void`.
+        settled = [p for p in preds if p.result in ("win", "loss")]
+        n_void = len(preds) - len(settled)
+        if not settled:
+            return {
+                "n_bets": 0, "n_wins": 0, "hit_rate": 0.0, "roi": 0.0, "avg_edge": 0.0,
+                "n_void": n_void,
+                "n_with_clv": 0, "avg_clv_pct": 0.0, "positive_clv_share": 0.0,
+            }
+
+        n = len(settled)
+        wins = [p for p in settled if p.result == "win"]
+        staked = sum(p.kelly_stake for p in settled)
         returned = sum(p.kelly_stake * p.best_odds for p in wins)
-        avg_edge = sum(p.value_edge for p in preds) / n
+        avg_edge = sum(p.value_edge for p in settled) / n
 
         # CLV — only on bets where we managed to snapshot the closing odds
-        clv_preds = [p for p in preds if p.closing_odds and p.closing_odds > 1.0]
+        clv_preds = [p for p in settled if p.closing_odds and p.closing_odds > 1.0]
         if clv_preds:
             clvs = [
                 (p.best_odds / p.closing_odds - 1.0) * 100
@@ -658,6 +759,7 @@ class Database:
             "hit_rate": round(len(wins) / n * 100, 1),
             "roi": round((returned - staked) / staked * 100, 1) if staked > 0 else 0.0,
             "avg_edge": round(avg_edge * 100, 1),
+            "n_void": n_void,
             "n_with_clv": len(clv_preds),
             "avg_clv_pct": round(avg_clv, 2),
             "positive_clv_share": round(pos_share, 1),
