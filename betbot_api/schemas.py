@@ -1,7 +1,7 @@
 """Pydantic schemas — request/response shapes for the REST API."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -222,6 +222,17 @@ class TargetParlayFilters(BaseModel):
     the ceiling is approached by adding MORE disciplined favorites, not by padding
     with longshots likely to fail. Still a low-probability lottery on variance,
     but every leg is +edge and the ticket is +EV."""
+    # TWO PRODUCTS, TWO PROMISES — the same split as the singles engine.
+    # 'favoris' stacks legs from the agreement channel: each leg clears the
+    # 0.70 floor that produces the 77% hit rate, prices 1.20-1.35, and claims
+    # NO edge (EV per leg ~ minus the margin). Reachable multipliers are ×5-×20,
+    # not ×1000 — 14 legs at 1.24 compound to ~20, and ×1000 would need ~35.
+    # 'loterie' is the honest name for the other one: legs may sit below the
+    # calibrated floor, so the ticket can reach ×100-×1000, out of exactly the
+    # population production measured at -47.3%. Never persisted, never staked,
+    # never emailed. Mixing the two would let the lottery borrow the favourites'
+    # track record, which is the one thing that must never happen.
+    mode: Literal["favoris", "loterie"] = Field(default="favoris")
     sport_key: str | None = Field(default=None)
     today_only: bool = Field(default=True)
     target_odds: float = Field(default=100.0, ge=2.0, le=100_000.0,

@@ -94,9 +94,41 @@ def test_x1000_clamps_edge_and_leg_odds():
     assert "max(filters.min_leg_odds, s.min_book_odds)" in block
 
 
-def test_x1000_keeps_the_confidence_floor():
+def test_favoris_parlays_keep_the_confidence_floor_server_side():
+    """The favoris tab has no probability slider at all: the 0.70 floor is the
+    thing that produces the 77% hit rate, so it is pinned server-side and the
+    client cannot lower it."""
     block = _endpoint("/recommend/parlay-target")
-    assert "max(filters.min_prob, s.min_model_prob)" in block
+    assert "s.min_model_prob if _favoris_mode" in block
+
+
+def test_lottery_may_go_under_the_floor_but_never_under_its_own():
+    """The lottery tab is the ONE path allowed below the calibrated floor —
+    that is its definition — but 'below the floor' must still mean 'more likely
+    to win than to lose'. Picks in the 0.40-0.60 band ran 26-44% actual against
+    45-64% predicted; a leg under 0.50 is a measurement error compounding
+    across ten legs, not a long shot."""
+    block = _endpoint("/recommend/parlay-target")
+    assert "max(filters.min_prob, LOTTERY_MIN_PROB)" in block
+    assert re.search(r"LOTTERY_MIN_PROB = 0\.(5[0-9]|[6-9])", _RECOMMEND),         "the lottery floor must stay at or above 0.50"
+
+
+def test_the_two_parlay_pools_never_mix():
+    """A lottery ticket must never borrow the favourites' track record, and a
+    favourites ticket must never be padded with a sub-floor leg. One channel
+    per mode, filtered explicitly rather than trusted from upstream."""
+    block = _endpoint("/recommend/parlay-target")
+    assert "favorites_channel=_favoris_mode" in block
+    assert '(b.channel == "favoris") is _favoris_mode' in block
+
+
+def test_favoris_parlays_do_not_require_positive_ev():
+    """A favourite claims no edge: each leg pays minus the bookmaker margin, so
+    demanding +EV rejects every combo this mode can build. That requirement is
+    exactly why the tab returned nothing at all — the trade (hit rate over
+    expectation) is explicit and it is the owner's."""
+    block = _endpoint("/recommend/parlay-target")
+    assert "require_positive_ev=not _favoris_mode" in block
 
 
 def test_x1000_carries_the_remaining_server_guards():

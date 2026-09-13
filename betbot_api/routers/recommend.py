@@ -29,6 +29,14 @@ logger = logging.getLogger("betbot.recommend")
 
 router = APIRouter(tags=["recommend"])
 
+# Hard floor for the lottery tab. The tab exists to go under the calibrated
+# 0.70 confidence floor — that is what buys the multiplier — but "under the
+# floor" must still mean "more likely to win than to lose". Production picks
+# in the 0.40-0.60 band ran at 26-44% actual against 45-64% predicted, so a
+# leg below this is not a long shot, it is a measurement error compounding
+# across 10 legs.
+LOTTERY_MIN_PROB = 0.50
+
 
 def _historize_picks(db: Database, picks: list[dict], source: str) -> int:
     """Shadow-log model singles as 'proposed' so we can MEASURE performance.
@@ -292,13 +300,23 @@ def recommend_parlay_target(
     _: str = Depends(require_auth),
 ) -> TargetParlayResponse:
     """
-    ×1000 "lottery" parlay mode. Scans broadly (set SCAN_ALL_SOCCER=1 to cover
-    every in-season football league), gathers a large pool of candidate legs with
-    RELAXED filters (NO no-vig gate, EV ≥ 0 by default), then greedily stacks
-    event-disjoint legs until combined odds reach `target_odds`.
+    Big-multiplier parlay builder, in two mutually exclusive modes.
 
-    HIGH VARIANCE by design — a ×1000 combo wins ~0.1% of the time. The safe
-    singles path (worker + /recommend/manual) keeps all its protections.
+    `mode="favoris"` (default) stacks legs from the AGREEMENT channel: model and
+    de-vigged market both at or above the 0.70 floor, priced ~1.20-1.35. Every
+    leg is inside the calibrated zone that measures 77% in production, and the
+    ticket is negative-EV by construction — the owner's explicit trade of
+    expectation for hit rate. Reachable multipliers are ×5-×20 (14 legs at 1.24
+    compound to ~20); the ×1000 in the tab's name is a ceiling, never a target.
+
+    `mode="loterie"` stacks legs from the VALUE channel and is the only path
+    allowed under the confidence floor (down to LOTTERY_MIN_PROB). That is what
+    buys ×100-×1000, out of the population production measured at -47.3%. Its
+    tickets are advisory only: never persisted, never staked, never emailed.
+
+    The two pools never mix, so a lottery ticket can never borrow the
+    favourites' record. The safe singles path (worker + /recommend/manual)
+    keeps all its protections in both modes.
     """
     from betbot.analysis import build_target_parlays, detect_value_bets
     from betbot.shared import filter_upcoming_today, load_team_stats_from_db
@@ -333,7 +351,13 @@ def recommend_parlay_target(
     # (each leg must beat the fair consensus line) and real positive-stake value
     # legs only. We reach the ×1000 target by STACKING MORE disciplined favorites
     # (see max_leg_odds), never by padding with longshots likely to fail.
-    pool = detect_value_bets(
+    # Which product is being built. 'favoris' draws its legs from the
+    # agreement channel (model AND de-vigged market both >= the floor, no edge
+    # claimed); 'loterie' draws from the value channel and may go below the
+    # calibrated floor. They never share a pool, so a lottery ticket can never
+    # borrow the favourites' track record.
+    _favoris_mode = filters.mode == "favoris"
+    detected = detect_value_bets(
         events_by_sport=events_by_sport,
         match_history_by_sport={},
         bankroll=s.bankroll,
@@ -356,17 +380,38 @@ def recommend_parlay_target(
         # slider went down to 0.30 and bypassed the confidence floor entirely.
         # Stacking MORE legs that are each inside the calibrated zone is the
         # documented design ("disciplined favorites"); legs below it are not.
-        min_model_prob=max(filters.min_prob, s.min_model_prob),
+        # Tighten-only for favoris: the 0.70 floor is what produces the 77%
+        # hit rate and the slider may only demand MORE. The lottery tab is the
+        # one place allowed to go under it — that is its entire definition —
+        # but never below LOTTERY_MIN_PROB, and its tickets are never
+        # persisted, never staked and never emailed.
+        min_model_prob=(s.min_model_prob if _favoris_mode
+                        else max(filters.min_prob, LOTTERY_MIN_PROB)),
         min_book_odds=max(filters.min_leg_odds, s.min_book_odds),
         min_edge_vs_novig=s.min_edge_vs_novig,   # re-armed adverse-selection guard
-        require_positive_stake=True,             # only genuine, stake-worthy legs
+        require_positive_stake=not _favoris_mode,  # a favourite claims no edge
+        # Favoris legs come out of detect_value_bets BEFORE the min-odds gate,
+        # which is the whole reason this channel exists: a genuine favourite
+        # prices under 1.50 by definition.
+        favorites_channel=_favoris_mode,
+        favorites_min_prob=s.favorites_min_prob,
+        favorites_min_odds=s.favorites_min_odds,
         prebuilt_stats_by_sport=prebuilt,
     )
+
+    # One channel per product, enforced here rather than trusted upstream.
+    pool = [b for b in detected if (b.channel == "favoris") is _favoris_mode]
 
     parlays = build_target_parlays(
         pool, target_odds=filters.target_odds, max_legs=filters.max_legs,
         top_n=filters.n_combos, min_leg_odds=filters.min_leg_odds,
-        max_leg_odds=filters.max_leg_odds, require_positive_ev=True,
+        max_leg_odds=filters.max_leg_odds,
+        # A favourites ticket is negative-EV by construction (each leg pays
+        # minus the bookmaker margin). Demanding +EV here would reject every
+        # combo the favoris tab can build — which is exactly why this tab
+        # returned nothing. The trade is explicit and it is the owner's:
+        # hit rate over expectation.
+        require_positive_ev=not _favoris_mode,
     )
 
     # Best achievable odds (single greedy chain) — informative when the target

@@ -585,40 +585,99 @@ def render_ai_agent_tab(filters: dict, agent_enabled: bool,
 
 
 def render_target_parlay_tab(filters: dict) -> None:
-    st.subheader("🎯 Combiné gros multiplicateur — favoris empilés")
-    st.info(
-        "**La cote cible est un PLAFOND, pas un objectif obligatoire.** Le bot "
-        "génère le nombre de combinés demandé, chacun **aussi gros que possible "
-        "SANS dépasser** ce plafond — donc tu obtiens des combinés même s'ils "
-        "n'atteignent pas le plafond (ex. ×60 un jour creux). Plus le plafond est "
-        "**bas**, plus le combiné a de chances de tomber. Il les construit en "
-        "**empilant des FAVORIS** (chaque jambe garde la garde no-vig + un edge "
-        "réel), **pas** des longshots voués à l'échec → tickets à **EV positive**. "
-        "Forte variance quand même. À placer toi-même — **non suivi au bankroll**.",
-        icon="🎯",
-    )
+    """Onglet SÛR : combinés empilant des favoris calibrés."""
+    _render_parlay_tab(filters, mode="favoris")
+
+
+def render_lottery_parlay_tab(filters: dict) -> None:
+    """Onglet LOTERIE : gros multiplicateur, jambes sous le plancher calibré."""
+    _render_parlay_tab(filters, mode="loterie")
+
+
+_PARLAY_INFO_FAVORIS = """**Chaque jambe est un favori calibré** : modèle ET marché dévigé d'accord à
+≥ 70 %, cote 1,20–1,35. C'est la zone qui mesure **77 % de réussite** en
+production.
+
+**Multiplicateurs réalistes : ×5 à ×20.** Des jambes à 1,24 composent à ×20 en
+14 jambes — un ×1000 demanderait ~35 jambes. Le plafond ci-dessous est un
+maximum à ne pas dépasser, jamais un objectif.
+
+**Le ticket est à EV négative** (chaque jambe paie moins la marge du book).
+C'est l'arbitrage assumé : taux de réussite contre espérance. À placer
+toi-même — **non suivi au bankroll**."""
+
+_PARLAY_WARN_LOTERIE = """**C'est le seul onglet qui descend sous le plancher de confiance de 0,70.**
+C'est ce qui achète le multiplicateur, et c'est aussi la population qui a rendu
+**−47,3 %** en production.
+
+Les jambes viennent du canal **valeur** (edge réel exigé vs marché dévigé),
+mais leur probabilité peut tomber jusqu'à 50 %. Un ×1000 tombe environ une fois
+sur mille.
+
+Ces tickets sont **consultatifs** : jamais enregistrés, jamais misés, jamais
+envoyés par mail. Rien ici n'entre dans le track record des favoris."""
+
+
+def _render_parlay_tab(filters: dict, mode: str) -> None:
+    """
+    Deux produits, deux promesses — et deux onglets, pour qu'ils ne se mélangent
+    jamais. Un seul onglet obligeait la même copie à promettre « ×1000 » et
+    « favoris disciplinés » : c'est arithmétiquement impossible (14 jambes à
+    1,24 font ×20, pas ×1000), donc l'onglet ne pouvait que mentir sur l'un des
+    deux. Les clés de widget sont suffixées par le mode : Streamlit les déduit
+    du libellé, et deux onglets aux libellés identiques se voleraient leur état.
+    """
+    _fav = mode == "favoris"
+    k = "tp_" + mode
+
+    if _fav:
+        st.subheader("🎯 Combinés de favoris — empilés")
+        st.info(_PARLAY_INFO_FAVORIS, icon="🎯")
+    else:
+        st.subheader("🎰 Loterie — gros multiplicateur, jambes relâchées")
+        st.warning(_PARLAY_WARN_LOTERIE, icon="🎰")
 
     c1, c2, c3 = st.columns(3)
-    target = c1.number_input("Cote combinée MAX (plafond)", min_value=2.0, max_value=100000.0,
-                             value=100.0, step=50.0,
-                             help="Plafond à ne pas dépasser (défaut 100). Le bot vise le plus gros combiné possible ≤ ce nombre, sans jamais le dépasser ni être obligé de l'atteindre. Plus bas = plus de chances de gagner ; plus haut (ex. 1000) = plus gros gain, plus rare.")
-    max_legs = c2.slider("Jambes max", 2, 20, 14)
-    n_combos = c3.slider("Combinés à générer", 1, 10, 3)
+    target = c1.number_input(
+        "Cote combinée MAX (plafond)",
+        min_value=2.0, max_value=100000.0,
+        value=20.0 if _fav else 1000.0, step=5.0 if _fav else 50.0,
+        key=k + "_target",
+        help="Plafond à ne pas dépasser. Le bot vise le plus gros combiné "
+             "possible ≤ ce nombre, sans jamais le dépasser ni être obligé de "
+             "l'atteindre.")
+    max_legs = c2.slider("Jambes max", 2, 20, 14 if _fav else 10, key=k + "_legs")
+    n_combos = c3.slider("Combinés à générer", 1, 10, 3, key=k + "_n")
+
     c4, c5 = st.columns(2)
-    max_leg_odds = c4.slider(
-        "Cote max par jambe (favoris)", 1.3, 5.0, 2.5, 0.1,
-        help="Plafonne la cote de chaque jambe → on atteint la cible en empilant "
-             "des FAVORIS, pas des longshots. Plus c'est bas, plus il faut de jambes.")
-    min_prob = c5.slider(
-        "Proba min par jambe", 0.30, 0.80, 0.50, 0.05,
-        help="Chaque jambe doit être un favori (plus de chances de gagner que de "
-             "perdre). Relâche un peu si trop peu de combinés sont trouvés.")
+    if _fav:
+        max_leg_odds = c4.slider(
+            "Cote max par jambe", 1.3, 2.5, 1.5, 0.05, key=k + "_maxleg",
+            help="Les favoris se cotent 1,20–1,35. Au-delà de ~1,5 tu sors de "
+                 "la bande où le modèle est calibré.")
+        c5.metric("Proba min par jambe", "70 %")
+        c5.caption("Imposée par le serveur — c'est le plancher qui produit les 77 %.")
+        min_prob = 0.70
+    else:
+        max_leg_odds = c4.slider(
+            "Cote max par jambe", 1.3, 5.0, 2.5, 0.1, key=k + "_maxleg",
+            help="Plafonne chaque jambe pour atteindre la cible en empilant, "
+                 "pas en pariant un seul longshot.")
+        min_prob = c5.slider(
+            "Proba min par jambe", 0.50, 0.80, 0.50, 0.05, key=k + "_minprob",
+            help="Plancher dur à 50 % : sous ce seuil une jambe n'est plus un "
+                 "pari risqué, c'est une erreur de mesure qui se compose.")
+
     today_only = st.checkbox("Aujourd'hui seulement",
-                             value=bool(filters.get("today_only", False)), key="tp_today")
+                             value=bool(filters.get("today_only", False)),
+                             key=k + "_today")
     sport = None if filters.get("sport") in (None, "Toutes") else filters.get("sport")
 
-    if st.button(f"🎯 Générer {n_combos} combiné(s) ≤ ×{target:.0f}", type="primary", width='stretch'):
+    label = "🎯 Générer" if _fav else "🎰 Tenter"
+    if st.button(label + f" {n_combos} combiné(s) ≤ ×{target:.0f}",
+                 type="primary", width='stretch', key=k + "_go"):
         payload = {
+            "mode": mode,
             "sport_key": sport,
             "today_only": today_only,
             "kickoff_hour": filters.get("kickoff_hour"),
@@ -648,16 +707,26 @@ def render_target_parlay_tab(filters: dict) -> None:
             )
             render_parlays(parlays)
         else:
-            empty_state(
-                "🎯",
-                "Pas assez de jambes-favoris aujourd'hui",
-                f"Il faut au moins 2 favoris éligibles (≤ ×{max_leg_odds:.1f}/jambe, "
-                f"proba ≥ {min_prob:.0%}, edge réel vs marché) pour former un combiné. "
-                "Hors-saison il y a peu de matchs : relâche « Cote max par jambe » ou "
-                "« Proba min », décoche « Aujourd'hui seulement » (inclut les jours "
-                "suivants), ou active `SCAN_ALL_SOCCER=1` pour couvrir plus de ligues.",
-            )
-
+            best = res.get("best_achievable_odds", 0.0)
+            if _fav:
+                empty_state(
+                    "🎯",
+                    "Pas assez de favoris éligibles",
+                    f"Il faut au moins 2 favoris disjoints (accord modèle+marché "
+                    f"≥ 70 %, cote ≤ ×{max_leg_odds:.2f}) pour former un combiné. "
+                    f"Meilleure chaîne atteignable aujourd'hui : ×{best:.2f}. "
+                    "Décoche « Aujourd'hui seulement » pour inclure les jours "
+                    "suivants, ou relâche la cote max par jambe.",
+                )
+            else:
+                empty_state(
+                    "🎰",
+                    "Pas assez de jambes de valeur",
+                    f"La loterie exige un edge réel vs marché dévigé sur chaque "
+                    f"jambe, et il n'y en a pas assez aujourd'hui. Meilleure "
+                    f"chaîne atteignable : ×{best:.2f}. Essaie l'onglet "
+                    "« Combinés de favoris », qui n'exige pas d'edge.",
+                )
 
 def render_live_tab(filters: dict, health: dict | None = None) -> None:
     import pandas as pd
