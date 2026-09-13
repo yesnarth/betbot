@@ -1012,8 +1012,18 @@ def detect_value_bets(
                         continue
 
                     best = m["best"]
+                    # Two distinct failures, two counters. They shared one key
+                    # ("sans_prix_ou_cote_basse") and that hid which of the two
+                    # actually starves the scan. Measured 2026-09-13 over 12
+                    # production scans: every single outcome clearing the 0.70
+                    # floor died on this pair, and the merged counter could not
+                    # say which half. The two call for opposite fixes — "no
+                    # whitelisted book quotes it" is a coverage problem (widen
+                    # BOOKMAKER_WHITELIST), "priced under min_book_odds" is the
+                    # confidence-floor/odds-gate contradiction — so they must be
+                    # countable apart.
                     if best is None:
-                        _funnel["sans_prix_ou_cote_basse"] += 1
+                        _funnel["sans_prix"] += 1
                         continue
 
                     novig = _novig_fair_prob(
@@ -1056,7 +1066,7 @@ def detect_value_bets(
                     # second time (0 probes in 4 days: the Under side of a
                     # favourite prices ~1.30-1.45, under the 1.50 value gate).
                     if not _is_totals and best.price < min_book_odds:
-                        _funnel["sans_prix_ou_cote_basse"] += 1
+                        _funnel["cote_basse"] += 1
                         continue
                     # Discipline (anti "value-trap") : cap extreme longshots —
                     # model error grows with odds — and require real conviction on
