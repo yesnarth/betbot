@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import time
 from datetime import datetime, timezone, timedelta
 from logging.handlers import RotatingFileHandler
@@ -66,6 +67,38 @@ from betbot.shared import filter_upcoming_today, load_team_stats_from_db  # noqa
 # Guaranteed minimum combos
 # ---------------------------------------------------------------------------
 
+def _apifootball_state() -> dict:
+    """Cached api-football account state; never let it break the email."""
+    try:
+        from betbot.data_sources.api_football import account_status
+        return account_status()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _quota_status(odds_client, queried_leagues: dict) -> dict:
+    """Quota state for the daily email, priced in SCANS not credits.
+
+    The user rotates Odds API keys by hand and this email is their checkpoint.
+    `remaining` alone is not actionable: a scan bills leagues x regions x
+    markets, so 150 credits reads as healthy while already buying zero scans.
+    """
+    from betbot.api import _quota_minimum, per_league_cost
+    try:
+        return {
+            "remaining": int(getattr(odds_client, "quota_remaining", -1)),
+            "reserve": _quota_minimum(),
+            # Price on the leagues actually QUERIED, not on those that survived
+            # the "today only" filter: on a quiet day the latter is 0, which
+            # would hide the block in the very case that needs the warning.
+            "leagues": len(queried_leagues),
+            "scan_cost": len(queried_leagues) * per_league_cost(),
+            "apifootball": _apifootball_state(),
+        }
+    except Exception:  # noqa: BLE001 — the email must go out regardless
+        return {}
+
+
 def _ensure_min_combos(
     events_by_sport: dict,
     prebuilt_stats: dict,
@@ -94,6 +127,12 @@ def _ensure_min_combos(
 
     ranked: list[ValueBet] = []
     parlays: list[Parlay] = []
+    # Singles that met the STRICT thresholds (first attempt). Only these are
+    # returned for persistence/email: the relaxation ladder below exists to
+    # fill parlays, and it used to hand back the LAST (loosest) attempt's
+    # `ranked` — picks at prob 0.30 / odds 1.20 born 'confirmed' in the daily
+    # auto-scan, the one path everyone believed respected the discipline.
+    strict_singles: list[ValueBet] | None = None
     probs_cache: dict = {}  # shared across all relaxation passes — avoids 5x Poisson recomputation
 
     for edge_thr, prob_thr, odds_thr, n_legs, label in attempts:
@@ -103,7 +142,16 @@ def _ensure_min_combos(
             bankroll=settings.bankroll,
             kelly_fraction=settings.kelly_fraction,
             min_value_edge=edge_thr,
+            max_value_edge=settings.max_value_edge,
             min_model_prob=prob_thr,
+            min_model_prob_totals=settings.min_model_prob_totals,
+            # Favourites only on the STRICT pass: the relaxed ladder passes
+            # exist to fill parlays, and re-emitting favourites there would
+            # duplicate them.
+            favorites_channel=(settings.favorites_channel
+                               and edge_thr >= settings.min_value_edge),
+            favorites_min_prob=settings.favorites_min_prob,
+            favorites_min_odds=settings.favorites_min_odds,
             min_book_odds=odds_thr,
             min_edge_vs_novig=settings.min_edge_vs_novig,
             max_book_odds=settings.max_book_odds,
@@ -111,6 +159,9 @@ def _ensure_min_combos(
             underdog_min_prob=settings.underdog_min_prob,
             novig_required=settings.novig_required,
             derive_dc_dnb=settings.derive_dc_dnb,
+            derive_dnb=settings.derive_dnb,
+            allow_totals_over=settings.allow_totals_over,
+            kelly_edge_cap=settings.kelly_edge_cap,
             derived_min_edge=settings.derived_min_edge,
             derived_min_odds=settings.derived_min_odds,
             prebuilt_stats_by_sport=prebuilt_stats,
@@ -118,15 +169,19 @@ def _ensure_min_combos(
         )
         ranked = rank_value_bets(raw_bets)[: settings.top_bets]
         parlays = build_parlays(ranked, n_legs=n_legs, top_n=settings.top_combos)
+        if strict_singles is None:
+            strict_singles = ranked  # first attempt IS the strict one
 
         if len(parlays) >= min_combos:
             if edge_thr < settings.min_value_edge:
-                logger.info("Seuil relâché [%s] pour atteindre %d combiné(s)", label, min_combos)
-            return ranked, parlays
+                logger.info("Seuil relâché [%s] pour les combinés uniquement — "
+                            "les singles persistés restent au filtre strict "
+                            "(%d pick(s))", label, len(strict_singles))
+            return strict_singles, parlays
 
         logger.info("[%s] → %d combiné(s), on relâche...", label, len(parlays))
 
-    return ranked, parlays
+    return (strict_singles if strict_singles is not None else ranked), parlays
 
 
 # ---------------------------------------------------------------------------
@@ -231,10 +286,32 @@ def update_team_stats(settings, db: Database, logger: logging.Logger) -> None:
                     defense_away=stats.defense_away,
                     matches_analyzed=stats.matches_analyzed,
                 )
-                _elo = local_elo.get(team)
-                if _elo is not None:
-                    db.update_team_enrichment(
-                        team_name=stats.name, sport_key=sport_key, elo_rating=_elo)
+                # The local Elo is NOT written to `elo_rating` any more.
+                #
+                # That column is meant to hold Club Elo — a rating comparable
+                # ACROSS leagues, which is the whole reason the blend gives it
+                # 30% weight as an independent long-term strength signal.
+                # `enrich_team_stats` fills it from clubelo.com; this job then
+                # overwrote it on every boot with a rating recomputed from a
+                # 1500 seed over the same match list Dixon-Coles already uses.
+                #
+                # Measured consequence: mean `elo_rating` is EXACTLY 1500.0 in
+                # every one of the 22 leagues in production (sigma 48 on ~10
+                # matches per team in the Champions League). Two failures at
+                # once — the signal is noise around a constant, and it is not
+                # independent of Dixon-Coles since it is derived from the same
+                # matches. The blend believed it had three signals; it had one
+                # and a half.
+                #
+                # A missing Elo is strictly better than a fake one:
+                # `blended_match_probs` sets `elo_weight = 0` when the rating is
+                # None and hands the weight back to Dixon-Coles + xG. Set
+                # WRITE_LOCAL_ELO=1 to restore the old behaviour.
+                if os.getenv("WRITE_LOCAL_ELO", "0") == "1":
+                    _elo = local_elo.get(team)
+                    if _elo is not None:
+                        db.update_team_enrichment(
+                            team_name=stats.name, sport_key=sport_key, elo_rating=_elo)
                 saved += 1
 
         # H2H per pair — cheap derivative of the same match list, persisted
@@ -271,7 +348,17 @@ def run_daily_scan(
     logger: logging.Logger,
     dry_run: bool = False,
     scan_label: str = "",
+    notify_when_empty: bool = True,
 ) -> None:
+    """notify_when_empty: send the "nothing found" email or stay silent.
+
+    With a single daily scan an empty result was worth an email — it told the
+    owner the bot had run and found nothing. Scanning four times a day turns
+    that same courtesy into four "rien à signaler" messages, and an inbox that
+    cries wolf is an inbox that stops being read. Only the day's FIRST scan
+    reports an empty result; the later slots speak only when they have
+    something to say.
+    """
     now = datetime.now()
     logger.info("=" * 55)
     logger.info("SCAN %s— %s", f"[{scan_label}] " if scan_label else "", now.strftime("%d/%m/%Y %H:%M"))
@@ -299,10 +386,10 @@ def run_daily_scan(
 
     if not events_by_sport:
         logger.info("Aucun match éligible pour ce scan.")
-        if not dry_run:
+        if not dry_run and notify_when_empty:
             notifier.send(
                 f"BetBot CI [{scan_label}] — Aucun match ce soir",
-                notifier.render_no_value(),
+                notifier.render_no_value(quota=_quota_status(odds_client, all_events)),
             )
         return
 
@@ -312,9 +399,56 @@ def run_daily_scan(
     logger.info("Stats Poisson : %d équipes chargées", n_teams)
 
     # 4. Detect value bets — garantit MIN_COMBOS combinés
-    ranked_bets, parlays = _ensure_min_combos(
-        events_by_sport, prebuilt_stats, settings, settings.min_combos, logger
+    # ONE strict pass. The relaxation ladder (_ensure_min_combos) is no longer
+    # called: it existed to guarantee MIN_COMBOS parlays by loosening the
+    # thresholds down to prob 0.30 — and during the September international
+    # break it quietly shipped exactly that. The singles ledger read 13/13
+    # while the owner lost money on emailed combos whose legs were below every
+    # floor, priced by the consensus model, and NEVER persisted. The one
+    # undisciplined product left was the one he actually consumes. A combo's
+    # legs now clear the same bar as everything else, or there is no combo.
+    ranked_bets = detect_value_bets(
+        events_by_sport=events_by_sport,
+        match_history_by_sport={},
+        bankroll=settings.bankroll,
+        kelly_fraction=settings.kelly_fraction,
+        min_value_edge=settings.min_value_edge,
+        max_value_edge=settings.max_value_edge,
+        min_model_prob=settings.min_model_prob,
+        min_book_odds=settings.min_book_odds,
+        min_edge_vs_novig=settings.min_edge_vs_novig,
+        max_book_odds=settings.max_book_odds,
+        underdog_odds=settings.underdog_odds,
+        underdog_min_prob=settings.underdog_min_prob,
+        novig_required=settings.novig_required,
+        derive_dc_dnb=settings.derive_dc_dnb,
+        derive_dnb=settings.derive_dnb,
+        allow_totals_over=settings.allow_totals_over,
+        kelly_edge_cap=settings.kelly_edge_cap,
+        derived_min_edge=settings.derived_min_edge,
+        derived_min_odds=settings.derived_min_odds,
+        min_model_prob_totals=settings.min_model_prob_totals,
+        favorites_channel=settings.favorites_channel,
+        favorites_min_prob=settings.favorites_min_prob,
+        favorites_min_odds=settings.favorites_min_odds,
+        prebuilt_stats_by_sport=prebuilt_stats,
     )
+    ranked_bets = rank_value_bets(ranked_bets)
+    parlays = []
+    # Two channels, two promises — split BEFORE anything downstream. The
+    # favourites ride in detect's return but must never be ranked against
+    # value picks (rank sorts by edge; a favourite's edge is ~minus the
+    # margin, which says nothing about its quality).
+    favoris_bets = [b for b in ranked_bets if b.channel == "favoris"]
+    ranked_bets = [b for b in ranked_bets if b.channel != "favoris"]
+    if favoris_bets:
+        favoris_bets.sort(key=lambda b: b.model_prob, reverse=True)
+        logger.info("⭐ Favoris calibrés : %d sélection(s) (accord modèle+marché ≥ %.2f)",
+                    len(favoris_bets), settings.favorites_min_prob)
+        # The owner's format: combos of favourites. Same disjoint rule as
+        # everywhere — one match appears in at most one combo.
+        parlays = build_parlays(favoris_bets, n_legs=3,
+                                top_n=settings.top_combos)
 
     logger.info(
         "%d pari(s) de valeur, %d combiné(s)",
@@ -337,8 +471,25 @@ def run_daily_scan(
             kelly_stake=bet.kelly_stake,
             lambda_home=bet.lambda_home,
             lambda_away=bet.lambda_away,
+            commence_time=(bet.commence_time or None),
             model_type=bet.model_type,
             reliability=bet.reliability,
+            market_prob=bet.market_prob,
+            shadow=bet.shadow,
+            channel=bet.channel,
+        )
+    for bet in favoris_bets:
+        db.save_prediction(
+            event_id=bet.event_id, sport_key=bet.sport_key,
+            home_team=bet.home_team, away_team=bet.away_team,
+            market=bet.market, selection=bet.selection_code,
+            model_prob=bet.model_prob, best_odds=bet.best_odds,
+            best_book=bet.best_book, value_edge=bet.value_edge,
+            kelly_stake=0.0, lambda_home=bet.lambda_home,
+            lambda_away=bet.lambda_away,
+            commence_time=(bet.commence_time or None),
+            model_type=bet.model_type, reliability=bet.reliability,
+            market_prob=bet.market_prob, channel="favoris",
         )
 
     # 6. Dry-run : afficher dans la console
@@ -361,9 +512,28 @@ def run_daily_scan(
 
     # 7. Build & send email
     stats = db.get_roi_stats(days=30)
-    html = notifier.render_html(ranked_bets, parlays, stats, settings.bankroll)
+    # Shadow picks are measurements, not recommendations. They are persisted
+    # and graded above, but the email is the "place these" channel: putting a
+    # 0.55-confidence totals probe next to a 0.70 conviction pick would invite
+    # exactly the stake this design exists to avoid.
+    _to_recommend = [b for b in ranked_bets if not b.shadow]
+    _n_shadow = len(ranked_bets) - len(_to_recommend)
+    if _n_shadow:
+        logger.info("%d pick(s) totals en OBSERVATION — enregistres et notes, "
+                    "hors e-mail et hors ROI", _n_shadow)
+    if not _to_recommend and not parlays and not favoris_bets and not notify_when_empty:
+        logger.info("Aucun pronostic à recommander — créneau intermédiaire, "
+                    "pas d'e-mail (les picks en observation restent enregistrés).")
+        logger.info("Scan terminé.")
+        return
+
+    html = notifier.render_html(_to_recommend, parlays, stats, settings.bankroll,
+                                quota=_quota_status(odds_client, all_events),
+                                favorites=favoris_bets)
     subject = (
-        f"BetBot CI [{scan_label}] — {len(parlays)} combiné(s) — "
+        f"BetBot CI [{scan_label}] — "
+        f"{len(_to_recommend)} valeur · {len(favoris_bets)} favoris · "
+        f"{len(parlays)} combiné(s) — "
         f"{now.strftime('%d/%m/%Y %H:%M')}"
     )
     notifier.send(subject, html)
@@ -443,7 +613,8 @@ def main() -> None:
     # calendars have team data immediately, not only after the first daily job.
     try:
         from betbot.stats_inseason import refresh_inseason_stats
-        _is = refresh_inseason_stats(db)
+        _is = refresh_inseason_stats(
+            db, max_age_hours=float(os.getenv("INSEASON_BOOT_MAX_AGE_H", "12")))
         logger.info("Boot in-season stats : %d ligues, %d équipes",
                     _is.get("leagues_done", 0), _is.get("teams_upserted", 0))
         health.record_job_fired("inseason_stats:boot")
@@ -516,11 +687,12 @@ def main() -> None:
         _runner.__name__ = f"wrapped_{name}"
         return _runner
 
-    labels = {
-        settings.scan_hours[0]: "Matin",
-        settings.scan_hours[1]: "Après-midi",
-        settings.scan_hours[2]: "Soir",
-    } if len(settings.scan_hours) >= 3 else {h: h for h in settings.scan_hours}
+    # Readable names for as many slots as are configured. The map was written
+    # for exactly three and silently degraded to raw times beyond that, which
+    # made a four-slot day unreadable in the inbox.
+    _slot_names = ["Matin", "Après-midi", "Soir", "Tard", "Nuit"]
+    labels = {h: (_slot_names[i] if i < len(_slot_names) else h)
+              for i, h in enumerate(settings.scan_hours)}
 
     # Scans : if the worker was offline at the scheduled time, APScheduler
     # will run a catch-up scan as soon as the worker boots — provided we
@@ -540,12 +712,16 @@ def main() -> None:
             "via le dashboard (🛠️ Outils → Scan manuel) ou l'endpoint "
             "/recommend/manual."
         )
-    for hour in settings.scan_hours:
+    for idx, hour in enumerate(settings.scan_hours):
         h, m = hour.split(":")
         label = labels.get(hour, hour)
+        # Only the day's FIRST slot reports "nothing found". The later ones
+        # scan closer to kick-off and stay silent unless they have something —
+        # four "rien à signaler" a day is how an inbox stops being read.
+        notify_empty = (idx == 0)
         scheduler.add_job(
             _wrap(f"scan:{label}", run_daily_scan,
-                  settings, db, notifier, logger, False, label),
+                  settings, db, notifier, logger, False, label, notify_empty),
             trigger=CronTrigger(hour=int(h), minute=int(m)),
             id=f"scan_{hour}",
             name=f"scan-{label}",
@@ -754,17 +930,29 @@ def main() -> None:
     # Auto-skip stale proposed picks — runs every 30 min. A pick that has been
     # 'proposed' for more than 36h is presumed past kickoff and gets archived
     # as 'skipped'. Prevents the dashboard from accumulating expired picks.
-    def _auto_skip_job():
-        n = db.auto_skip_expired_proposed(max_age_hours=36)
-        if n:
-            logger.info("auto-skip: archived %d expired proposed picks", n)
-    scheduler.add_job(
-        _wrap("auto_skip_proposed", _auto_skip_job),
-        trigger=CronTrigger(minute="*/30"),
-        id="auto_skip_proposed",
-        name="auto-skip",
-        misfire_grace_time=120,
-    )
+    #
+    # Disabled under AUTO_CONFIRM_PICKS=1: picks are then born 'confirmed'
+    # because the user places every one of them, so there is no validation
+    # queue to expire. Leaving it scheduled would be harmless (no 'proposed'
+    # rows to match) but this makes the intent explicit — and this job was
+    # the mechanism that buried 84% of production out of every statistic.
+    if os.getenv("AUTO_CONFIRM_PICKS", "0") == "1":
+        logger.info(
+            "auto-skip DÉSACTIVÉ (AUTO_CONFIRM_PICKS=1) — tout pronostic "
+            "scanné est compté comme placé."
+        )
+    else:
+        def _auto_skip_job():
+            n = db.auto_skip_expired_proposed(max_age_hours=36)
+            if n:
+                logger.info("auto-skip: archived %d expired proposed picks", n)
+        scheduler.add_job(
+            _wrap("auto_skip_proposed", _auto_skip_job),
+            trigger=CronTrigger(minute="*/30"),
+            id="auto_skip_proposed",
+            name="auto-skip",
+            misfire_grace_time=120,
+        )
 
     # Catch-up on startup — this PC is often shut down, so the daily resolve
     # cron rarely fires. Settle any bets that finished while it was off, ONCE,

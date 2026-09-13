@@ -46,11 +46,14 @@ class EmailNotifier:
         parlays: list[Parlay],
         stats: dict,
         bankroll: float,
+        quota: dict | None = None,
+        favorites: list | None = None,
     ) -> str:
         date_str = datetime.now().strftime("%d/%m/%Y à %H:%M")
-        return _build_html(bets, parlays, stats, date_str, bankroll)
+        return _build_html(bets, parlays, stats, date_str, bankroll, quota,
+                           favorites)
 
-    def render_no_value(self) -> str:
+    def render_no_value(self, quota: dict | None = None) -> str:
         date_str = datetime.now().strftime("%d/%m/%Y à %H:%M")
         return f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
         <body style="font-family:Arial,sans-serif;background:#f0f2f5;padding:20px;">
@@ -59,6 +62,7 @@ class EmailNotifier:
           <h2 style="color:#1a1a2e;">Aucune valeur détectée</h2>
           <p style="color:#666;">Scan du {date_str} : aucun pari ne satisfait les critères de valeur (edge ≥ 4%).</p>
           <p style="color:#888;font-size:12px;">C'est normal — le bot ne recommande que quand il y a un vrai avantage statistique.</p>
+          {_render_quota_section(quota)}
         </div></body></html>"""
 
 
@@ -66,14 +70,74 @@ class EmailNotifier:
 # HTML builder
 # ---------------------------------------------------------------------------
 
+def _render_quota_section(quota: dict | None) -> str:
+    """Quota block — the user rotates Odds API keys BY HAND and this daily
+    email is where they look. Credits alone are not actionable: what matters
+    is how many scans they still buy, because a scan bills
+    leagues x regions x markets (46 leagues in eu,uk with h2h+totals = 184).
+    """
+    if not quota:
+        return ""
+    remaining = int(quota.get("remaining", -1))
+    cost = int(quota.get("scan_cost", 0))
+    if remaining < 0 or cost <= 0:
+        return ""
+    n_scans = max(0, (remaining - int(quota.get("reserve", 0))) // cost)
+    leagues = int(quota.get("leagues", 0))
+    if n_scans == 0:
+        bg, border, color, title = "#ffebee", "#c62828", "#b71c1c", "⚠️ Quota épuisé — rotation de clé nécessaire"
+        body = (f"Il reste <b>{remaining}</b> requêtes, mais un scan en coûte "
+                f"<b>{cost}</b> ({leagues} ligues). <b>Le prochain scan sera refusé.</b> "
+                f"Ajoute une clé dans <code>ODDS_API_KEYS</code> (séparées par des virgules) : "
+                f"le bot bascule seul sur la première qui a le budget.")
+    elif n_scans <= 2:
+        bg, border, color, title = "#fff8e1", "#ffa000", "#e65100", "⏳ Quota bientôt épuisé"
+        body = (f"<b>{remaining}</b> requêtes restantes = <b>{n_scans} scan(s)</b> "
+                f"({cost} req/scan, {leagues} ligues). Prépare ta prochaine clé.")
+    else:
+        bg, border, color, title = "#e8f5e9", "#2e7d32", "#1b5e20", "Quota Odds API"
+        body = (f"<b>{remaining}</b> requêtes restantes = <b>{n_scans} scans</b> "
+                f"({cost} req/scan, {leagues} ligues).")
+    # Second subscription, same monthly cycle, same block: the user recharges
+    # both together, so both deadlines belong in one glance.
+    af = quota.get("apifootball") or {}
+    extra = ""
+    if af.get("state") == "ok" and af.get("days_left") is not None:
+        j = int(af["days_left"])
+        if j <= 3:
+            extra = (f'<p style="margin:8px 0 0;color:#b71c1c;font-size:13px;">'
+                     f"<b>api-football expire dans {j} jour(s)</b> — sans lui, plus "
+                     f"de statistiques d'équipe ni de xG, et le modèle retombe sur "
+                     f"le consensus.</p>")
+        else:
+            extra = (f'<p style="margin:8px 0 0;color:#777;font-size:12px;">'
+                     f"api-football : {j} jour(s) d'abonnement restants.</p>")
+    elif af.get("state") == "daily_limit_reached":
+        extra = ('<p style="margin:8px 0 0;color:#777;font-size:12px;">'
+                 "api-football : quota du jour épuisé (l'abonnement reste valide). "
+                 "Sans effet sur les pronostics.</p>")
+    elif af.get("state") == "inactive":
+        extra = ('<p style="margin:8px 0 0;color:#b71c1c;font-size:13px;">'
+                 "<b>Abonnement api-football inactif</b> — à renouveler.</p>")
+
+    return (f'<div style="background:{bg};border-radius:10px;padding:14px;'
+            f'margin-bottom:16px;border-left:4px solid {border};">'
+            f'<b style="color:{color};">{title}</b>'
+            f'<p style="margin:6px 0 0;color:#555;font-size:13px;line-height:1.6;">{body}</p>'
+            f'{extra}</div>')
+
+
 def _build_html(
     bets: list[ValueBet],
     parlays: list[Parlay],
     stats: dict,
     date_str: str,
     bankroll: float,
+    quota: dict | None = None,
+    favorites: list | None = None,
 ) -> str:
     bets_html = _render_bets_section(bets, bankroll)
+    favorites_html = _render_favorites_section(favorites or [])
     parlays_html = _render_parlays_section(parlays)
     stats_html = _render_stats_section(stats)
 
@@ -97,20 +161,23 @@ def _build_html(
 
   {bets_html}
   {parlays_html}
+  {favorites_html}
+
   {stats_html}
 
   <!-- Instructions -->
   <div style="background:#fff8e1;border-radius:10px;padding:16px;margin-bottom:16px;border-left:4px solid #ffa000;">
     <b style="color:#e65100;">Comment utiliser ces recommandations :</b>
     <ol style="margin:8px 0 0;padding-left:16px;color:#666;font-size:13px;line-height:1.8;">
-      <li>Va sur le <b>dashboard → onglet 🔔 Picks à valider</b> pour voir ces picks et :</li>
-      <li>Pour chaque pick : place-le manuellement chez ton bookmaker, puis click <b>« ✅ J'ai placé »</b> — ton solde est débité atomiquement</li>
-      <li>Ou click <b>« ❌ Skipper »</b> si tu passes — aucun mouvement de bankroll</li>
-      <li>Sinon, le pick s'auto-archive après 36h (kick-off dépassé)</li>
-      <li>La mise recommandée (Kelly) est calculée pour ton capital de {bankroll:.0f}$</li>
-      <li>Vérifie toujours les cotes avant de parier (elles peuvent changer)</li>
+      <li>Place les paris qui t'intéressent sur <b>Betclic</b> ou <b>Bet365</b> — les cotes ci-dessus viennent de ces deux books, donc elles sont réellement jouables</li>
+      <li><b>Ces picks sont déjà comptés comme placés</b> dans les statistiques du bot. Il n'y a rien à valider : si tu n'en joues pas un, le bilan affiché sera pessimiste, pas faux dans l'autre sens</li>
+      <li>Les résultats sont notés automatiquement — tu n'as aucune saisie à faire</li>
+      <li>Suis la performance dans <b>dashboard → 📊 Performance</b> (ROI à plat, tes mises réelles étant variables)</li>
+      <li>Vérifie toujours la cote avant de parier : elle bouge entre le scan et ton clic</li>
     </ol>
   </div>
+
+  {_render_quota_section(quota)}
 
   <!-- Disclaimer -->
   <div style="text-align:center;color:#999;font-size:11px;padding:10px;">
@@ -119,6 +186,52 @@ def _build_html(
   </div>
 
 </div></body></html>"""
+
+
+def _render_favorites_section(favorites: list) -> str:
+    """Favoris calibrés — the agreement channel, honestly labelled.
+
+    Every wording choice here is deliberate. This channel claims NO edge: the
+    model and the de-vigged market simply agree the outcome is likely. Its
+    long-run expectation is minus the bookmaker's margin, and the owner chose
+    it knowing that — his goal is hit rate. The section must never dress these
+    up as value picks: no edge column, no Kelly stake, and the expectation
+    stated in plain text where every reader of the email will see it.
+    """
+    if not favorites:
+        return ""
+    rows = []
+    for b in favorites[:12]:
+        rows.append(
+            f'<tr>'
+            f'<td style="padding:7px 8px;font-size:13px;color:#1a1a2e;">'
+            f'{b.home_team} – {b.away_team}'
+            f'<div style="color:#888;font-size:11px;">{b.league_label}</div></td>'
+            f'<td style="padding:7px 8px;font-size:13px;">{b.selection_label}</td>'
+            f'<td style="padding:7px 8px;text-align:center;font-size:13px;">'
+            f'<b>{b.best_odds:.2f}</b><div style="color:#888;font-size:11px;">'
+            f'{b.best_book}</div></td>'
+            f'<td style="padding:7px 8px;text-align:center;font-size:13px;">'
+            f'{b.model_prob*100:.0f}% / {(b.market_prob or 0)*100:.0f}%</td>'
+            f'</tr>'
+        )
+    return (
+        '<div style="background:#fff;border-radius:12px;padding:18px;'
+        'margin-bottom:16px;border-left:4px solid #5c6bc0;">'
+        '<b style="color:#3949ab;font-size:15px;">⭐ Favoris calibrés</b>'
+        '<p style="margin:6px 0 10px;color:#666;font-size:12px;line-height:1.6;">'
+        'Le modèle <b>et</b> le marché s\'accordent : probabilité ≥ 70 % des '
+        'deux côtés. Aucun avantage sur la cote n\'est revendiqué — sur la '
+        'durée, ce canal paie la marge du bookmaker (≈ −3 à −5 %). Son objectif '
+        'est le <b>taux de réussite</b>, pas le rendement. Mise libre.</p>'
+        '<table style="width:100%;border-collapse:collapse;">'
+        '<tr style="color:#888;font-size:11px;text-align:left;">'
+        '<th style="padding:4px 8px;">Match</th>'
+        '<th style="padding:4px 8px;">Sélection</th>'
+        '<th style="padding:4px 8px;text-align:center;">Cote</th>'
+        '<th style="padding:4px 8px;text-align:center;">Modèle / Marché</th></tr>'
+        + "".join(rows) + '</table></div>'
+    )
 
 
 def _render_bets_section(bets: list[ValueBet], bankroll: float = 100.0) -> str:

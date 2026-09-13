@@ -209,7 +209,23 @@ def scan_live(
     kelly_fraction: float = 0.25,
     min_value_edge: float = 0.04,
     min_book_odds: float = 1.30,
+    # THE measured lever. Production, clean population: picks above 2.22 odds
+    # returned -47.3%, and the split at the floor is stark — below 0.70
+    # confidence -24.6% ROI, above it +22.6%. In-play was the one path with
+    # neither cap nor floor wired, so it could take exactly the bets every
+    # other mode is built to refuse.
+    max_book_odds: float = 0.0,
     min_edge_vs_novig: float = 0.0,
+    # Discipline parity with the pre-match engine. The API started passing
+    # these without this signature accepting them -> TypeError -> HTTP 500,
+    # but ONLY when at least one match was live: with no live match the mode
+    # returned a clean "0 picks" and looked healthy. It failed exactly when
+    # it was supposed to serve.
+    min_model_prob: float = 0.0,
+    max_value_edge: float = 0.0,
+    allow_totals_over: bool = True,
+    derive_dnb: bool = True,  # accepted for parity; live has no DNB derivation
+    kelly_edge_cap: float = 0.0,
     now: datetime | None = None,
 ) -> list[dict]:
     """Return live value bets (SINGLES). Reuses _compute_probs for the pre-match
@@ -288,21 +304,53 @@ def scan_live(
             for code, lbl, outcome_name, market_key, point, model_prob in outcome_map:
                 if model_prob <= 0.0:
                     continue
+                # Same confidence floor as pre-match: live picks are historised
+                # and auto-confirmed exactly like the others, so they must not
+                # bypass the calibrated zone.
+                if model_prob < min_model_prob:
+                    continue
+                # Same totals contingent as pre-match (deterministic sampling
+                # on event id + direction) — the in-play goals model inherits
+                # the pre-match one's biases.
+                if not allow_totals_over and outcome_name in ("Over", "Under"):
+                    from betbot.analysis import _keep_totals_sample
+                    if not _keep_totals_sample(ev.get("id", ""), outcome_name):
+                        continue
                 best = extract_best_odds(ev, outcome_name, market_key=market_key, point=point)
                 if best is None or best.price < min_book_odds:
                     continue
-                if min_edge_vs_novig > 0.0:
-                    novig = _novig_fair_prob(ev, outcome_name, market_key, point,
-                                             group_names_by_market[(market_key, point)])
-                    if novig is not None and novig > 0.0 and (model_prob / novig - 1.0) < min_edge_vs_novig:
-                        continue
+                if max_book_odds > 0.0 and best.price > max_book_odds:
+                    continue
+                # Computed unconditionally: the market's own probability is
+                # what the model is judged against, and a live pick is graded
+                # and counted like any other. The week's only production pick
+                # (2026-08-23, in-play) was stored with market_prob NULL — the
+                # one row the model-vs-price verdict cannot use.
+                novig = _novig_fair_prob(ev, outcome_name, market_key, point,
+                                         group_names_by_market[(market_key, point)])
+                # AGREEMENT REQUIRED — in-play emits favourites, never value.
+                #
+                # The floor (0.70) plus the min-odds clamp (1.50) mean an
+                # in-play VALUE pick can only exist on a 7+ point disagreement
+                # with the live market — and the live market knows the pitch
+                # (injury at warm-up, red card, momentum) while our in-play
+                # model knows score and clock. Both live picks ever produced
+                # were draws at giant disagreements (0.88 vs ~0.50, then 0.71
+                # vs 0.39); both lost. The founding rule, written before
+                # either: until the model demonstrably beats the price, a
+                # disagreement pick is an expected loss. In-play now demands
+                # what the favourites channel demands — the market must AGREE.
+                if novig is None or novig < min_model_prob:
+                    continue
                 edge = round(model_prob * best.price - 1.0, 4)
                 if edge < min_value_edge:
+                    continue
+                if max_value_edge > 0.0 and edge > max_value_edge:
                     continue
                 reliability = compute_reliability(model_prob=model_prob, value_edge=edge,
                                                   model_type=probs.model, n_matches=None)
                 stake = kelly_stake(model_prob, best.price, bankroll, kelly_fraction,
-                                    reliability=reliability)
+                                    reliability=reliability, kelly_edge_cap=kelly_edge_cap)
                 out.append({
                     "event_id": ev.get("id"), "sport_key": sport_key, "league": label,
                     "home_team": home, "away_team": away,
@@ -312,6 +360,8 @@ def scan_live(
                     "best_book": best.bookmaker, "value_edge": edge,
                     "kelly_stake": stake, "model_type": probs.model,
                     "reliability": reliability,
+                    "market_prob": (round(novig, 4) if novig else None),
+                    "channel": "favoris",   # agreement pick — no edge claimed
                 })
 
     out.sort(key=lambda b: (b["value_edge"], b["model_prob"]), reverse=True)

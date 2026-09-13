@@ -21,6 +21,16 @@ class Settings:
     kelly_fraction: float
     min_value_edge: float
     min_model_prob: float
+    # Totals live on a different probability scale than 1X2: Over 2.5 averages
+    # 0.574 in production. Judging it by the 1X2 floor removes the market
+    # instead of protecting it. Shadow-only, so it never reaches a real stake.
+    min_model_prob_totals: float
+    # Favoris calibrés: agreement channel (model AND market >= the floor). The
+    # owner's explicit choice after the funnel showed the honest model produces
+    # ~zero value picks: he trades expected margin for hit rate, knowingly.
+    favorites_channel: bool
+    favorites_min_prob: float
+    favorites_min_odds: float
     min_book_odds: float
     top_bets: int
     min_combos: int
@@ -55,6 +65,20 @@ class Settings:
     derive_dc_dnb: bool = True
     derived_min_edge: float = 0.02      # edge floor for a DC/DNB single/leg (+EV)
     derived_min_odds: float = 1.10      # DC/DNB are low-odds by nature → own floor
+    # Upper edge cap. On a market quoted by several books, a large claimed edge
+    # measures the model's error, not an opportunity. Production 2026-08-01 by
+    # edge bracket: <10% → overconfidence +8 pts, ROI -6.7% ; 10-15% → +17 pts,
+    # -27.1% ; 15-20% → +16 pts, -20.0% ; >20% → +19 pts, -15 to -29%.
+    # 0.0 disables (default, opt-in).
+    max_value_edge: float = 0.0
+    # Draw No Bet has its own switch: it is derived by RATIO and amplifies
+    # model error, while Double Chance is derived by SUM and damps it.
+    derive_dnb: bool = True
+    # Over selections on totals. The goals model over-predicts in one
+    # direction: Over hit 28.1% against 53.0% implied (n=32, ROI -54.5%).
+    allow_totals_over: bool = True
+    # Edge Kelly is allowed to act on, before reliability scaling.
+    kelly_edge_cap: float = 0.0
 
 
 def load_settings() -> Settings:
@@ -80,10 +104,18 @@ def load_settings() -> Settings:
     bankroll          = float(os.getenv("BANKROLL", "100.0"))
     kelly_fraction    = float(os.getenv("KELLY_FRACTION", "0.25"))
     min_value_edge    = float(os.getenv("MIN_VALUE_EDGE", "0.04"))
+    max_value_edge    = float(os.getenv("MAX_VALUE_EDGE", "0.0"))
+    derive_dnb        = os.getenv("DERIVE_DNB", "1") == "1"
+    allow_totals_over = os.getenv("ALLOW_TOTALS_OVER", "1") == "1"
+    kelly_edge_cap    = float(os.getenv("KELLY_EDGE_CAP", "0.0"))
     # 3% beat of the vig-removed CONSENSUS line (raised from 2% → surer: only
     # bet where the model clearly beats the efficient market). Tune via .env.
     min_edge_vs_novig = float(os.getenv("MIN_EDGE_VS_NOVIG", "0.03"))
     min_model_prob    = float(os.getenv("MIN_MODEL_PROB", "0.40"))
+    min_model_prob_totals = float(os.getenv("MIN_MODEL_PROB_TOTALS", "0.55"))
+    favorites_channel = os.getenv("FAVORITES_CHANNEL", "1") == "1"
+    favorites_min_prob = float(os.getenv("FAVORITES_MIN_PROB", "0.70"))
+    favorites_min_odds = float(os.getenv("FAVORITES_MIN_ODDS", "1.20"))
     min_book_odds     = float(os.getenv("MIN_BOOK_ODDS", "1.50"))
     top_bets          = int(os.getenv("TOP_BETS", "10"))
     min_combos        = int(os.getenv("MIN_COMBOS", "3"))
@@ -153,8 +185,16 @@ def load_settings() -> Settings:
         bankroll=bankroll,
         kelly_fraction=kelly_fraction,
         min_value_edge=min_value_edge,
+        max_value_edge=max_value_edge,
+        derive_dnb=derive_dnb,
+        allow_totals_over=allow_totals_over,
+        kelly_edge_cap=kelly_edge_cap,
         min_edge_vs_novig=min_edge_vs_novig,
         min_model_prob=min_model_prob,
+        min_model_prob_totals=min_model_prob_totals,
+        favorites_channel=favorites_channel,
+        favorites_min_prob=favorites_min_prob,
+        favorites_min_odds=favorites_min_odds,
         min_book_odds=min_book_odds,
         top_bets=top_bets,
         min_combos=min_combos,
