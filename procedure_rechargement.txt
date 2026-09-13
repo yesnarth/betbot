@@ -1,0 +1,17 @@
+Procédure officielle pour changer la clé Odds API
+
+# 1. Modifier .env
+#    ODDS_API_KEY=nouvelle_clé
+
+# 2. Recréer api + worker (le dashboard n'utilise pas Odds API directement)
+docker compose -f d:/PROJETS/pronos/betbot/docker-compose.yml up -d --force-recreate api worker
+
+# 3. Vérifier que la nouvelle clé est active
+curl -s http://localhost:8000/health | python -m json.tool | grep odds_quota
+# Doit montrer le quota de la nouvelle clé (ex: 500 si fraîche)
+C'est fiable, simple, et déjà testé plusieurs fois pendant la session. Pas de surprise possible. Le hot-reload aurait été un confort mais aurait introduit :
+
+des caches à synchroniser dans 4 modules différents (settings, OddsAPIClient, calibrator, models)
+un volume mount supplémentaire à maintenir
+des edge cases (que faire des connections en cours qui ont la vieille clé ?)
+La méthode recreate prend ~5 secondes et garantit un état propre.

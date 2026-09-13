@@ -7,22 +7,24 @@
 
 | Tab | Status | Issues |
 |---|---|---|
-| 🎯 Décision | OK | — |
-| 🎯 Décision > 🎯 Scan manuel | OK | — |
-| 🎯 Décision > 🧠 Agent local | OK | — |
-| 🎯 Décision > 🤖 Agent IA (Claude) | OK | — |
-| 📅 Matchs | OK | — |
-| 📅 Matchs > 📅 Matchs disponibles | OK | — |
-| 📅 Matchs > ⏳ Paris en attente | OK | — |
+| 🔔 Mes picks | OK | — |
+| 🔔 Mes picks > 🔔 Picks à valider | OK | — |
+| 🔔 Mes picks > ⏳ Paris en attente | OK | — |
 | 📊 Performance | OK | — |
-| 📊 Performance > 📊 ROI / Performance | OK | — |
-| 📊 Performance > 💰 Capital | OK | — |
-| 📜 Historique | OK | — |
-| ⚙️ Système | OK | — |
-| ⚙️ Système > 🔌 Sources | OK | — |
-| ⚙️ Système > 🎚️ Calibrateur ML | OK | — |
-| ⚙️ Système > 🎾 Modèle tennis | OK | — |
-| ⚙️ Système > 🏀 Modèle basket | OK | — |
+| 💰 Capital | OK | — |
+| 🔬 Modèle | OK | — |
+| 🔬 Modèle > 🧪 Backtest | OK | — |
+| 🔬 Modèle > 🎚️ Calibrateur ML | OK | — |
+| 🔬 Modèle > 🎾 Tennis ELO | OK | — |
+| 🔬 Modèle > 🏀 Basketball | OK | — |
+| 🛠️ Outils > 🎯 Scan manuel | OK | — |
+| 🛠️ Outils > 🧠 Agent local | OK | — |
+| 🛠️ Outils > 🤖 Agent IA (Claude) | OK | — |
+| 🛠️ Outils > 🎰 Combiné ×1000 | OK | — |
+| 🛠️ Outils > 🔴 Live | OK | — |
+| 🛠️ Outils > 📅 Matchs disponibles | OK | — |
+| 🛠️ Outils > 🔌 Sources | OK | — |
+| 🛠️ Outils > 📜 Historique IA | OK | — |
 
 ## Network errors (status >= 400)
 
