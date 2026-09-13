@@ -598,3 +598,63 @@ def is_available() -> bool:
     except Exception:
         return False
     return bool(data.get("response"))
+
+
+def get_standings(league_id: int, season: int) -> dict[str, dict]:
+    """
+    Classement d'une ligue : {nom d'équipe: {rank, points, played, form}}.
+
+    UN SEUL APPEL couvre toute la ligue — contrairement aux blessures qui
+    coûtent un appel par équipe. C'est ce qui rend ce signal finançable sur 46
+    ligues : 46 requêtes par rafraîchissement contre 7 500/jour disponibles.
+
+    `form` est la chaîne des derniers résultats vue par le fournisseur, la plus
+    récente à DROITE (ex. « WWDLW »). C'est le seul signal réellement nouveau
+    ici : le classement lui-même double largement l'ELO et les forces
+    attaque/défense, alors que l'élan sur les derniers résultats n'est capturé
+    nulle part dans le blend.
+    """
+    try:
+        data = _get("standings", {"league": league_id, "season": season})
+    except Exception as exc:                      # jamais bloquant pour un scan
+        logger.debug("standings %s/%s indisponible : %s", league_id, season, exc)
+        return {}
+    out: dict[str, dict] = {}
+    for entry in (data.get("response") or []):
+        for group in ((entry.get("league") or {}).get("standings") or []):
+            for row in group or []:
+                name = ((row.get("team") or {}).get("name") or "").strip()
+                if not name:
+                    continue
+                out[name] = {
+                    "rank": row.get("rank"),
+                    "points": row.get("points"),
+                    "played": ((row.get("all") or {}).get("played")),
+                    "form": (row.get("form") or ""),
+                }
+    return out
+
+
+def get_topscorers(league_id: int, season: int, top: int = 20) -> dict[str, list[str]]:
+    """
+    Meilleurs buteurs d'une ligue : {nom d'équipe: [noms de joueurs]}.
+
+    Un appel par ligue, comme le classement. Sert à PONDÉRER les absences : le
+    modèle comptait les absents sans jamais regarder QUI manquait, si bien que
+    la sortie du meilleur buteur et celle d'un troisième gardien pesaient
+    identiquement. Les buteurs d'une ligue sont une approximation grossière de
+    l'importance offensive, mais c'est la seule qui tienne en un appel.
+    """
+    try:
+        data = _get("players/topscorers", {"league": league_id, "season": season})
+    except Exception as exc:
+        logger.debug("topscorers %s/%s indisponible : %s", league_id, season, exc)
+        return {}
+    out: dict[str, list[str]] = {}
+    for row in (data.get("response") or [])[:top]:
+        player = ((row.get("player") or {}).get("name") or "").strip()
+        stats = (row.get("statistics") or [{}])[0]
+        team = ((stats.get("team") or {}).get("name") or "").strip()
+        if player and team:
+            out.setdefault(team, []).append(player)
+    return out

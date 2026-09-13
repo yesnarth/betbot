@@ -39,11 +39,21 @@ _LEAGUE_ID: dict[str, int] = {
 }
 
 PENALTY_PER_ABSENCE = 0.035    # −3.5 % attack per confirmed absence
+# UN ABSENT N'EN VAUT PAS UN AUTRE — sa demande du 2026-09-13 (« forme /
+# statistique des joueurs »). Le modèle COMPTAIT les absents sans jamais
+# regarder QUI manquait : la sortie du meilleur buteur et celle d'un troisième
+# gardien pesaient exactement pareil. Un joueur figurant au classement des
+# buteurs de sa ligue paie ce supplément en plus de la pénalité de base, soit
+# environ le double. Les buteurs sont une approximation grossière de
+# l'importance offensive — mais c'est la seule qui tienne en UN appel par
+# ligue, et le surcoût d'un appel par joueur ne se justifierait pas.
+KEY_PLAYER_EXTRA = 0.045       # supplément pour l'absence d'un buteur de la ligue
 MAX_ABSENCES_COUNTED = 5       # cap the penalty → at most −17.5 %
 MIN_FACTOR = 0.80              # never cut a team's attack by more than 20 %
 CACHE_TTL_SEC = 12 * 3600      # injuries don't change minute-to-minute
 _DEFAULT_BUDGET = 40           # max API team-lookups per scan run (quota guard)
 
+_key_players_cache: dict[tuple, tuple[set, float]] = {}   # (league, season) → (noms, ts)
 _team_id_cache: dict[tuple, int | None] = {}      # (name, league_id) → team_id
 _factor_cache: dict[tuple, tuple[float, float]] = {}  # (name, sport_key) → (factor, ts)
 _budget_used = 0
@@ -109,14 +119,17 @@ def get_injury_factor(team_name: str, sport_key: str | None) -> float:
 
         _budget_used += 1
         injuries = api_football.get_team_injuries(tid, league_id, season)
-        n_out = sum(
-            1 for i in injuries
-            if (i.get("type") or "").lower().startswith("missing")  # "Missing Fixture"
-        )
-        factor = max(MIN_FACTOR, 1.0 - PENALTY_PER_ABSENCE * min(n_out, MAX_ABSENCES_COUNTED))
+        absents = [i for i in injuries
+                   if (i.get("type") or "").lower().startswith("missing")]
+        n_out = len(absents)
+        cles = _key_players(league_id, season)
+        n_key_out = sum(1 for i in absents
+                        if _norm_player(i.get("player") or "") in cles)
+        factor = injury_factor_from_counts(n_out, n_key_out)
         _factor_cache[cache_key] = (factor, now)
         if n_out:
-            logger.info("injuries %s: %d absent(s) → attaque ×%.3f", team_name, n_out, factor)
+            logger.info("injuries %s: %d absent(s) dont %d cadre(s) → attaque ×%.3f",
+                        team_name, n_out, n_key_out, factor)
         return factor
     except api_football.APIFootballNotConfigured:
         return 1.0
@@ -125,6 +138,53 @@ def get_injury_factor(team_name: str, sport_key: str | None) -> float:
         return 1.0
 
 
-def injury_factor_from_counts(n_out: int) -> float:
-    """Pure heuristic (testable without the API): absences → attack factor."""
-    return max(MIN_FACTOR, 1.0 - PENALTY_PER_ABSENCE * min(max(n_out, 0), MAX_ABSENCES_COUNTED))
+def _norm_player(name: str) -> str:
+    """Les noms de joueurs diffèrent d'un endpoint à l'autre (« K. Mbappé » vs
+    « Kylian Mbappe »). On compare sur le NOM DE FAMILLE normalisé : c'est la
+    partie stable, et une comparaison exacte ne rapprocherait jamais rien."""
+    import unicodedata
+    s = unicodedata.normalize("NFKD", (name or "").lower())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = "".join(c if c.isalnum() or c == " " else " " for c in s)
+    parts = [p for p in s.split() if len(p) > 1]
+    return parts[-1] if parts else ""
+
+
+def _key_players(league_id: int, season: int) -> set[str]:
+    """Noms de famille normalisés des buteurs de la ligue. Un appel par ligue,
+    caché 12 h — et caché MÊME VIDE, sinon une ligue sans classement de buteurs
+    serait réinterrogée à chaque équipe de chaque scan."""
+    key = (league_id, season)
+    now = time.time()
+    cached = _key_players_cache.get(key)
+    if cached is not None and (now - cached[1]) < CACHE_TTL_SEC:
+        return cached[0]
+    noms: set[str] = set()
+    try:
+        from betbot.data_sources import api_football
+        # VOLONTAIREMENT hors du budget `_budget_used`, qui protège les
+        # recherches PAR ÉQUIPE (deux appels par équipe, donc proportionnelles
+        # au nombre de matchs du scan). Celui-ci est un appel par LIGUE, caché
+        # 12 h : au pire 46 sur une journée. Le compter dans un budget de 40
+        # aurait épuisé celui-ci dès les premières ligues et éteint le signal
+        # blessures en silence — un signal en tuant un autre.
+        for joueurs in api_football.get_topscorers(league_id, season).values():
+            noms.update(_norm_player(j) for j in joueurs)
+        noms.discard("")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("topscorers %s indisponible : %s", league_id, exc)
+    _key_players_cache[key] = (noms, now)
+    return noms
+
+
+def injury_factor_from_counts(n_out: int, n_key_out: int = 0) -> float:
+    """Heuristique pure (testable sans API) : absences → facteur d'attaque.
+
+    `n_key_out` est un SOUS-ENSEMBLE de `n_out`, pas un compte séparé : un
+    cadre absent est déjà compté dans n_out et paie seulement le supplément.
+    """
+    n_out = max(n_out, 0)
+    n_key_out = max(0, min(n_key_out, n_out))
+    base = PENALTY_PER_ABSENCE * min(n_out, MAX_ABSENCES_COUNTED)
+    extra = KEY_PLAYER_EXTRA * min(n_key_out, MAX_ABSENCES_COUNTED)
+    return max(MIN_FACTOR, 1.0 - base - extra)

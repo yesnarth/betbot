@@ -30,6 +30,7 @@ from betbot.fatigue import (
     get_fatigue_factor as _fatigue_factor,
     reset_run_budget as _reset_fatigue_budget,
 )
+from betbot.standings import get_form_factor as _form_factor
 from betbot.data_sources.weather import (
     get_weather_factor as _weather_factor,
     reset_weather_budget as _reset_weather_budget,
@@ -1556,11 +1557,27 @@ def _compute_probs(
                 league_home_avg=league_home_avg,
                 league_away_avg=league_away_avg,
                 weather_modifier=_weather_factor(home, event.get("commence_time"), sport_key),
-                # Attack modifier = injuries × rest/congestion fatigue (both ≤1.0).
+                # Modificateur d'attaque = blessures (pondérées par l'importance
+                # du joueur) × fatigue/enchaînement × FORME sur les résultats.
+                #
+                # La forme est le seul des trois qui puisse monter au-dessus de
+                # 1,0 : une équipe en série peut surperformer sa moyenne de
+                # saison, alors qu'une absence ou un calendrier chargé ne peut
+                # que coûter. Bornée à ±6 % — la forme récente est le signal le
+                # plus sur-interprété du pronostic sportif, et cinq matchs sont
+                # un échantillon minuscule dont le modèle capture déjà
+                # l'essentiel par la décroissance exponentielle sur la récence.
+                #
+                # Modificateurs et NON cinquième terme du blend : celui-ci est
+                # calibré et mesuré à 74,7 % au-dessus de 0,70, et lui ajouter
+                # un terme prendrait du poids aux quatre autres sans qu'on
+                # sache lequel a aidé.
                 home_attack_mod=_injury_factor(home, sport_key)
-                * _fatigue_factor(home, sport_key, event.get("commence_time")),
+                * _fatigue_factor(home, sport_key, event.get("commence_time"))
+                * _form_factor(home, sport_key),
                 away_attack_mod=_injury_factor(away, sport_key)
-                * _fatigue_factor(away, sport_key, event.get("commence_time")),
+                * _fatigue_factor(away, sport_key, event.get("commence_time"))
+                * _form_factor(away, sport_key),
                 sport_key=sport_key,   # propagates to per-league Dixon-Coles τ
                 h2h=h2h_oriented,
                 **({"elo_weight": _tuned[0], "xg_weight": _tuned[1]} if _tuned else {}),
