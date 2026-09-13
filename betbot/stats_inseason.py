@@ -26,11 +26,83 @@ from betbot.models import build_team_stats, compute_league_averages
 
 logger = logging.getLogger("betbot.stats_inseason")
 
+# How much of a carried-over rating we keep when the CURRENT season is still
+# too thin to stand on its own. Squads change between seasons, so last year's
+# level is informative but not as certain as this year's — we inherit the
+# level, not the confidence. Coefficients are multiplicative around 1.0, so
+# shrinking toward 1.0 is shrinking toward "league average".
+CARRYOVER_SHRINK = 0.75
+
+
+def _shrink(coef: float, weight: float) -> float:
+    """Pull a multiplicative attack/defense coefficient toward 1.0."""
+    return 1.0 + (coef - 1.0) * weight
+
+
+def _load_matches(league_id: int, season: int, min_matches: int) -> tuple[list[dict], str, float]:
+    """Finished matches for a league, falling back to the previous season.
+
+    Every autumn-spring league is unusable for the first ~2 months of its
+    season: measured 2026-08-07, Belgium/Greece/Italy-B had ZERO finished
+    matches in season 2026 against 319/236/390 in 2025, so the `min_matches`
+    guard skipped them outright and they silently degraded to the market
+    consensus. The data was one parameter away the whole time.
+
+    Concatenating both seasons is safe because `build_team_stats` sorts by
+    date descending and time-weights: the current season's few matches
+    dominate naturally, last season only supplies depth.
+
+    Returns (matches, label, shrink_weight).
+    """
+    current = api_football.get_finished_matches(league_id, season)
+    if len(current) >= min_matches:
+        return current, str(season), 1.0
+
+    previous = api_football.get_finished_matches(league_id, season - 1)
+    if not previous:
+        return current, str(season), 1.0
+
+    # The more of the current season we already have, the less we shrink.
+    filled = min(1.0, len(current) / float(min_matches)) if min_matches > 0 else 0.0
+    weight = CARRYOVER_SHRINK + (1.0 - CARRYOVER_SHRINK) * filled
+    return previous + current, f"{season - 1}+{season}", weight
+
+
+def _hours_since_last_refresh() -> float | None:
+    """Age in hours of the freshest row this pipeline wrote, or None if never.
+
+    Only rows stamped with an `AF-` league code count: those are the ones this
+    module produces, so a football-data refresh of the European leagues cannot
+    make the in-season data look fresher than it is.
+    """
+    from datetime import datetime, timezone
+
+    from sqlalchemy import func, select
+
+    from betbot.database import session_scope
+    from betbot.orm_models import TeamStat
+
+    with session_scope() as s:
+        newest = s.execute(
+            select(func.max(TeamStat.updated_at))
+            .where(TeamStat.league_code.like("AF-%"))
+        ).scalar()
+    if not newest:
+        return None
+    try:
+        when = datetime.fromisoformat(str(newest).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - when).total_seconds() / 3600.0
+
 
 def refresh_inseason_stats(
     db: Database,
     only_keys: list[str] | None = None,
     min_matches: int = 30,
+    max_age_hours: float | None = None,
 ) -> dict:
     """Populate team_stats for in-season leagues from api-football.
 
@@ -45,6 +117,23 @@ def refresh_inseason_stats(
         return {"error": "API_FOOTBALL_KEY non configurée", "leagues": {},
                 "teams_upserted": 0, "leagues_done": 0, "leagues_skipped": {}}
 
+    # Freshness gate. This job costs roughly 34 leagues x 2 seasons x pagination
+    # of api-football calls, and it used to fire unconditionally at EVERY worker
+    # boot. On 2026-08-18 a day of deployments restarted the worker ~10 times
+    # and drained the 7,500/day allowance, after which every league silently
+    # refreshed to "0 leagues, 0 teams". Same shape as the Odds API drain fixed
+    # earlier: a catch-up job that re-pays on every restart.
+    #
+    # The SCHEDULED daily run passes no ceiling and always refreshes; only the
+    # boot call asks to be skipped when the data is already recent.
+    if max_age_hours is not None:
+        age = _hours_since_last_refresh()
+        if age is not None and age < max_age_hours:
+            logger.info("Stats in-season fraîches (%.1f h < %.1f h) — "
+                        "rafraîchissement au démarrage ignoré", age, max_age_hours)
+            return {"skipped": "fresh", "age_hours": round(age, 1), "leagues": {},
+                    "teams_upserted": 0, "leagues_done": 0, "leagues_skipped": {}}
+
     season = datetime.now(timezone.utc).year  # summer leagues are calendar-year
     summary: dict = {"season": season, "leagues": {}, "teams_upserted": 0,
                      "leagues_done": 0, "leagues_skipped": {}}
@@ -54,7 +143,8 @@ def refresh_inseason_stats(
         if only_keys and sport_key not in only_keys:
             continue
         try:
-            parsed = api_football.get_finished_matches(league_id, season)
+            parsed, season_label, shrink_w = _load_matches(
+                league_id, season, min_matches)
         except Exception as exc:  # noqa: BLE001
             logger.warning("in-season fetch failed for %s (%s): %s",
                            sport_key, league_id, exc)
@@ -81,10 +171,10 @@ def refresh_inseason_stats(
                 team_name=stats.name,
                 sport_key=sport_key,
                 league_code=league_code,
-                attack_home=stats.attack_home,
-                defense_home=stats.defense_home,
-                attack_away=stats.attack_away,
-                defense_away=stats.defense_away,
+                attack_home=_shrink(stats.attack_home, shrink_w),
+                defense_home=_shrink(stats.defense_home, shrink_w),
+                attack_away=_shrink(stats.attack_away, shrink_w),
+                defense_away=_shrink(stats.defense_away, shrink_w),
                 matches_analyzed=stats.matches_analyzed,
             )
             _elo = local_elo.get(team)
@@ -111,11 +201,14 @@ def refresh_inseason_stats(
         summary["leagues"][sport_key] = {
             "matches": len(parsed), "teams": saved, "h2h_pairs": h2h_pairs,
             "home_avg": round(home_avg, 2), "away_avg": round(away_avg, 2),
+            "season": season_label, "carryover_weight": round(shrink_w, 3),
         }
         summary["teams_upserted"] += saved
         summary["leagues_done"] += 1
-        logger.info("in-season %s : %d matchs, %d équipes, moy %.2f/%.2f",
-                    sport_key, len(parsed), saved, home_avg, away_avg)
+        logger.info("in-season %s : %d matchs (saison %s, poids %.2f), "
+                    "%d équipes, moy %.2f/%.2f",
+                    sport_key, len(parsed), season_label, shrink_w,
+                    saved, home_avg, away_avg)
 
     logger.info("Refresh in-season terminé : %d ligues, %d équipes",
                 summary["leagues_done"], summary["teams_upserted"])

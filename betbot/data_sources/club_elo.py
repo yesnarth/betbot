@@ -128,12 +128,47 @@ def get_team_elo(team_name: str, target_date: date | None = None) -> float | Non
     return None
 
 
-def elo_win_probability(elo_home: float, elo_away: float, home_advantage: float = 65.0) -> float:
+def elo_expected_score(elo_home: float, elo_away: float, home_advantage: float = 65.0) -> float:
     """
-    Standard Elo H2H probability for the home team to NOT lose
-    (used as a Bayesian prior alongside Poisson).
+    Standard Elo EXPECTED SCORE for the home team:
+
+        E = P(home win) + 0.5 * P(draw)
+
+    This is NOT P(home doesn't lose). The two differ by exactly half the draw
+    probability, and conflating them was a real bug: this function used to be
+    named `elo_win_probability` and documented as "probability to NOT lose",
+    so `models.py` fed E straight into the no-loss slot of the Bayesian
+    shrinkage. Because `away_win` is then computed as `1 - home_win - draw`,
+    the missing 0.5*draw was handed to the away side on every single match.
+
+    To recover the no-loss probability, add back half the draw:
+
+        P(no loss) = P(win) + P(draw) = E + 0.5 * P(draw)
+
+    See `blended_match_probs`, which does exactly that using the Poisson draw.
 
     home_advantage: Elo points credited to the home team (≈ 65 in football).
     """
     diff = (elo_home + home_advantage) - elo_away
     return 1.0 / (1.0 + 10 ** (-diff / 400.0))
+
+
+def elo_no_loss_probability(
+    elo_home: float,
+    elo_away: float,
+    draw_prob: float,
+    home_advantage: float = 65.0,
+) -> float:
+    """P(home does not lose), derived from the Elo expected score and an
+    external estimate of the draw probability (ours comes from Poisson).
+
+    Clamped to (0, 1) — a large draw_prob combined with a strong favourite can
+    otherwise push the sum past 1.
+    """
+    expected = elo_expected_score(elo_home, elo_away, home_advantage)
+    return min(1.0, max(0.0, expected + 0.5 * draw_prob))
+
+
+# Backwards-compatible alias. DEPRECATED: the name claims a win probability,
+# the value is an expected score. Use `elo_expected_score` explicitly.
+elo_win_probability = elo_expected_score

@@ -27,11 +27,17 @@ def _apifootball_configured() -> bool:
     return bool(os.getenv("API_FOOTBALL_KEY", "").strip())
 
 
-def get_league_xg(sport_key: str, year: int | None = None) -> list[dict]:
+def get_league_xg(sport_key: str, year: int | None = None,
+                  max_calls: int | None = None) -> list[dict]:
+    """max_calls: ceiling on api-football calls for THIS league, passed down by
+    a caller holding a global budget (see `enrichment.enrich_team_stats`).
+    Understat, being a free scrape, is unaffected by it."""
     if _apifootball_configured():
         try:
             from betbot.data_sources import api_football as af
-            res = af.get_league_xg(sport_key, year)
+            res = (af.get_league_xg(sport_key, year, max_calls=max_calls)
+                   if max_calls is not None
+                   else af.get_league_xg(sport_key, year))
             if res:
                 return res
             logger.info("api-football xG vide pour %s — repli Understat", sport_key)

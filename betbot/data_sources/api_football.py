@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+from collections import deque
 from typing import TypedDict
 
 import requests
@@ -37,6 +39,57 @@ def _headers() -> dict:
     return {"x-apisports-key": key}
 
 
+# Cumulative api-football call counter. The xG refresh is the only heavy
+# consumer (~teams x 7 calls per league, ~45 leagues) and it must be budgeted
+# ACROSS the whole run, not per league: a 400-call cap repeated 45 times is an
+# 18,000-call cap, three times the daily allowance.
+_CALL_COUNT = 0
+
+# Sliding window of call timestamps, for the per-minute ceiling.
+_CALL_TIMES: deque = deque()
+_RATE_LIMIT_RETRIES = 3
+_DEFAULT_RATE_LIMIT_PER_MIN = 280   # Pro allows 300/min; leave headroom
+
+
+def _rate_limit_per_min() -> int:
+    try:
+        return max(1, int(os.getenv("API_FOOTBALL_RATE_LIMIT_PER_MIN",
+                                    str(_DEFAULT_RATE_LIMIT_PER_MIN))))
+    except ValueError:
+        return _DEFAULT_RATE_LIMIT_PER_MIN
+
+
+def calls_made() -> int:
+    """Total api-football HTTP calls issued in this process."""
+    return _CALL_COUNT
+
+
+def _throttle() -> None:
+    """Stay under the plan's PER-MINUTE ceiling before issuing a call.
+
+    The daily allowance is generous (7,500 on Pro) but the per-minute one is
+    not, and a league-wide xG refresh is a burst of hundreds of calls. Measured
+    2026-08-10: an enrichment run got through the leagues from "argentina" to
+    "chile", hit the minute ceiling, and every league after that silently
+    returned nothing — `_get` logged a warning and handed back `{}`, which
+    reads exactly like "this league has no xG". 1,121 of 7,500 daily calls
+    used, and the run still came home almost empty.
+    """
+    limit = _rate_limit_per_min()
+    now = time.monotonic()
+    while _CALL_TIMES and now - _CALL_TIMES[0] >= 60.0:
+        _CALL_TIMES.popleft()
+    if len(_CALL_TIMES) >= limit:
+        wait = 60.0 - (now - _CALL_TIMES[0]) + 0.25
+        if wait > 0:
+            logger.info("api-football : plafond/minute atteint, pause %.1fs", wait)
+            time.sleep(wait)
+            now = time.monotonic()
+            while _CALL_TIMES and now - _CALL_TIMES[0] >= 60.0:
+                _CALL_TIMES.popleft()
+    _CALL_TIMES.append(time.monotonic())
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(min=2, max=10),
@@ -44,6 +97,9 @@ def _headers() -> dict:
     reraise=True,
 )
 def _get(endpoint: str, params: dict | None = None) -> dict:
+    global _CALL_COUNT
+    _throttle()
+    _CALL_COUNT += 1
     resp = requests.get(
         f"{BASE_URL}/{endpoint}",
         headers=_headers(),
@@ -51,7 +107,27 @@ def _get(endpoint: str, params: dict | None = None) -> dict:
         timeout=20,
     )
     if resp.status_code == 429:
-        logger.warning("API-Football rate limit hit")
+        # Back off and retry rather than returning {} — an empty dict is
+        # indistinguishable from "no data for this league" to every caller,
+        # which is how a throttled run looked like a data-coverage problem.
+        for attempt in range(_RATE_LIMIT_RETRIES):
+            wait = 5.0 * (attempt + 1)
+            logger.warning("API-Football 429 sur %s — pause %.0fs (essai %d/%d)",
+                           endpoint, wait, attempt + 1, _RATE_LIMIT_RETRIES)
+            time.sleep(wait)
+            _CALL_TIMES.clear()   # the ceiling just moved; restart the window
+            _CALL_COUNT += 1
+            resp = requests.get(
+                f"{BASE_URL}/{endpoint}",
+                headers=_headers(),
+                params=params or {},
+                timeout=20,
+            )
+            if resp.status_code != 429:
+                break
+    if resp.status_code == 429:
+        logger.error("API-Football : plafond toujours actif après %d essais sur %s",
+                     _RATE_LIMIT_RETRIES, endpoint)
         return {}
     if resp.status_code != 200:
         logger.warning("API-Football HTTP %s on %s", resp.status_code, endpoint)
@@ -158,7 +234,7 @@ SPORT_TO_LEAGUE_ID: dict[str, int] = {
     "soccer_france_ligue1": 61,
     "soccer_netherlands_eredivisie": 88,
     "soccer_portugal_primeira_liga": 94,
-    "soccer_england_championship": 40,
+    "soccer_efl_champ": 40,
 }
 
 # The Odds API sport_key → api-football league id, for IN-SEASON leagues that
@@ -195,6 +271,35 @@ IN_SEASON_LEAGUE_ID: dict[str, int] = {
     "soccer_italy_serie_b": 136,
     "soccer_league_of_ireland": 357,
     "soccer_spl": 179,                     # Scottish Premiership
+    # Added 2026-08-07. Second tiers and Turkey — in season, quoted by the
+    # books, and previously invisible to the model: absent from this map they
+    # had no team stats at all and every match ran on market consensus.
+    # IDs resolved against the api-football /leagues endpoint and eyeballed
+    # against the competition NAME, never guessed: 79 is "2. Bundesliga" and
+    # 1034 is the women's league; 141 is "Segunda División" and 875-877 are
+    # the RFEF regional groups. A wrong id trains the model on another
+    # competition entirely, in silence.
+    "soccer_england_league1": 41,          # League One (D3)
+    "soccer_england_league2": 42,          # League Two (D4)
+    "soccer_france_ligue_two": 62,         # Ligue 2
+    "soccer_germany_bundesliga2": 79,      # 2. Bundesliga
+    "soccer_germany_liga3": 80,            # 3. Liga
+    "soccer_spain_segunda_division": 141,  # Segunda División
+    # NB : soccer_turkey_super_league (203) était déjà mappé plus bas — son
+    # absence de stats venait de la frontière de saison, pas du mapping.
+    # Added 2026-08-01. These competitions were absent from BOTH resolution
+    # maps, so their picks could never be graded: 17 stuck on Champions League
+    # qualifying alone, 30 unresolved totals picks in total — about +45% of
+    # already-acquired sample that was simply never read, concentrated on
+    # exactly the segment where evidence was missing (consensus path, heavy
+    # favourites, O3.5). IDs verified against the api-football /leagues
+    # endpoint, not guessed — a wrong ID grades picks against the wrong
+    # competition, which is worse than not grading them.
+    "soccer_uefa_champs_league_qualification": 2,   # UEFA CL — qualifying rounds included
+    "soccer_england_efl_cup": 48,                   # League Cup (England)
+    "soccer_conmebol_copa_sudamericana": 11,        # CONMEBOL Sudamericana
+    "soccer_conmebol_copa_libertadores": 13,        # CONMEBOL Libertadores
+    "soccer_turkey_super_league": 203,              # Süper Lig
 }
 
 
@@ -274,15 +379,30 @@ def get_recent_team_xg(
     team_id: int, league_id: int, season: int, last: int = 6,
 ) -> dict | None:
     """Aggregate a team's xG for/against over its last `last` finished fixtures.
-    Returns {matches, xg_per_match, xga_per_match} or None if no xG was found."""
-    try:
-        fx = _get("fixtures", {"team": team_id, "league": league_id,
-                               "season": season, "last": last, "status": "FT"})
-    except Exception:
-        return None
+    Returns {matches, xg_per_match, xga_per_match} or None if no xG was found.
+
+    Falls back to the previous season when the current one has not produced
+    enough finished fixtures yet. Without this, every autumn-spring league is
+    xG-blind for the first two months of its season — the same season-boundary
+    hole that left 22 leagues without team stats, one layer down. Measured
+    2026-08-10: a first pass over 43 leagues spent 385 calls and filled 67
+    teams, because most leagues answered "no finished fixtures" after a single
+    request.
+    """
+    fixtures: list = []
+    for candidate_season in (season, season - 1):
+        try:
+            fx = _get("fixtures", {"team": team_id, "league": league_id,
+                                   "season": candidate_season,
+                                   "last": last, "status": "FT"})
+        except Exception:
+            return None
+        fixtures = fx.get("response", []) or []
+        if fixtures:
+            break
     xgf = xga = 0.0
     n = 0
-    for f in fx.get("response", []):
+    for f in fixtures:
         fid = f.get("fixture", {}).get("id")
         home_id = f.get("teams", {}).get("home", {}).get("id")
         away_id = f.get("teams", {}).get("away", {}).get("id")
@@ -303,6 +423,106 @@ def get_recent_team_xg(
             "xga_per_match": round(xga / n, 3)}
 
 
+_STATUS_CACHE: dict = {"at": 0.0, "value": None}
+_STATUS_TTL_S = 3600.0
+
+
+def account_status(force: bool = False) -> dict:
+    """Truthful account state: plan, subscription end, daily consumption.
+
+    Cached for an hour because /status costs a request like any other, and the
+    health endpoint is polled every few seconds — reading the quota must not be
+    what exhausts it.
+
+    Two traps this function exists to avoid, both met head-on on 2026-08-18:
+
+    * The RESPONSE HEADERS lie about consumption. With the daily allowance
+      spent, api-football still advertised `x-ratelimit-requests-remaining:
+      7499` out of 7500 while refusing every endpoint. The headers carry the
+      plan's nominal limits, not the account's state.
+    * The BODY is the truth, and it says so in `errors.requests`. When the
+      daily limit is reached the payload has an empty `response`, so anything
+      reading `response.subscription` sees None and concludes "unknown" — which
+      is how an exhausted quota passes for a configuration problem.
+    """
+    import time
+
+    now = time.monotonic()
+    if not force and _STATUS_CACHE["value"] is not None:
+        if now - _STATUS_CACHE["at"] < _STATUS_TTL_S:
+            return _STATUS_CACHE["value"]
+
+    out: dict = {"state": "unknown", "plan": None, "active": None,
+                 "subscription_end": None, "days_left": None,
+                 "requests_used": None, "requests_limit": None}
+
+    key = os.getenv("API_FOOTBALL_KEY", "").strip()
+    if not key:
+        out["state"] = "unconfigured"
+        _STATUS_CACHE.update(at=now, value=out)
+        return out
+
+    try:
+        resp = requests.get(f"{BASE_URL}/status",
+                            headers={"x-apisports-key": key}, timeout=15)
+        data = resp.json()
+    except Exception:  # noqa: BLE001 — never let a status probe break a caller
+        out["state"] = "unreachable"
+        _STATUS_CACHE.update(at=now, value=out)
+        return out
+
+    errors = data.get("errors") or {}
+    if isinstance(errors, dict) and "requests" in errors:
+        # The daily allowance is spent. The plan itself is fine.
+        out["state"] = "daily_limit_reached"
+        _STATUS_CACHE.update(at=now, value=out)
+        return out
+
+    body = data.get("response") or {}
+    if isinstance(body, dict) and body:
+        sub = body.get("subscription") or {}
+        req = body.get("requests") or {}
+        out["plan"] = sub.get("plan")
+        out["active"] = sub.get("active")
+        out["subscription_end"] = sub.get("end")
+        out["requests_used"] = req.get("current")
+        out["requests_limit"] = req.get("limit_day")
+        out["days_left"] = _days_until(out["subscription_end"])
+        out["state"] = "ok" if sub.get("active") else "inactive"
+
+    _STATUS_CACHE.update(at=now, value=out)
+    return out
+
+
+def _days_until(iso: str | None) -> int | None:
+    """Whole days from now to an ISO timestamp; negative once past."""
+    from datetime import datetime, timezone
+
+    if not iso:
+        return None
+    try:
+        end = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    return int((end - datetime.now(timezone.utc)).total_seconds() // 86400)
+
+
+def league_id_for(sport_key: str) -> int | None:
+    """api-football league id for a sport_key, from EITHER map.
+
+    Two maps grew side by side — `SPORT_TO_LEAGUE_ID` for xG and
+    `IN_SEASON_LEAGUE_ID` for team stats — and the xG one was never extended
+    past its original 8 leagues. Measured 2026-08-10: 94 of 816 teams carried
+    xG (11.5%) while the scan covered 46 leagues, purely because xG resolution
+    stopped at the smaller map. One resolver, both maps.
+    """
+    from betbot.sport_keys import to_canonical
+    key = to_canonical(sport_key)
+    return SPORT_TO_LEAGUE_ID.get(key) or IN_SEASON_LEAGUE_ID.get(key)
+
+
 def get_league_xg(sport_key: str, year: int | None = None, last: int = 6,
                   max_calls: int = 400) -> list[dict]:
     """Per-team recent-form xG for a whole league, shaped like the Understat
@@ -311,7 +531,7 @@ def get_league_xg(sport_key: str, year: int | None = None, last: int = 6,
     Heavy (≈ teams × (1 + last) calls) — guarded by `max_calls` and a 24h
     in-process cache. Returns [] when the league isn't mapped or has no xG.
     """
-    league_id = SPORT_TO_LEAGUE_ID.get(sport_key)
+    league_id = league_id_for(sport_key)
     if not league_id:
         return []
     season = year or _current_season_year()
