@@ -6,15 +6,21 @@ and returns ranked value bets and parlay combinations.
 """
 from __future__ import annotations
 
+import hashlib
 import itertools
 import logging
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
-from difflib import get_close_matches
+from difflib import SequenceMatcher
 
-from betbot.calibration import shrink_toward_market
-from betbot.ml import calibrate as ml_calibrate, segment_for as _ml_segment
+from betbot.calibration import is_edge_suspicious, shrink_toward_market
+from betbot.ml import (
+    calibrate as ml_calibrate,
+    in_domain as _ml_in_domain,
+    segment_for as _ml_segment,
+)
 from betbot.blend_params import get_weights as _get_blend_weights
 from betbot.injuries import (
     get_injury_factor as _injury_factor,
@@ -65,6 +71,49 @@ class ValueBet:
     # manually aren't broken; detect_value_bets populates it from
     # betbot.reliability.compute_reliability.
     reliability: float = 1.0
+    # Kickoff, ISO-8601, straight from the event. Carried ON THE OBJECT rather
+    # than rebuilt by each caller: of the four `save_prediction` call sites only
+    # one supplied it, so three paths silently stored NULL — and without a
+    # kickoff the CLV snapshot cannot narrow to matches near kickoff, which is
+    # what made CLV unaffordable in the first place.
+    commence_time: str = ""
+    # De-vigged CONSENSUS probability of this exact selection at pick time.
+    #
+    # It was already computed on every pick (as the adverse-selection gate) and
+    # then thrown away. Keeping it is what makes the one question that matters
+    # answerable: Brier(model_prob) vs Brier(market_prob) on the same graded
+    # picks decides whether the model adds anything over the price. That
+    # verdict cannot be reconstructed later — `best_odds` is one side of the
+    # market, and de-vigging needs the whole outcome group, which is gone once
+    # the scan ends.
+    #
+    # None when no bookmaker priced the full outcome group (thin market).
+    market_prob: float | None = None
+    # Which promise this pick belongs to. "valeur": the model claims an edge
+    # over the price (rare by construction since the model was repaired — it
+    # hugs the market, and disagreeing by the 7+ points the value gates demand
+    # is exactly what an honest model stops doing). "favoris": model AND
+    # de-vigged market AGREE the outcome is >= the confidence floor; no edge is
+    # claimed, and the long-run expectation of the channel is minus the
+    # bookmaker's margin. That trade-off is the owner's explicit, informed
+    # choice: his goal is hit rate, not beating the market. The two channels
+    # are stored, displayed and measured separately — mixing them would let
+    # a flood of favourites mask the value channel's record.
+    channel: str = "valeur"
+    # SHADOW pick: recorded and graded, never recommended for placement.
+    #
+    # Totals were cut on evidence gathered while the goals model was broken
+    # (`_prob_to_lambda` invented 4.61 expected goals on a favourite against
+    # ~2.9 real, so the model over-bet Overs by construction). That bug is
+    # fixed, which makes the -52% Over ROI stale — and no totals pick has been
+    # produced since 2026-08-01, so the cut had become UNFALSIFIABLE, the exact
+    # failure the residual contingent was built to prevent.
+    #
+    # Rebuilding the evidence must not cost real money on an untested
+    # hypothesis. Shadow picks are born 'proposed' whatever AUTO_CONFIRM_PICKS
+    # says, and are kept out of the email, so they accumulate a graded record
+    # at zero stake.
+    shadow: bool = False
 
 
 @dataclass
@@ -92,6 +141,10 @@ _STRIP_WORDS = frozenset([
     'sc', 'bv', 'sv', 'fk', 'nk', 'sk',
     'de', 'del', 'la', 'le', 'les',
     'calcio', 'balompie',
+    # German/Bulgarian corporate prefixes (2026-09-10 audit): 'VfL Wolfsburg'
+    # was one shared 'vfl' away from VfL Bochum, 'PFC CSKA Sofia' one 'pfc'
+    # from nothing useful. The city/club word is the identity, not these.
+    'vfl', 'vfb', 'fsv', 'tsv', 'bsc', 'pfc',
 ])
 
 # Odds API common name → distinctive fragment present in the normalized DB name.
@@ -124,21 +177,159 @@ _TEAM_NAME_ALIASES: dict[str, str] = {
     'clube regatas brasil':  'CRB',          # "Clube de Regatas Brasil"
     # South Korea (club renamed Sangju Sangmu → Gimcheon Sangmu in 2021)
     'sangju sangmu':         'Gimcheon Sangmu FC',
+    # France - the Odds API says "Lyon", api-football stores the official
+    # "Olympique Lyonnais". No shared token and a low string ratio, so nothing
+    # short of an explicit alias bridges it. Seen live on a Champions League
+    # qualifier, where Lyon fell through to the consensus model.
+    'lyon':                  'Olympique Lyonnais',
     # China (renames / alternate English names — verified same club)
     'chengdu rongcheng':     'Chengdu Better City',
     'zhejiang':              'Hangzhou Greentown',
     'dalian yingbo':         'Dalian Zhixing',
+    # Champions-League night traps, all caught live 2026-09-08. The Odds API
+    # speaks English club names; api-football stores the official ones. In a
+    # continental pool full of near-namesakes, fuzzy matching resolved these
+    # to the WRONG COUNTRY'S club — which then vetoed favourites the market
+    # itself validated (a Poisson priced on a foreign namesake rarely reaches
+    # the 0.70 agreement floor).
+    'sporting lisbon':       'Sporting Clube de Portugal',   # was: Sporting Gijon
+    'barcelona':             'FC Barcelona',                 # was: Barcelona SC (Ecuador)
+    'red star belgrade':     'FK Crvena Zvezda',             # was: RED Star FC 93 (Paris)
+    # Brazil — an all-generic-token name ('atletico' + 'mineiro') whose long
+    # form the shared-generic guard would otherwise refuse to contain.
+    'clube atletico mineiro': 'Atletico-MG',
+    # Russia — api-football stores Dynamo Moscow as bare 'Dynamo'. Once
+    # 'dynamo' is a generic token (it had been lending Moscow's form to
+    # Kyiv, Batumi and Minsk), only an alias may bridge the bare row.
+    'dynamo moscow': 'Dynamo',
+    # Greece — the Odds API says 'Aris'/'Aris Thessaloniki', api-football
+    # stores 'Aris Thessalonikis'; the trailing s breaks the token bridge.
+    'aris': 'Aris Thessalonikis',
+    'aris thessaloniki': 'Aris Thessalonikis',
+    # France — same shape as 'lyon' above: no shared token bridges these.
+    'red star':              'RED Star FC 93',               # Ligue 2, the actual Paris club
+    'brest':                 'Stade Brestois 29',            # was: consensus all season
 }
+
+
+# Per-token spellings of the SAME word across providers. Applied during
+# normalization so both sides converge before any matching is attempted.
+#
+# Measured 2026-08-09 in production, this exact gap produced two INVERTED
+# predictions: the Odds API says "Dundee United" while api-football stores
+# "Dundee Utd", so no exact match was found and the fallback quietly picked
+# "Dundee" — a different club in the same league. Same in Russia:
+# "FC Dynamo Makhachkala" was handed Dynamo Moscow's stats, while Dynamo
+# Moscow itself matched nothing at all.
+_TOKEN_SYNONYMS: dict[str, str] = {
+    'utd': 'united',
+    'dinamo': 'dynamo',
+    # The Odds API anglicizes, api-football stores 'SK Slavia Praha' /
+    # 'AC Sparta Praha'. Converging the city token is what lets 'praha' also
+    # serve as a discriminating token below.
+    'prague': 'praha',
+    # From the 2026-09-10 /participants audit: 'Austria Wien' must keep
+    # reaching 'Austria Vienna' once 'austria' becomes a generic token, and
+    # 'Atletico-MG' is the Mineiro club ('America MG' likewise). Brazilian
+    # clubs rebranded 'Athletico' (Paranaense) — same word, same role.
+    'wien': 'vienna',
+    'mg': 'mineiro',
+    'athletico': 'atletico',
+    'munich': 'munchen',
+}
+
+# Words whose whole purpose is telling two clubs of the same town apart.
+# If the queried name carries one and a candidate does not, they are not the
+# same club — however well the remaining tokens line up. This is what makes
+# "Dundee United" refuse "Dundee" even when "Dundee Utd" is missing from the
+# cache: a miss falls back to the consensus model, a false match silently
+# prices the wrong team and is auto-confirmed as a real bet.
+_DISCRIMINATING_TOKENS: frozenset = frozenset([
+    'united', 'city', 'town', 'county', 'rovers', 'wanderers', 'albion',
+    'forest', 'hotspur', 'orient', 'palace', 'argyle', 'athletic',
+    'academical', 'alexandra', 'thistle', 'ii', 'b',
+    # City names that tell same-named clubs of DIFFERENT countries apart —
+    # the continental pool's version of Dundee vs Dundee United. 'praha'
+    # refuses Sparta Rotterdam for a 'Sparta Prague' query (the synonym above
+    # folds prague→praha first, so 'Slavia Prague' still reaches SK Slavia
+    # Praha); 'gijon' refuses Sporting Gijon for any other Sporting; nothing
+    # stored carries 'belgrade', so a Belgrade query declines to consensus
+    # rather than borrow a Parisian or Dutch namesake.
+    'praha', 'gijon', 'belgrade',
+    # The Prague rivals share 'praha', so the CLUB tokens must discriminate
+    # too: first verified in the container against the real pool, 'Sparta
+    # Prague' had slid to SK Slavia Praha on the city token alone.
+    'sparta', 'slavia',
+    # 'RFC Liège' is not Standard: a query about the OTHER Liège club never
+    # carries 'standard' (2026-09-10 /participants audit).
+    'standard',
+])
+
+# Tokens that are GENERIC rather than discriminating: being the ONLY thing
+# two names share proves nothing, but their presence on one side only proves
+# nothing either — 'Atlético Huracán' IS 'Huracan' (api-football drops the
+# prefix), while 'Atlético Huracán' is NOT 'Atletico Tucuman'. So they join
+# _DISCRIMINATING_TOKENS in the shared-generic guard below and stay OUT of
+# the one-side guard above it.
+#
+# Measured 2026-09-10 on the /participants audit (2 516 canonical names):
+# these Latin-football generics play exactly the role 'united'/'city' play
+# in Britain — identity lives in the OTHER word. False matches caught, each
+# two different real clubs: Atlético Huracán→Atletico Tucuman, Deportes
+# Iquique→Deportes Limache, Universidad Católica→Universidad de Chile (the
+# Chilean rivals), Unión Española→Union La Calera, Nacional Potosí→Club
+# Nacional, Defensor Sporting→Sporting Cristal, Sport Huancayo→Sport Recife,
+# São Bernardo→Sao Paulo, Botafogo-SP→Botafogo (RJ), Austria Klagenfurt→
+# Austria Lustenau, GV San José→San Lorenzo, Olimpia Asunción→Libertad
+# Asuncion, Cerro Largo→Cerro Porteno, Alianza Lima→Alianza Atletico,
+# Grêmio Novorizontino→Gremio, Atletico Mineiro→America Mineiro.
+_GENERIC_TOKENS: frozenset = _DISCRIMINATING_TOKENS | frozenset([
+    'atletico', 'deportes', 'deportivo', 'union', 'unido', 'nacional',
+    'universidad', 'sporting', 'sport', 'real', 'austria', 'sao', 'san',
+    'santa', 'fe', 'sp', 'cerro', 'alianza', 'asuncion', 'gremio',
+    'mineiro', 'america', 'botafogo',
+    # Second audit pass, Champions-League pool: club-family prefixes shared
+    # across BORDERS. AEK Larnaca→AEK Athens, Aris Limassol→Aris
+    # Thessalonikis, Dynamo Kyiv/Batumi/Minsk→Dynamo (Moscow's bare row —
+    # Moscow itself now goes through an alias), PFC CSKA Sofia→Levski Sofia,
+    # Viktoria Plzeň→Viktoria Köln, Víkingur Gøta→Vikingur Reykjavik,
+    # FK Žalgiris (Vilnius)→Kauno Žalgiris, AC Virtus→Virtus Entella,
+    # Inter Club d'Escaldes→Racing CLUB de Lens, and 'munchen' so a future
+    # '1860 Munich' can never borrow Bayern.
+    'club', 'sofia', 'viktoria', 'virtus', 'vikingur', 'zalgiris',
+    'dynamo', 'aek', 'aris', 'munchen',
+])
 
 
 def _normalize_name(name: str) -> str:
     """Lowercase, strip accents, remove common football suffixes/words."""
     s = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode('ascii')
     s = s.lower()
-    s = re.sub(r'\b\d{4}\b', ' ', s)          # strip year suffixes (1913, 1909…)
+    # Strip standalone numbers: year suffixes (1913, 1909…) but also the
+    # short ones — '1. FSV Mainz 05', 'Sarpsborg 08', 'SC Dnipro-1'. Audit
+    # 2026-09-10: the token '1' was the ONLY thing 'SC Dnipro-1' shared with
+    # '1. FC Union Berlin', and it matched.
+    s = re.sub(r'\b\d{1,4}\b', ' ', s)
     s = re.sub(r'[^a-z0-9 ]', ' ', s)         # keep only letters, digits, spaces
-    words = [w for w in s.split() if w not in _STRIP_WORDS]
+    words = [_TOKEN_SYNONYMS.get(w, w)
+             for w in s.split() if w not in _STRIP_WORDS]
     return ' '.join(words)
+
+
+def _normalize_name_full(name: str) -> str:
+    """Like _normalize_name but KEEPS the suffix words.
+
+    Collision fallback only: 'FC Barcelona' and 'Barcelona SC' are different
+    clubs whose stripped forms are both 'barcelona'. Re-keying the colliding
+    pair under 'fc barcelona' / 'barcelona sc' keeps both visible to the
+    matcher, where the plain dict-comprehension let the LAST writer silently
+    erase the other club from the index.
+    """
+    s = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode('ascii')
+    s = s.lower()
+    s = re.sub(r'\b\d{1,4}\b', ' ', s)
+    s = re.sub(r'[^a-z0-9 ]', ' ', s)
+    return ' '.join(_TOKEN_SYNONYMS.get(w, w) for w in s.split())
 
 
 # Module-level memoization of (norm_index, token_index) keyed by id(cache).
@@ -162,7 +353,28 @@ def _norm_indexes_for(cache: dict) -> tuple[dict[str, str], dict[str, frozenset]
     # Cheap freshness check: if cache size changed, invalidate.
     if cached is not None and len(cached[0]) == len(cache):
         return cached
-    norm_index = {_normalize_name(k): k for k in cache}
+    # Collision-aware build. Suffix-stripping maps 'FC Barcelona' and
+    # 'Barcelona SC' (Ecuador) to the same 'barcelona': in a continental pool
+    # the borrowed row was appended last and OVERWROTE the real one, so an
+    # exact-normalized query returned the wrong country's club — measured live
+    # on Champions-League day 2026-09-08. Colliding entries are re-keyed with
+    # their suffixes kept, so both stay visible and a bare query must be
+    # settled by alias or declined as ambiguous, never by dict insertion order.
+    norm_index: dict[str, str] = {}
+    collided: set[str] = set()
+    for k in cache:
+        n = _normalize_name(k)
+        if n in collided:
+            norm_index[_normalize_name_full(k)] = k
+            continue
+        prev = norm_index.get(n)
+        if prev is not None and prev != k:
+            del norm_index[n]
+            collided.add(n)
+            norm_index[_normalize_name_full(prev)] = prev
+            norm_index[_normalize_name_full(k)] = k
+        else:
+            norm_index[n] = k
     token_index = {n: frozenset(n.split()) for n in norm_index}
     _NORM_INDEX_CACHE[cache_id] = (norm_index, token_index)
     return norm_index, token_index
@@ -202,8 +414,14 @@ def _fuzzy_lookup(name: str, cache: dict):
 
     # 1b. Direct full-name alias → exact stored name (renamed/abbreviated clubs).
     #     Resolved against THIS cache only, so it can't cross-match leagues.
+    #     The raw-key lookup comes first: an alias target names the EXACT
+    #     stored row, and when that row's stripped form collided with a
+    #     namesake's (FC Barcelona / Barcelona SC) the normalized index no
+    #     longer carries it under the stripped key.
     alias_target = _TEAM_NAME_ALIASES.get(norm_query)
     if alias_target:
+        if alias_target in cache:
+            return cache[alias_target], alias_target
         target_norm = _normalize_name(alias_target)
         if target_norm in norm_index:
             return cache[norm_index[target_norm]], norm_index[target_norm]
@@ -219,28 +437,84 @@ def _fuzzy_lookup(name: str, cache: dict):
     #    longer name. Example: "manchester united" tokens {manchester, united}
     #    must ALL be present in candidate's tokens. This rejects the buggy case
     #    where "manchester united" silently matched "manchester city".
+    #    Three guards, each earned: containment, no dropped discriminating
+    #    word, and a strictly-better winner. The previous version tested only
+    #    "shorter tokens are a subset of longer", so a stored short name
+    #    swallowed any longer query built on it — see _TOKEN_SYNONYMS above
+    #    for the two production cases this produced.
+    #    Token containment and string similarity are scored TOGETHER, in one
+    #    pass. They used to be two ordered steps, and the order was itself a
+    #    bug: querying "Independiente Rivadavia" (Mendoza), token containment
+    #    fired first and returned "Independiente" (Avellaneda, a different
+    #    club) on the strength of one shared token, while the stored
+    #    "Independ. Rivadavia" — the right club, merely abbreviated — was
+    #    sitting one fuzzy comparison away at 0.93 similarity.
     query_tokens = frozenset(norm_query.split())
     if query_tokens:
-        best_match: tuple[str, str] | None = None
-        best_overlap = 0
+        scored: list[tuple[int, float, str]] = []
         for norm_key, orig_key in norm_index.items():
             key_tokens = token_index[norm_key]
-            shorter, longer = (
-                (query_tokens, key_tokens) if len(query_tokens) <= len(key_tokens)
-                else (key_tokens, query_tokens)
-            )
-            # ALL tokens of the shorter side must be in the longer side
-            if shorter and shorter.issubset(longer) and len(shorter) > best_overlap:
-                best_overlap = len(shorter)
-                best_match = (orig_key, orig_key)
-        if best_match:
-            return cache[best_match[0]], best_match[1]
+            if not key_tokens:
+                continue
+            # A discriminating word on one side only means two different clubs,
+            # whatever the rest of the string does.
+            if (query_tokens ^ key_tokens) & _DISCRIMINATING_TOKENS:
+                continue
+            # Shared GENERIC tokens are not identity. 'Manchester United' and
+            # 'West Ham United FC' share 'united', so the guard above is
+            # blind — and the 2026-09-10 /participants audit showed that with
+            # the right club absent from the cache, one shared generic token
+            # was enough to WIN: Colchester United→Manchester United FC (a
+            # real EFL-Cup tie away), Bradford City→Salford City, Huddersfield
+            # Town→Mansfield Town, Atlético Huracán→Atletico Tucuman. When
+            # the ONLY words two names share are generic ones and either side
+            # still carries leftover words, those leftovers are the identity —
+            # and nothing matches them. 'Gremio' ⊂ 'Grêmio Novorizontino' is
+            # exactly the trap: containment through a generic token is not
+            # containment of a club. (A same-club long form of an all-generic
+            # name — 'Clube Atlético Mineiro' → 'Atletico-MG' — goes through
+            # _TEAM_NAME_ALIASES instead, which resolves before this loop.)
+            common_tokens = query_tokens & key_tokens
+            if (common_tokens and common_tokens <= _GENERIC_TOKENS
+                    and ((query_tokens - common_tokens)
+                         or (key_tokens - common_tokens))):
+                continue
+            common = len(common_tokens)
+            ratio = SequenceMatcher(None, norm_query, norm_key).ratio()
+            contained = (key_tokens.issubset(query_tokens)
+                         or query_tokens.issubset(key_tokens))
+            # 0.82, not 0.75: pure string similarity with ZERO shared tokens
+            # is the weakest evidence there is, and the audit measured three
+            # different clubs inside the old band — Cobreloa→Cobresal at
+            # exactly 0.75, Barnsley→Burnley and Dartford→Watford at ~0.80.
+            if not contained and ratio < 0.82 and common == 0:
+                continue
+            # True when the QUERY under-specifies: "Racing" against both
+            # "Racing Club" and "Racing Santander". Several clubs answer to
+            # it and nothing in the string says which.
+            under_specified = query_tokens < key_tokens
+            scored.append((common, ratio, orig_key, under_specified))
 
-    # 4. Fuzzy match (last resort, conservative threshold)
-    close = get_close_matches(norm_query, list(norm_index.keys()), n=1, cutoff=0.75)
-    if close:
-        orig_key = norm_index[close[0]]
-        return cache[orig_key], orig_key
+        if scored:
+            # Shared tokens first, string similarity as the tie-break: that
+            # ordering is what lets the abbreviated spelling of the RIGHT club
+            # beat a shorter, wronger one.
+            scored.sort(key=lambda t: (-t[0], -t[1]))
+            best = scored[0]
+            runner_up = scored[1] if len(scored) > 1 else None
+
+            # Ambiguous evidence is not evidence — decline and fall back to
+            # the consensus model. Two shapes of ambiguity, both real:
+            #  * an exact tie on tokens AND similarity;
+            #  * the query under-specifying several candidates equally, where
+            #    the similarity tie-break would only be measuring which club
+            #    has the shorter name.
+            ambiguous = runner_up is not None and (
+                (best[0], round(best[1], 3)) <= (runner_up[0], round(runner_up[1], 3))
+                or (best[3] and runner_up[3] and best[0] == runner_up[0])
+            )
+            if not ambiguous and (best[0] > 0 or best[1] >= 0.82):
+                return cache[best[2]], best[2]
 
     return None, None
 
@@ -256,6 +530,7 @@ def kelly_stake(
     kelly_fraction: float = 0.25,
     max_fraction: float = 0.05,
     reliability: float = 1.0,
+    kelly_edge_cap: float = 0.0,
 ) -> float:
     """
     Fractional Kelly stake, optionally down-weighted by reliability.
@@ -277,6 +552,20 @@ def kelly_stake(
     full_kelly = (b * p - q) / b
     if full_kelly <= 0:
         return 0.0
+    # Cap the edge Kelly is allowed to act on BEFORE applying reliability.
+    #
+    # `reliability` is meant to shrink the stake of dubious picks, but it was
+    # structurally neutralised: corr(reliability, value_edge) = -0.8311, so a
+    # low-reliability pick always carried a large edge, and the two effects
+    # cancelled almost exactly — measured corr(reliability, kelly_stake) =
+    # +0.0034 across 310 production picks. The guard existed and did nothing.
+    #
+    # Kelly is also known to be badly behaved on an overstated edge: full_kelly
+    # grows linearly with it, so a 50% phantom edge sizes 10x a 5% real one.
+    # Capping the acting edge makes reliability the dominant term again.
+    if kelly_edge_cap > 0.0:
+        capped = kelly_edge_cap / b if b > 0 else full_kelly
+        full_kelly = min(full_kelly, capped)
     # Clamp reliability defensively; callers should already pass a [0, 1] value.
     rel = max(0.0, min(reliability, 1.0))
     fraction = min(full_kelly * kelly_fraction * rel, max_fraction)
@@ -295,6 +584,62 @@ def kelly_stake(
 DERIVED_ODDS_OUTLIER_MAX = 1.20
 
 
+# Two-sided 1X2 whose home/away prices differ by less than this are treated as
+# a placeholder rather than a real market. 2% is wide enough to catch the exact
+# symmetric case with margin, narrow enough to keep genuinely balanced fixtures.
+# A calibrated probability of exactly 0 is only credible if the model itself
+# considered the outcome impossible. Above this raw threshold, a zero means the
+# calibrator extrapolated outside its trained domain, not that the outcome
+# cannot happen.
+_CALIB_ANNIHILATION_FLOOR = 0.02
+
+DEGENERATE_1X2_TOL = 0.02
+
+
+
+def _totals_sampling_rate(direction: str) -> float:
+    """Share of totals selections still allowed through, per direction.
+
+    A zero rate makes the gate unfalsifiable — it suppresses the very data that
+    could overturn it, while n=327 would be needed to settle the question. A
+    residual contingent keeps the decision testable at a bounded cost.
+
+    The two directions get different rates because the evidence differs, not
+    because the market does. On 87 graded totals picks:
+
+        Over  n=42  predicted 0.592 -> realised 0.286  ROI -52.0%  t=-4.33
+        Under n=45  predicted 0.566 -> realised 0.400  ROI -22.5%  t=-1.55
+
+    Over is established; Under is clearly negative but not significant, so it
+    keeps a larger contingent. Both are overconfident — the market as a whole
+    carries no edge, which is why the gate is no longer Over-only. Removing
+    totals entirely takes the global ROI from -17.9% (n=227) to -6.2% (n=140).
+    """
+    var = "OVER_SAMPLING_RATE" if direction == "Over" else "UNDER_SAMPLING_RATE"
+    default = "0.25" if direction == "Over" else "0.50"
+    try:
+        return min(1.0, max(0.0, float(os.getenv(var, default))))
+    except ValueError:
+        return float(default)
+
+
+def _keep_totals_sample(event_id: str, direction: str) -> bool:
+    """Deterministic sampling on (event id, direction).
+
+    Deliberately NOT random: a rescan of the same match must reach the same
+    verdict, otherwise repeated scans would quietly accumulate duplicate picks
+    on the lucky draws and turn the contingent into cherry-picking. blake2b
+    keeps it stable across processes and Python runs (unlike hash()).
+
+    The direction is part of the key so Over and Under sample independently —
+    hashing the event alone would correlate the two decisions.
+    """
+    key = f"{event_id}|{direction}".encode("utf-8")
+    digest = hashlib.blake2b(key, digest_size=8).digest()
+    bucket = int.from_bytes(digest, "big") % 10_000
+    return bucket < int(_totals_sampling_rate(direction) * 10_000)
+
+
 def _derive_dc_dnb_odds(event: dict, home: str, away: str) -> tuple[dict, dict]:
     """
     Best available Double Chance / Draw No Bet decimal odds, DERIVED from each
@@ -302,13 +647,27 @@ def _derive_dc_dnb_odds(event: dict, home: str, away: str) -> tuple[dict, dict]:
     these markets exactly this way, so the derivation invents no free money:
 
         q1,qX,q2 = 1/o1, 1/oX, 1/o2   (that book's vig-inclusive implieds)
+        S        = q1+qX+q2           (that book's overround, ≈1.05-1.07)
         Double Chance   1X = 1/(q1+qX)   X2 = 1/(qX+q2)   12 = 1/(q1+q2)
-        Draw No Bet   home = (q1+q2)/q1  away = (q1+q2)/q2   (draw → refund)
+        Draw No Bet   home = (q1+q2)/(q1·S)   away = (q1+q2)/(q2·S)
 
-    Because q1/qX/q2 already carry the book's margin, the derived prices are
-    realistic (slightly short of true-fair), never optimistic. Only books that
-    quote the FULL 1/X/2 are used (coherent derivation). Returns
-    {code: BestOdds} taking the best price per selection across books.
+    THE `·S` ON DRAW NO BET IS NOT COSMETIC. Double Chance sums raw implieds,
+    so the book's margin survives and the derived price is conservative: the
+    offered implied probability is exactly S times the fair one. Draw No Bet is
+    a RATIO of implieds — `(q1+q2)/q1` — in which the margin cancels out
+    exactly, yielding the true-fair price no bookmaker would ever offer.
+
+    That asymmetry was the bug. The two derived markets were being compared to
+    the model on different footings, and production proved it: on 310 picks,
+    double_chance showed a modest +4.5..+7.7% edge and was well calibrated
+    (68% predicted, 68% realised, ROI +2.7%), while draw_no_bet showed a
+    +23.9..+27.3% edge and was 21 points overconfident (66% predicted, 45%
+    realised, ROI -18.7%). Dividing by S puts DNB on exactly the same
+    conservative footing as DC — offered implied = S × fair — with no magic
+    constant: a tight book gets a small haircut, a loose one a large haircut.
+
+    Only books that quote the FULL 1/X/2 are used (coherent derivation).
+    Returns {code: BestOdds} taking the best price per selection across books.
     """
     from statistics import median
 
@@ -317,8 +676,14 @@ def _derive_dc_dnb_odds(event: dict, home: str, away: str) -> tuple[dict, dict]:
     # AND sanity-check the best against the cross-book consensus (median). On
     # illiquid leagues a single stale/placeholder book (symmetric 1X2 → DNB=2.00)
     # would otherwise set an outlier "best" and invent a fake edge.
+    from betbot.bookmaker_filter import is_allowed
+
     prices: dict[str, list[tuple[float, str]]] = {}
     for bm in event.get("bookmakers", []):
+        # Derived DC/DNB prices inherit the whitelist: a derived price is only
+        # as real as the 1/X/2 triplet it is built from.
+        if not is_allowed(bm):
+            continue
         o: dict[str, float] = {}
         for mkt in bm.get("markets", []):
             if mkt.get("key") != "h2h":
@@ -339,14 +704,30 @@ def _derive_dc_dnb_odds(event: dict, home: str, away: str) -> tuple[dict, dict]:
                     o["X"] = price
         if not {"1", "X", "2"} <= o.keys():
             continue  # need the whole 1/X/2 to derive coherently
+        # Reject a degenerate source line BEFORE deriving anything from it.
+        # A perfectly (or near-perfectly) symmetric 1X2 is a placeholder for a
+        # market the book has not really made — it derives to DNB = 2.000 exactly,
+        # which then reads as a huge edge against any model. Production found 25
+        # such rows, all Betfair, all DNB at exactly 2.000, average claimed edge
+        # 57.8%, and 0/25 ever resolved (the events themselves were not real
+        # fixtures). The existing median×1.20 outlier guard cannot catch them:
+        # it fails precisely when SEVERAL books publish the same placeholder.
+        if abs(o["1"] - o["2"]) / max(o["1"], o["2"]) < DEGENERATE_1X2_TOL:
+            continue
         q1, qx, q2 = 1.0 / o["1"], 1.0 / o["X"], 1.0 / o["2"]
+        # Overround of this book's own 1X2. Guarded: a book quoting a sub-100%
+        # book (arbitrage or stale data) must not INFLATE the DNB price.
+        overround = max(1.0, q1 + qx + q2)
         title = bm.get("title", bm.get("key", "?"))
         derived = {
             "1X":   1.0 / (q1 + qx),
             "X2":   1.0 / (qx + q2),
             "12":   1.0 / (q1 + q2),
-            "DNB1": (q1 + q2) / q1,
-            "DNB2": (q1 + q2) / q2,
+            # `/ overround` restores the margin that the (q1+q2)/q1 ratio
+            # cancels — see the docstring. Without it DNB is priced true-fair
+            # and every model disagreement reads as a huge phantom edge.
+            "DNB1": (q1 + q2) / (q1 * overround),
+            "DNB2": (q1 + q2) / (q2 * overround),
         }
         for code, price in derived.items():
             if price <= 1.0:
@@ -369,7 +750,16 @@ def detect_value_bets(
     bankroll: float,
     kelly_fraction: float = 0.25,
     min_value_edge: float = 0.04,
+    max_value_edge: float = 0.0,
     min_model_prob: float = 0.40,
+    # Totals get their own, lower floor. Not a relaxation of discipline: the
+    # 1X2 floor and this market are on different scales, and applying the
+    # former to the latter silences it entirely instead of protecting it.
+    # Shadow-only, so a looser floor never reaches the user's stake.
+    min_model_prob_totals: float = 0.55,
+    favorites_channel: bool = False,
+    favorites_min_prob: float = 0.70,
+    favorites_min_odds: float = 1.20,
     min_book_odds: float = 1.50,
     min_edge_vs_novig: float = 0.0,
     require_positive_stake: bool = True,
@@ -378,6 +768,9 @@ def detect_value_bets(
     underdog_min_prob: float = 0.0,
     novig_required: bool = False,
     derive_dc_dnb: bool = True,
+    derive_dnb: bool = True,
+    allow_totals_over: bool = True,
+    kelly_edge_cap: float = 0.0,
     derived_min_edge: float = 0.02,
     derived_min_odds: float = 1.10,
     prebuilt_stats_by_sport: dict[str, dict] | None = None,
@@ -391,6 +784,9 @@ def detect_value_bets(
     """
     from betbot.models import DEFAULT_HOME_AVG, DEFAULT_AWAY_AVG
     all_bets: list[ValueBet] = []
+    from collections import defaultdict
+    _funnel: dict = defaultdict(int)
+    _favorites: list[ValueBet] = []
     _reset_injury_budget()  # fresh per-scan API-Football lookup budget (injuries)
     _reset_fatigue_budget()  # fresh per-scan API-Football lookup budget (rest/congestion)
     _reset_weather_budget()  # fresh per-scan Open-Meteo lookup budget (weather)
@@ -483,6 +879,40 @@ def detect_value_bets(
                     ("O35", "Plus de 3.5 buts",    "Over",  "totals", 3.5,  probs.over_35),
                     ("U35", "Moins de 3.5 buts",   "Under", "totals", 3.5,  probs.under_35),
                 ]
+                # Over selections are gated — but NOT for the reason first
+                # given, and not to zero.
+                #
+                # The original justification was "the goals model over-predicts
+                # in ONE direction". That claim does not survive: the Over-Under
+                # difference is significant under no tested split (p=0.076 raw,
+                # 0.243 after the odds cap, 0.936 pooled within league). Unders
+                # lose too (-7.5%, n=21). The real finding is that the whole
+                # totals market carries no edge — the model is beaten by the raw
+                # bookmaker price in both directions.
+                #
+                # What DOES hold, on the population that the current filters
+                # actually admit: 26 Over picks survive MAX_BOOK_ODDS=2.22 and
+                # return -40.5%, CI95 [-71.5, -7.6] — entirely below zero. And
+                # that -40.5% is an UPPER bound: those prices came from
+                # exchanges ~3% above what betclic/bet365 would have offered.
+                # The correct headline is -51.6% on n=32 (-40.5% on n=26), not
+                # the -54.5% first quoted, which was the O2.5 cell alone.
+                #
+                # Scope note: O05 is unreachable regardless — P(O0.5)=0.924 puts
+                # its fair price at 1.08, far under MIN_BOOK_ODDS=1.50.
+                #
+                # A hard zero would make this decision UNFALSIFIABLE: it removes
+                # the very data that could overturn it, while n=327 would be
+                # needed to settle the question to +/-15 points. So a fixed
+                # fraction still goes through, sampled deterministically on the
+                # event id so a rescan of the same match always decides the same
+                # way (no double counting, no cherry-picking).
+                if not allow_totals_over:
+                    outcome_map = [
+                        o for o in outcome_map
+                        if o[2] not in ("Over", "Under")
+                        or _keep_totals_sample(event_id, o[2])
+                    ]
 
             # ---- Stage 1 : calibrate every outcome, grouped by coherent market.
             # Calibrating each outcome independently (market shrink + ML isotonic)
@@ -497,36 +927,147 @@ def detect_value_bets(
                 # we still ML-calibrate the raw prob so the group normalizes on
                 # the full distribution (the leg just can't be bet anyway).
                 shrunk = shrink_toward_market(raw_model_prob, best.price) if best else raw_model_prob
-                cal = ml_calibrate(shrunk, _ml_segment(sport_key, market_key))
+                _seg = _ml_segment(sport_key, market_key)
+                cal = ml_calibrate(shrunk, _seg)
                 groups.setdefault((market_key, point), []).append({
                     "code": code, "label": label, "outcome_name": outcome_name,
                     "market_key": market_key, "point": point,
                     "best": best, "cal": max(0.0, min(cal, 1.0)),
+                    # The pre-calibration probability, kept as the fallback the
+                    # degeneracy guard below falls back TO.
+                    "raw": max(0.0, min(raw_model_prob, 1.0)),
+                    "in_domain": _ml_in_domain(shrunk, _seg),
                 })
 
             # ---- Stage 2 : renormalize within each group, then test value.
             for (market_key, point), members in groups.items():
                 total_cal = sum(m["cal"] for m in members)
-                for m in members:
-                    m["model_prob"] = (m["cal"] / total_cal) if total_cal > 0 else m["cal"]
+                total_raw = sum(m["raw"] for m in members)
+
+                # DEGENERACY GUARD — calibration may reshape a distribution,
+                # it may never delete an outcome the model considered possible.
+                #
+                # Renormalising within the group is what keeps 1+X+2 == 1, but
+                # it also means that if calibration drives members to zero, the
+                # survivor is handed the entire probability mass. That is how
+                # every pick since 05/08 was born at model_prob = 1.000 on
+                # matches the market priced near 1.75: the calibrator, fitted
+                # only on picks above MIN_MODEL_PROB, mapped the draw and the
+                # underdog to 0.0 and the renormalisation did the rest. The
+                # Poisson lambdas underneath were perfectly sane the whole time,
+                # which is precisely why nothing looked broken.
+                # ALL OR NOTHING. Calibrating the favourite while leaving the
+                # draw untouched, then renormalising, reshapes the distribution
+                # by an amount nobody chose. And the calibrator, fitted on
+                # selected picks, has a domain that never reaches a draw's
+                # probability — so for a full 1X2 the honest answer is "none".
+                _partial = any(not m["in_domain"] for m in members)
+                _annihilated = [m for m in members
+                                if m["cal"] <= 0.0 and m["raw"] >= _CALIB_ANNIHILATION_FLOOR]
+                if total_cal <= 0 or _annihilated or _partial:
+                    if _annihilated or total_cal <= 0:
+                        logger.warning(
+                            "calibration dégénérée sur %s/%s (%s) — repli sur "
+                            "les probabilités brutes du modèle",
+                            event_id, market_key,
+                            ", ".join(f"{m['code']}:{m['raw']:.2f}→0"
+                                      for m in _annihilated) or "somme nulle",
+                        )
+                    else:
+                        logger.debug(
+                            "%s/%s hors domaine du calibrateur — groupe laissé brut",
+                            event_id, market_key,
+                        )
+                    for m in members:
+                        m["model_prob"] = (m["raw"] / total_raw) if total_raw > 0 else 0.0
+                else:
+                    for m in members:
+                        m["model_prob"] = m["cal"] / total_cal
 
                 group_names = {m["outcome_name"] for m in members}
+                _is_totals = market_key == "totals"
+                # The 0.70 confidence floor is what produces the 77% hit rate,
+                # and it is structurally incompatible with this market: measured
+                # on production, Over 2.5 averages 0.574 (5 of 29 would clear
+                # 0.70) and Over 3.5 averages 0.514. Judging totals by the 1X2
+                # floor does not make them safe, it makes them absent — which is
+                # how the contingent meant to keep the question testable ended
+                # up producing nothing at all.
+                _floor = min_model_prob_totals if _is_totals else min_model_prob
+                # The consensus model reads the goals level FROM the totals
+                # market since `_prob_to_lambda` was fixed, so it reproduces the
+                # price and its edge is just the margin, negative. It has
+                # nothing to say about goals — 71 of 97 historical totals picks
+                # came from it, and that is precisely where the losses came
+                # from. Blocked explicitly rather than left to the edge filter.
+                _consensus = str(probs.model or "").startswith("consensus")
+                if _is_totals and _consensus:
+                    continue
+
                 for m in members:
+                    _funnel["candidats"] += 1
                     model_prob = m["model_prob"]
-                    if model_prob < min_model_prob:
+                    if model_prob < _floor:
+                        _funnel["sous_plancher_proba"] += 1
                         continue
 
                     best = m["best"]
-                    if best is None or best.price < min_book_odds:
+                    if best is None:
+                        _funnel["sans_prix_ou_cote_basse"] += 1
+                        continue
+
+                    novig = _novig_fair_prob(
+                        event, m["outcome_name"], market_key, point, group_names)
+
+                    # FAVORIS CALIBRES — the agreement channel. Both the model
+                    # AND the de-vigged market put this outcome at or above the
+                    # confidence floor. No edge is claimed; the value gates
+                    # below do not apply. Emitted BEFORE the min-odds gate
+                    # because a genuine favourite prices under 1.50 by
+                    # definition — that gate is the very reason the value
+                    # channel goes quiet when the model is honest.
+                    if (favorites_channel and not _is_totals
+                            and model_prob >= favorites_min_prob
+                            and novig is not None
+                            and novig >= favorites_min_prob
+                            and best.price >= favorites_min_odds
+                            and (max_book_odds <= 0.0 or best.price <= max_book_odds)):
+                        _funnel["favoris"] += 1
+                        _favorites.append(ValueBet(
+                            event_id=event_id, sport_key=sport_key,
+                            home_team=home, away_team=away,
+                            league_label=league_label, market=market_key,
+                            selection_code=m["code"], selection_label=m["label"],
+                            model_prob=round(model_prob, 4),
+                            best_odds=best.price, best_book=best.bookmaker,
+                            value_edge=round(model_prob * best.price - 1.0, 4),
+                            kelly_stake=0.0,   # no edge claimed -> no Kelly sizing
+                            lambda_home=probs.lambda_home,
+                            lambda_away=probs.lambda_away,
+                            model_type=probs.model,
+                            reliability=1.0,
+                            commence_time=event.get("commence_time", "") or "",
+                            market_prob=round(novig, 4),
+                            channel="favoris",
+                        ))
+
+                    # A probe has no stake, so price bounds are meaningless
+                    # for it — and they were what starved the totals sample a
+                    # second time (0 probes in 4 days: the Under side of a
+                    # favourite prices ~1.30-1.45, under the 1.50 value gate).
+                    if not _is_totals and best.price < min_book_odds:
+                        _funnel["sans_prix_ou_cote_basse"] += 1
                         continue
                     # Discipline (anti "value-trap") : cap extreme longshots —
                     # model error grows with odds — and require real conviction on
                     # underdogs. The edge formula (prob×odds−1) is easiest to
                     # satisfy on high-odds outcomes the market priced as unlikely
                     # (and is usually right about), so we gate those out.
-                    if max_book_odds > 0.0 and best.price > max_book_odds:
+                    if not _is_totals and max_book_odds > 0.0 and best.price > max_book_odds:
+                        _funnel["cote_trop_haute"] += 1
                         continue
                     if underdog_odds > 0.0 and best.price >= underdog_odds and model_prob < underdog_min_prob:
+                        _funnel["outsider_refuse"] += 1
                         continue
 
                     # No-vig gate (adverse-selection guard) : require the model to
@@ -535,18 +1076,48 @@ def detect_value_bets(
                     # whose line is most stale. With novig_required, a pick with
                     # NO consensus to validate against is DROPPED rather than
                     # silently allowed (thin markets are where the model is worst).
-                    if min_edge_vs_novig > 0.0:
-                        novig = _novig_fair_prob(event, m["outcome_name"], market_key, point, group_names)
-                        if novig is None or novig <= 0.0:
-                            if novig_required:
+                    # Computed unconditionally: it is the reference the model
+                    # is judged against, so it must be recorded even when the
+                    # gate that consumes it is switched off.
+                    # SHADOW TOTALS SKIP THE VALUE GATES — measurement, not value.
+                    #
+                    # A probe exists to answer "does the fixed goals model predict
+                    # Overs?", which needs the calibration sample, not the +EV one.
+                    # Requiring a probe to beat the price by 4% both starves the
+                    # sample (zero probes recorded in the first 8 days of the
+                    # season) and BIASES it: keeping only price-beating probes
+                    # measures the tail, not the model. Floor, sampling
+                    # contingent, Poisson-only and the odds bounds still apply;
+                    # a probe is never emailed, never staked, never in the ROI.
+                    if not _is_totals:
+                        if min_edge_vs_novig > 0.0:
+                            if novig is None or novig <= 0.0:
+                                if novig_required:
+                                    _funnel["novig_refuse"] += 1
+                                    continue
+                            elif (model_prob / novig - 1.0) < min_edge_vs_novig:
+                                _funnel["novig_refuse"] += 1
                                 continue
-                        elif (model_prob / novig - 1.0) < min_edge_vs_novig:
-                            continue
 
                     # value_edge stays computed against the BEST available price —
                     # that's the real EV of the bet you'd actually place.
                     edge = round(model_prob * best.price - 1.0, 4)
-                    if edge < min_value_edge:
+                    if not _is_totals and edge < min_value_edge:
+                        _funnel["edge_insuffisant"] += 1
+                        continue
+                    # Upper edge cap. On a market quoted by several books, a
+                    # 30%+ edge is not an opportunity — it is the model being
+                    # wrong, or a stale price. `is_edge_suspicious` has existed
+                    # in calibration.py since day one and was NEVER called from
+                    # the production path. Production evidence: the picks above
+                    # +20% edge lost consistently, and reliability actively made
+                    # it worse by sizing them LARGER (draw_no_bet averaged the
+                    # biggest stake in the whole database).
+                    if not _is_totals and max_value_edge > 0.0 and is_edge_suspicious(edge, max_value_edge):
+                        logger.debug(
+                            "drop %s %s/%s : edge %+.1f%% > plafond %+.1f%% (artefact probable)",
+                            event_id, m["code"], m["outcome_name"], edge * 100, max_value_edge * 100,
+                        )
                         continue
 
                     # Reliability is computed BEFORE Kelly so we can down-weight
@@ -561,17 +1132,24 @@ def detect_value_bets(
                     )
 
                     stake = kelly_stake(model_prob, best.price, bankroll,
-                                        kelly_fraction, reliability=reliability)
-                    if require_positive_stake and stake == 0.0:
+                                        kelly_fraction, reliability=reliability,
+                                        kelly_edge_cap=kelly_edge_cap)
+                    if _is_totals:
+                        # A probe is never placed: zero stake, and the
+                        # positive-stake requirement does not apply to it.
+                        stake = 0.0
+                    elif require_positive_stake and stake == 0.0:
                         # A genuine edge zeroed by low reliability is dropped here —
                         # surface it so filtered picks aren't silently invisible.
                         # (The ×1000 parlay pool passes require_positive_stake=False:
                         # leg eligibility there is about EV, not stake sizing.)
+                        _funnel["mise_nulle"] += 1
                         logger.debug(
                             "drop %s %s/%s edge=%+.1f%% rel=%.2f → stake 0",
                             event_id, m["code"], m["outcome_name"], edge * 100, reliability,
                         )
                         continue
+                    _funnel["retenus_totals" if _is_totals else "retenus"] += 1
 
                     all_bets.append(ValueBet(
                         event_id=event_id,
@@ -591,6 +1169,9 @@ def detect_value_bets(
                         lambda_away=probs.lambda_away,
                         model_type=probs.model,
                         reliability=reliability,
+                        commence_time=event.get("commence_time", "") or "",
+                        market_prob=(round(novig, 4) if novig else None),
+                        shadow=_is_totals,
                     ))
 
             # ---- Stage 3 : derived markets (Double Chance + Draw No Bet).
@@ -611,6 +1192,28 @@ def detect_value_bets(
                     px = h2h_members["X"]["model_prob"]
                     p2 = h2h_members["2"]["model_prob"]
                     win_no_draw = p1 + p2
+
+                    # Market reference for the derived markets, built with the
+                    # SAME algebra the model uses on its own 1/X/2 — so the
+                    # later Brier comparison stays apples-to-apples. Double
+                    # chance is the one market the model is not beaten on, so
+                    # it is the one that most needs a recorded reference.
+                    _h2h_names = {m["outcome_name"] for m in groups.get(("h2h", None), [])}
+                    _fair: dict[str, float | None] = {}
+                    for _code in ("1", "X", "2"):
+                        _fair[_code] = _novig_fair_prob(
+                            event, h2h_members[_code]["outcome_name"],
+                            "h2h", None, _h2h_names)
+                    _have_fair = all(_fair[c] and _fair[c] > 0 for c in ("1", "X", "2"))
+                    _fair_no_draw = ((_fair["1"] + _fair["2"]) if _have_fair else 0.0)
+                    market_by_code: dict[str, float | None] = {
+                        "1X": (_fair["1"] + _fair["X"]) if _have_fair else None,
+                        "X2": (_fair["X"] + _fair["2"]) if _have_fair else None,
+                        "12": (_fair["1"] + _fair["2"]) if _have_fair else None,
+                        "DNB1": (_fair["1"] / _fair_no_draw) if _fair_no_draw > 0 else None,
+                        "DNB2": (_fair["2"] / _fair_no_draw) if _fair_no_draw > 0 else None,
+                    }
+
                     dc_dnb_odds, dc_dnb_cons = _derive_dc_dnb_odds(event, home, away)
                     derived_specs = [
                         ("1X",   "Double chance 1X (domicile ou nul)",       "double_chance", p1 + px),
@@ -621,6 +1224,18 @@ def detect_value_bets(
                         ("DNB2", "Extérieur — remb. si nul (Draw No Bet)",   "draw_no_bet",
                          (p2 / win_no_draw) if win_no_draw > 0 else 0.0),
                     ]
+                    # Double Chance and Draw No Bet are built from the SAME 1/X/2
+                    # but by different algebra, and they behave in opposite ways.
+                    # DC is a SUM (p1+pX) — errors partly cancel: overconfidence
+                    # +0.53 pt, Brier 0.1936 vs 0.1977 for the price, the only
+                    # market where the model is not beaten. DNB is a RATIO
+                    # p1/(p1+p2) — errors amplify: overconfidence +17.95 pts,
+                    # ROI -18.7%. Matched on probability (0.60-0.80), 11.6 of the
+                    # 17.4-point gap survives, so it is the derivation itself and
+                    # not a probability-level effect. DNB also carried 44.8% of
+                    # picks and 49% of the Kelly exposure. Hence its own switch.
+                    if not derive_dnb:
+                        derived_specs = [d for d in derived_specs if d[2] != "draw_no_bet"]
                     for code, label, mkt_key, model_prob in derived_specs:
                         if model_prob < min_model_prob:
                             continue
@@ -648,6 +1263,15 @@ def detect_value_bets(
                         edge = round(model_prob * best.price - 1.0, 4)
                         if edge < derived_min_edge:
                             continue
+                        # Same cap as the direct path — derived markets are
+                        # where the phantom edges were largest (DNB averaged
+                        # +47.7% before the overround fix above).
+                        if max_value_edge > 0.0 and is_edge_suspicious(edge, max_value_edge):
+                            logger.debug(
+                                "drop derive %s %s : edge %+.1f%% > plafond %+.1f%%",
+                                event_id, code, edge * 100, max_value_edge * 100,
+                            )
+                            continue
                         from betbot.reliability import compute_reliability
                         reliability = compute_reliability(
                             model_prob=model_prob,
@@ -657,7 +1281,8 @@ def detect_value_bets(
                             skip_extreme_prob_penalty=True,  # high DC prob is by design
                         )
                         stake = kelly_stake(model_prob, best.price, bankroll,
-                                            kelly_fraction, reliability=reliability)
+                                            kelly_fraction, reliability=reliability,
+                                            kelly_edge_cap=kelly_edge_cap)
                         if require_positive_stake and stake == 0.0:
                             continue
                         all_bets.append(ValueBet(
@@ -678,8 +1303,30 @@ def detect_value_bets(
                             lambda_away=probs.lambda_away,
                             model_type=probs.model,
                             reliability=reliability,
+                            commence_time=event.get("commence_time", "") or "",
+                            market_prob=(round(market_by_code[code], 4)
+                                         if market_by_code.get(code) else None),
                         ))
 
+    # THE FUNNEL. On restart weekend 2026-08-22, 141 same-day fixtures and 132
+    # Poisson teams produced ZERO singles, and nothing in the logs said which
+    # gate was killing every candidate. A pipeline that can only say "0 found"
+    # cannot be told apart from a broken one — this line makes the difference
+    # observable.
+    # One selection, one channel: if the value gates retained a pick, its
+    # favourite twin is redundant (the value claim is strictly stronger).
+    _value_keys = {(b.event_id, b.market, b.selection_code) for b in all_bets}
+    _favorites[:] = [f for f in _favorites
+                     if (f.event_id, f.market, f.selection_code) not in _value_keys]
+    all_bets.extend(_favorites)
+
+    _dropped = {k: v for k, v in _funnel.items()
+                if v and k not in ("candidats", "retenus", "retenus_totals", "favoris")}
+    logger.info(
+        "Entonnoir : %d issue(s) examinée(s) → %d valeur, %d favori(s), %d sonde(s) totals | pertes : %s",
+        _funnel["candidats"], _funnel["retenus"], len(_favorites), _funnel["retenus_totals"],
+        ", ".join("%s=%d" % kv for kv in sorted(_dropped.items())) or "aucune",
+    )
     logger.info("Détection terminée : %d paris de valeur trouvés", len(all_bets))
     return all_bets
 
