@@ -17,3 +17,14 @@ venv/
 *.egg-info/
 build/
 dist/
+
+# Archives d'image exportées (docker save | gzip) — 365 Mo, jamais versionnées
+*.tar.gz
+*.tgz
+
+# Sauvegardes de .env : contiennent les secrets en clair
+.env.bak*
+.env.*.bak
+
+# Données téléchargées (football-data.co.uk), re-téléchargeables
+data/

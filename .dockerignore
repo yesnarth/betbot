@@ -47,6 +47,19 @@ Dockerfile*
 .dockerignore
 Caddyfile
 
+# Exported image archives. DEPLOY_VPS_ESARTH.md has you run
+# `docker save betbot:latest | gzip > betbot-image.tar.gz` in this directory,
+# so without this rule the next build COPYs the previous image into the new
+# one: observed 1.63 GB -> 2.39 GB on a one-line source change, and it
+# compounds on every deploy.
+*.tar
+*.tar.gz
+*.tgz
+
+# Env backups (.env itself is already excluded above)
+.env.bak*
+.env.*.bak
+
 # Docs / scripts not needed at runtime
 README*.md
 CHANGELOG.md
