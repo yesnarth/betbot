@@ -796,3 +796,71 @@ def render_live_tab(filters: dict, health: dict | None = None) -> None:
     if "Fiab." in disp.columns:
         cfg["Fiab."] = st.column_config.NumberColumn(format="%.2f")
     st.dataframe(disp, width='stretch', hide_index=True, column_config=cfg)
+
+
+_BLIND_INTRO = """**Ces pronostics ignorent totalement les cotes.** Aucun prix
+n'entre dans le calcul — ni pour choisir l'option, ni pour ajuster la
+probabilité. Ils sortent des seules données d'abonnement : statistiques
+d'équipe api-football, xG, ELO, confrontations directes, blessures, fatigue.
+
+Les matchs sans statistiques d'équipe sont **écartés**, pas repliés sur le
+consensus : un pronostic consensus ne fait que recopier le bookmaker.
+
+Les options proposées peuvent être **injouables** (Over 0,5, BTTS, ligne 1,5 —
+que Betclic ne cote pas). C'est voulu : l'indisponibilité au pari ne dit rien
+sur la probabilité que l'événement se produise. Tu places ce que tu peux, au
+prix que tu vois chez ton book."""
+
+_BLIND_WARNING = """**Période de mesure, pas de promesse.** Le 74,7 % de
+réussite mesuré au-dessus de 0,70 l'a été sur des picks passés par les portes
+de marché. Ici les probabilités sont **brutes** — sans le rétrécissement vers
+le marché — donc probablement trop sûres d'elles au départ. Ce canal doit
+gagner son propre calibrateur sur ses propres résultats avant que « 75 % »
+veuille dire 75 %. Juge-le sur 30 pronostics minimum."""
+
+
+def render_blind_tab(filters: dict) -> None:
+    st.subheader("🔮 Pronostics modèle — sans aucune cote")
+    st.info(_BLIND_INTRO, icon="🔮")
+    st.warning(_BLIND_WARNING, icon="📏")
+
+    try:
+        rows = api_get("/predictions/proposed") or []
+    except Exception as exc:
+        st.error(f"Erreur : {exc}")
+        return
+
+    picks = [r for r in rows if (r.get("channel") or "") == "modele"]
+    if not picks:
+        empty_state(
+            "🔮",
+            "Aucun pronostic modèle en attente",
+            "Le canal s'alimente à chaque scan. S'il reste vide alors que des "
+            "matchs sont programmés, c'est que les équipes concernées n'ont pas "
+            "de statistiques en base — regarde la couverture dans 🔌 Sources.",
+        )
+        return
+
+    picks.sort(key=lambda r: r.get("model_prob") or 0, reverse=True)
+    c = st.columns(3)
+    c[0].metric("Pronostics", len(picks))
+    c[1].metric("Proba moyenne",
+                f"{100 * sum(p.get('model_prob') or 0 for p in picks) / len(picks):.1f} %")
+    c[2].metric("Proba max", f"{100 * max(p.get('model_prob') or 0 for p in picks):.1f} %")
+
+    st.dataframe(
+        [{
+            "Proba": f"{100 * (p.get('model_prob') or 0):.1f} %",
+            "Match": f"{p.get('home_team')} – {p.get('away_team')}",
+            "Pari": p.get("selection"),
+            "Marché": p.get("market"),
+            "Coup d'envoi": (p.get("commence_time") or "")[:16].replace("T", " "),
+            "Modèle": p.get("model_type"),
+        } for p in picks],
+        width="stretch", hide_index=True,
+    )
+    st.caption(
+        "Aucune colonne de cote : ce canal n'en consulte pas. Ses statistiques "
+        "se lisent en **taux de réussite**, jamais en ROI — un ROI calculé sur "
+        "une cote absente serait un chiffre inventé."
+    )

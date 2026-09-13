@@ -34,6 +34,7 @@ from betbot_dashboard.sections.decision import (
     render_scan_tab,
     render_target_parlay_tab,
     render_lottery_parlay_tab,
+    render_blind_tab,
 )
 from betbot_dashboard.sections.history import render_history_tab
 from betbot_dashboard.sections.matches import (
@@ -71,6 +72,7 @@ render_local_agent_tab = guarded(render_local_agent_tab)
 render_ai_agent_tab = guarded(render_ai_agent_tab)
 render_target_parlay_tab = guarded(render_target_parlay_tab)
 render_lottery_parlay_tab = guarded(render_lottery_parlay_tab)
+render_blind_tab = guarded(render_blind_tab)
 render_live_tab = guarded(render_live_tab)
 render_events_tab = guarded(render_events_tab)
 render_history_tab = guarded(render_history_tab)
@@ -219,8 +221,9 @@ with section_tools:
             "invocations IA. Utilise ces outils pour explorer, pas pour ton "
             "workflow quotidien."
         )
-    (tab_scan, tab_safe, tab_over, tab_local, tab_agent, tab_parlay, tab_lottery,
-     tab_live, tab_events, tab_sources, tab_agent_runs) = st.tabs([
+    (tab_blind, tab_scan, tab_safe, tab_over, tab_local, tab_agent, tab_parlay,
+     tab_lottery, tab_live, tab_events, tab_sources, tab_agent_runs) = st.tabs([
+        "🔮 Pronostics modèle",
         "🎯 Scan manuel",
         "🟢 Sûr & rapide",
         "⚽ Over (buts)",
@@ -233,6 +236,8 @@ with section_tools:
         "🔌 Sources",
         "📜 Historique IA",
     ])
+    with tab_blind:
+        render_blind_tab(filters)
     with tab_scan:
         render_scan_tab(filters, health)
     with tab_safe:

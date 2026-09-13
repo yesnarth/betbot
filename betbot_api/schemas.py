@@ -119,6 +119,10 @@ class PredictionRow(BaseModel):
     placement_status_at: str | None = None
     placed_bookmaker: str | None = None
     commence_time: str | None = None       # match kickoff (used by UI countdown)
+    # Quel produit a émis ce pick. Sans ce champ l'UI ne peut pas séparer les
+    # trois promesses, et un pronostic du canal aveugle (sans cote, jamais misé)
+    # se lirait comme un pari de valeur. Les bilans ne doivent jamais se mêler.
+    channel: str = "valeur"
 
 
 class ROIStats(BaseModel):

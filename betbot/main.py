@@ -25,6 +25,7 @@ from betbot.api import OddsAPIClient
 from betbot.football_api import FootballDataClient, parse_match_results, LEAGUE_MAP
 from betbot.models import build_team_stats, compute_league_averages, TeamStats
 from betbot.elo_local import compute_elo_ratings
+from betbot.blind import detect_blind_picks
 from betbot.analysis import (
     detect_value_bets, rank_value_bets, build_parlays,
     ValueBet, Parlay, kelly_stake,
@@ -491,6 +492,42 @@ def run_daily_scan(
             model_type=bet.model_type, reliability=bet.reliability,
             market_prob=bet.market_prob, channel="favoris",
         )
+
+    # 5b. CANAL AVEUGLE — pronostics purement statistiques.
+    #
+    # Réutilise les matchs et les stats DÉJÀ chargés : aucun crédit The Odds API
+    # supplémentaire. Il ne consulte aucune cote, ni pour choisir, ni pour
+    # calibrer (voir betbot/blind.py), et propose l'option même quand aucun book
+    # ne la cote — c'est sa raison d'être.
+    #
+    # `shadow=True` les fait naître 'proposed' MALGRÉ AUTO_CONFIRM_PICKS=1, et
+    # c'est indispensable : ce canal émet des options injouables (BTTS, Over 0.5,
+    # ligne 1.5 absente du marché). Les compter comme des paris réellement
+    # placés créditerait un grand livre sur des mises qui n'existent pas. Ils
+    # sont notés comme tout le reste — mesurés, jamais misés — et il confirme
+    # à la main ceux qu'il joue vraiment.
+    blind_picks = []
+    if getattr(settings, "blind_channel", False):
+        blind_picks = detect_blind_picks(
+            events_by_sport=events_by_sport,
+            prebuilt_stats_by_sport=prebuilt_stats,
+            min_prob=settings.blind_min_prob,
+            max_per_match=settings.blind_max_per_match,
+        )
+        if settings.blind_top_n > 0:
+            blind_picks = blind_picks[:settings.blind_top_n]
+        for bet in blind_picks:
+            db.save_prediction(
+                event_id=bet.event_id, sport_key=bet.sport_key,
+                home_team=bet.home_team, away_team=bet.away_team,
+                market=bet.market, selection=bet.selection_code,
+                model_prob=bet.model_prob, best_odds=0.0, best_book="",
+                value_edge=0.0, kelly_stake=0.0,
+                lambda_home=bet.lambda_home, lambda_away=bet.lambda_away,
+                commence_time=(bet.commence_time or None),
+                model_type=bet.model_type, reliability=bet.reliability,
+                market_prob=None, shadow=True, channel=bet.channel,
+            )
 
     # 6. Dry-run : afficher dans la console
     if dry_run:

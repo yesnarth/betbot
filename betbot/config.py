@@ -59,6 +59,15 @@ class Settings:
     max_book_odds: float = 0.0          # drop singles priced above this (0 = off)
     underdog_odds: float = 0.0          # odds at/above which the prob floor applies
     underdog_min_prob: float = 0.0      # required model_prob when odds ≥ underdog_odds
+    # Canal AVEUGLE — pronostics statistiques purs, aucune cote consultée.
+    # Sa consigne du 2026-09-13 : les cotes peuvent « nous induire en erreur ou
+    # nous manipuler ». Ce canal propose l'option quoi qu'il arrive, même
+    # injouable, et se lit en TAUX DE RÉUSSITE (best_odds vaut 0, un ROI n'y a
+    # aucun sens).
+    blind_channel: bool = True
+    blind_min_prob: float = 0.70
+    blind_max_per_match: int = 1
+    blind_top_n: int = 0          # 0 = pas de plafond
     novig_required: bool = False        # drop a pick when no-vig consensus is unavailable
     # Derived markets (Double Chance + Draw No Bet), computed from the 1X2 we
     # already fetch — 0 extra quota. More options + lower-variance combo legs.
@@ -116,6 +125,14 @@ def load_settings() -> Settings:
     favorites_channel = os.getenv("FAVORITES_CHANNEL", "1") == "1"
     favorites_min_prob = float(os.getenv("FAVORITES_MIN_PROB", "0.70"))
     favorites_min_odds = float(os.getenv("FAVORITES_MIN_ODDS", "1.20"))
+    blind_channel     = os.getenv("BLIND_CHANNEL", "1") == "1"
+    # Même plancher que le canal historique, mais il ne veut PAS dire la même
+    # chose tant que ce canal n'a pas son propre calibrateur : les probabilités
+    # sont BRUTES ici (pas de rétrécissement vers le marché), donc plus sûres
+    # d'elles. Les premières semaines mesurent, elles ne promettent pas.
+    blind_min_prob    = float(os.getenv("BLIND_MIN_PROB", "0.70"))
+    blind_max_per_match = int(os.getenv("BLIND_MAX_PER_MATCH", "1"))
+    blind_top_n       = int(os.getenv("BLIND_TOP_N", "0"))
     min_book_odds     = float(os.getenv("MIN_BOOK_ODDS", "1.50"))
     top_bets          = int(os.getenv("TOP_BETS", "10"))
     min_combos        = int(os.getenv("MIN_COMBOS", "3"))
@@ -195,6 +212,10 @@ def load_settings() -> Settings:
         favorites_channel=favorites_channel,
         favorites_min_prob=favorites_min_prob,
         favorites_min_odds=favorites_min_odds,
+        blind_channel=blind_channel,
+        blind_min_prob=blind_min_prob,
+        blind_max_per_match=blind_max_per_match,
+        blind_top_n=blind_top_n,
         min_book_odds=min_book_odds,
         top_bets=top_bets,
         min_combos=min_combos,
