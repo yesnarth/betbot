@@ -99,17 +99,25 @@ except Exception as exc:
 
 agent_enabled = bool(health.get("agent_enabled"))
 
-# How many picks are currently waiting on user action? Surfaced both in the
-# sidebar KPI and in the "Mes picks" landing — drives the user to the
-# right tab when there's something to do.
+# What is actually waiting on the user?
+#
+# Under AUTO_CONFIRM_PICKS the validation queue is always empty by design, so
+# "Picks à valider: 0 — rien à faire" was a permanently dead KPI occupying the
+# most prominent slot in the UI. What the user genuinely tracks in that mode is
+# how many bets are still awaiting a result.
+_auto_confirm = bool(health.get("auto_confirm_picks"))
 try:
     n_proposed = len(api_get("/predictions/proposed"))
 except Exception:
     n_proposed = -1  # silent — not fatal, dashboard still loads
+try:
+    n_pending = len(api_get("/predictions/pending"))
+except Exception:
+    n_pending = -1
 
 # Sidebar collects global filters and surfaces KPIs / quick actions
 filters = render_sidebar(health, agent_enabled, api_post,
-                         n_proposed=n_proposed)
+                         n_proposed=n_proposed, n_pending=n_pending)
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +125,7 @@ filters = render_sidebar(health, agent_enabled, api_post,
 # ---------------------------------------------------------------------------
 
 section_picks, section_perf, section_capital, section_model, section_tools = st.tabs([
-    f"🔔 Mes picks{f' ({n_proposed})' if n_proposed > 0 else ''}",
+    f"🔔 Mes picks{f' ({n_pending})' if _auto_confirm and n_pending > 0 else (f' ({n_proposed})' if n_proposed > 0 else '')}",
     "📊 Performance",
     "💰 Capital",
     "🔬 Modèle",
@@ -136,14 +144,22 @@ with section_picks:
             "**Ton action.** Auto-scan désactivé — les picks ici viennent "
             "des scans manuels que tu sauvegardes depuis 🛠️ Outils. "
         )
-    st.caption(
-        _intro +
-        "à toi de confirmer ceux que tu as réellement placés chez ton bookmaker, "
-        "ou de skipper. Le solde est débité uniquement à la confirmation."
-    )
+    if health.get("auto_confirm_picks"):
+        st.caption(
+            "**Validation automatique.** Chaque pronostic scanné est compté "
+            "comme un pari réellement placé et entre directement dans le track "
+            "record — pas de file d'attente à traiter."
+        )
+    else:
+        st.caption(
+            _intro +
+            "à toi de confirmer ceux que tu as réellement placés chez ton bookmaker, "
+            "ou de skipper. Le solde est débité uniquement à la confirmation."
+        )
     tab_validate, tab_pending = st.tabs([
-        f"🔔 Picks à valider{f' ({n_proposed})' if n_proposed > 0 else ''}",
-        "⏳ Paris en attente",
+        ("🔔 Mes picks" if _auto_confirm
+         else f"🔔 Picks à valider{f' ({n_proposed})' if n_proposed > 0 else ''}"),
+        f"⏳ En attente de résultat{f' ({n_pending})' if n_pending > 0 else ''}",
     ])
     with tab_validate:
         render_validate_tab(health)
@@ -162,7 +178,7 @@ with section_capital:
         "Bankroll, dépôts/retraits, comptes bookmakers. Les mutations sont "
         "protégées contre le double-clic par une clé d'idempotency dérivée du formulaire."
     )
-    render_capital_tab()
+    render_capital_tab(health)
 
 with section_model:
     st.caption(
@@ -187,11 +203,20 @@ with section_model:
         render_basket_tab(health)
 
 with section_tools:
-    st.caption(
-        "**Sandbox.** Scans à la demande (preview read-only — n'enregistre rien "
-        "par défaut), diagnostic infra et historique des invocations IA. Utilise "
-        "ces outils pour explorer, pas pour ton workflow quotidien."
-    )
+    if _auto_confirm:
+        st.caption(
+            "**C'est ici que commence ta journée.** L'auto-scan étant désactivé, "
+            "🎯 **Scan manuel** est le point de départ : il appelle l'Odds API, "
+            "applique le modèle et **enregistre** les picks, qui comptent "
+            "immédiatement dans ton track record. Les autres onglets sont du "
+            "diagnostic et de l'exploration."
+        )
+    else:
+        st.caption(
+            "**Sandbox.** Scans à la demande, diagnostic infra et historique des "
+            "invocations IA. Utilise ces outils pour explorer, pas pour ton "
+            "workflow quotidien."
+        )
     (tab_scan, tab_safe, tab_over, tab_local, tab_agent, tab_parlay, tab_live,
      tab_events, tab_sources, tab_agent_runs) = st.tabs([
         "🎯 Scan manuel",
@@ -208,17 +233,17 @@ with section_tools:
     with tab_scan:
         render_scan_tab(filters, health)
     with tab_safe:
-        render_safe_fast_tab(filters)
+        render_safe_fast_tab(filters, health)
     with tab_over:
-        render_over_tab(filters)
+        render_over_tab(filters, health)
     with tab_local:
         render_local_agent_tab(filters, health)
     with tab_agent:
-        render_ai_agent_tab(filters, agent_enabled)
+        render_ai_agent_tab(filters, agent_enabled, health)
     with tab_parlay:
         render_target_parlay_tab(filters)
     with tab_live:
-        render_live_tab(filters)
+        render_live_tab(filters, health)
     with tab_events:
         render_events_tab(filters)
     with tab_sources:

@@ -269,10 +269,18 @@ def render_calibrator_tab() -> None:
                     result = None
             if result:
                 if result.get("trained"):
-                    st.success(
-                        f"✅ Calibrateur ré-entraîné sur {result['n_samples']} paris. "
-                        f"Brier score : **{result['brier_before']} → {result['brier_after']}** "
-                        f"(plus bas = mieux calibré)."
+                    # `brier_after` is computed on the very pairs that fitted
+                    # the isotonic map (ml.py:154, 172-173). An improvement is
+                    # a theorem, not a measurement — presenting it with a green
+                    # tick made a +0.0023 in-sample artifact look like a win.
+                    st.info(
+                        f"Calibrateur ré-entraîné sur {result['n_samples']} paris. "
+                        f"Brier **IN-SAMPLE** {result['brier_before']} → "
+                        f"{result['brier_after']} — mesuré sur l'échantillon "
+                        f"d'entraînement lui-même : l'amélioration est garantie "
+                        f"par construction et ne prouve rien.\n\n"
+                        f"Le vrai test est le **Brier modèle vs cote** de "
+                        f"l'onglet 📊 Performance."
                     )
                 else:
                     st.warning(f"Entraînement annulé : {result.get('reason')}")
@@ -292,17 +300,32 @@ def render_calibrator_tab() -> None:
     st.caption(
         "Sur une installation fraîche tu n'as aucun pari résolu, donc le "
         "calibrateur reste inactif pendant des semaines. Cette action lance "
-        "un backtest walk-forward sur les 5 grandes ligues européennes et "
-        "entraîne le calibrateur sur les prédictions synthétiques produites. "
+        "un fit sur les **vraies cotes de clôture** (football-data.co.uk, "
+        "2 saisons, 5 ligues), avec repli sur un backtest synthétique si "
+        "indisponible. "
         "Le calibrateur sera **opérationnel immédiatement** ; le job hebdo "
         "écrasera plus tard cette version avec un fit basé sur tes vrais paris."
     )
-    if cal_status.get("available") and cal_status.get("source", "") != "cold_start_backtest":
-        st.info(
-            "✓ Un calibrateur est déjà fitté sur tes vrais paris — le cold-start "
-            "n'est pas recommandé (il remplacerait le fit réel par un fit synthétique).",
-            icon="ℹ️",
-        )
+    # The old test was `source != "cold_start_backtest"`, so ANY other source —
+    # including `cold_start_real_odds`, the one actually in production, fitted
+    # on 4647 football-data.co.uk matches and zero user bets — displayed
+    # "fitté sur tes vrais paris". Only `resolved_bets` deserves that claim.
+    _src = cal_status.get("source", "") or "—"
+    if cal_status.get("available"):
+        _age = cal_status.get("age_days")
+        _seg = cal_status.get("segments")
+        _detail = (f"Calibrateur actuel : source `{_src}`"
+                   + (f" · entraîné il y a {_age} j" if _age is not None else "")
+                   + (f" · segments {_seg}" if _seg else ""))
+        if _src == "resolved_bets":
+            st.info(f"✓ Fitté sur **tes vrais paris résolus**. {_detail}", icon="ℹ️")
+        else:
+            st.warning(
+                f"⚠️ Le calibrateur n'est **pas** entraîné sur tes paris : il vient "
+                f"d'un démarrage à froid sur des données externes. {_detail}"
+            )
+        if _age is not None and _age > 30:
+            st.caption(f"⏳ Plus de 30 jours ({_age} j) — il dérive silencieusement.")
     if st.button("🚀 Initialiser depuis l'historique (5 ligues, ~30-60 s)"):
         with st.spinner("Backtests EPL/Liga/Bundesliga/Serie A/Ligue 1 + fit…"):
             try:
@@ -312,10 +335,11 @@ def render_calibrator_tab() -> None:
                 result = None
         if result:
             if result.get("trained"):
-                st.success(
-                    f"✅ Calibrateur initialisé sur {result['n_samples']} "
-                    f"prédictions synthétiques. "
-                    f"Brier : **{result['brier_before']} → {result['brier_after']}**"
+                st.info(
+                    f"Calibrateur initialisé sur {result['n_samples']} échantillons. "
+                    f"Brier **IN-SAMPLE** {result['brier_before']} → "
+                    f"{result['brier_after']} — mesuré sur les données "
+                    f"d'entraînement, donc non probant."
                 )
                 per_league = result.get("per_league", {})
                 if per_league:

@@ -29,8 +29,13 @@ def fmt_odds(value: float | None) -> str:
     return f"{value:.2f}"
 
 
-def fmt_money(value: float | None, *, symbol: str = "$", decimals: int = 2) -> str:
-    """12.5 → '12.50 $'."""
+def fmt_money(value: float | None, *, symbol: str = "€", decimals: int = 2) -> str:
+    """12.5 → '12.50 €'.
+
+    Defaults to EUR: the bankroll is denominated in euros and the books are
+    French. Pass symbol="$" explicitly for genuinely dollar-denominated
+    values — the Anthropic API cost is the only one in this codebase.
+    """
     if value is None:
         return "—"
     return f"{value:.{decimals}f} {symbol}"

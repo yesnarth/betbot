@@ -41,6 +41,21 @@ def _historize_picks(db: Database, picks: list[dict], source: str) -> int:
 
     Gated by Settings.historize_scans (env HISTORIZE_SCANS, default on).
     """
+    # ONE counted bet per match. A single event yields up to 3+ correlated
+    # selections ("1", "1X", "U25"); each used to be historised and counted as
+    # an independent 1-unit bet, so one look at one match fabricated 2-3
+    # "placed bets" whose results move together. Keep the selection the model
+    # is most confident in — the user's objective is hit rate.
+    best_by_event: dict = {}
+    for p in picks or []:
+        eid = p.get("event_id")
+        if not eid:
+            continue
+        cur = best_by_event.get(eid)
+        if cur is None or float(p.get("model_prob") or 0) > float(cur.get("model_prob") or 0):
+            best_by_event[eid] = p
+    picks = list(best_by_event.values())
+
     saved = 0
     for p in picks or []:
         eid = p.get("event_id")
@@ -61,6 +76,27 @@ def _historize_picks(db: Database, picks: list[dict], source: str) -> int:
                 best_book=p.get("best_book", "") or "",
                 value_edge=float(p.get("value_edge") or 0.0),
                 kelly_stake=float(p.get("kelly_stake") or 0.0),
+                # The worker path (main.py) has always persisted these; this
+                # path dropped them. With SCAN_HOURS empty the worker scan
+                # never runs, so 310/310 production picks were stored with
+                # lambda_home = lambda_away = NULL — making the model's
+                # expected goals impossible to audit on exactly the market
+                # that fails hardest (totals: Over 2.5 predicted 56%,
+                # realised 25%).
+                lambda_home=p.get("lambda_home"),
+                lambda_away=p.get("lambda_away"),
+                # The market's own de-vigged probability for this selection.
+                # Without it the model-vs-price verdict is unanswerable after
+                # the fact — see ValueBet.market_prob.
+                market_prob=p.get("market_prob"),
+                # Live emits agreement picks now; their record must live in
+                # the favourites ledger, not the value one.
+                channel=p.get("channel") or "valeur",
+                # Kickoff. Without it the CLV snapshot cannot narrow to matches
+                # near kickoff and queries EVERY league with a pending pick:
+                # 25 leagues x 2 regions x 2 markets = 100 credits per 10-min
+                # cycle against a 500/month quota.
+                commence_time=(p.get("commence_time") or None),
                 model_type=p.get("model_type", "poisson") or "poisson",
                 reliability=p.get("reliability"),
             ):
@@ -70,6 +106,40 @@ def _historize_picks(db: Database, picks: list[dict], source: str) -> int:
     if saved:
         logger.info("historize(%s): %d nouveau(x) pick(s) shadow-logged", source, saved)
     return saved
+
+
+
+def _tighten_only(filters, s) -> tuple[float, float, float]:
+    """Effective (edge, prob, odds) floors: slider values may TIGHTEN the server
+    discipline, never loosen it.
+
+    Under AUTO_CONFIRM_PICKS every returned pick is a counted bet, and the
+    sidebar slider for min_prob defaulted to 0.40 — silently bypassing the 0.70
+    confidence floor on every dashboard scan while the worker's auto-scan
+    respected it. The track record was mixing two populations without saying so.
+    Clamping at the endpoint makes the floor unforgeable regardless of what any
+    UI sends.
+    """
+    edge = max(filters.min_edge if filters.min_edge is not None else s.min_value_edge,
+               s.min_value_edge)
+    prob = max(filters.min_prob if filters.min_prob is not None else s.min_model_prob,
+               s.min_model_prob)
+    odds = max(filters.min_odds if filters.min_odds is not None else s.min_book_odds,
+               s.min_book_odds)
+    return edge, prob, odds
+
+
+def _apply_kickoff_hour(events_by_sport: dict, hour) -> dict:
+    """Restrict every league to matches kicking off in the given Paris hour."""
+    if hour is None:
+        return events_by_sport
+    from betbot.shared import filter_by_kickoff_hour
+    out = {}
+    for sk, evs in events_by_sport.items():
+        kept = filter_by_kickoff_hour(evs, hour)
+        if kept:
+            out[sk] = kept
+    return out
 
 
 @router.post("/recommend/manual", response_model=ManualScanResponse)
@@ -96,9 +166,7 @@ def recommend_manual(
     s = load_settings()
     odds_client = OddsAPIClient(s.odds_api_key)
 
-    edge = filters.min_edge if filters.min_edge is not None else s.min_value_edge
-    prob = filters.min_prob if filters.min_prob is not None else s.min_model_prob
-    odds = filters.min_odds if filters.min_odds is not None else s.min_book_odds
+    edge, prob, odds = _tighten_only(filters, s)
 
     if filters.sport_key:
         all_events = {filters.sport_key: odds_client.get_events_with_odds(filters.sport_key)}
@@ -110,6 +178,7 @@ def recommend_manual(
         kept = filter_upcoming_today(ev, s.min_before_kickoff) if filters.today_only else ev
         if kept:
             events_by_sport[sk] = kept
+    events_by_sport = _apply_kickoff_hour(events_by_sport, filters.kickoff_hour)
 
     n_events = sum(len(v) for v in events_by_sport.values())
     if n_events == 0:
@@ -129,6 +198,10 @@ def recommend_manual(
         bankroll=s.bankroll,
         kelly_fraction=s.kelly_fraction,
         min_value_edge=edge,
+        max_value_edge=s.max_value_edge,
+        derive_dnb=s.derive_dnb,
+        allow_totals_over=s.allow_totals_over,
+        kelly_edge_cap=s.kelly_edge_cap,
         min_model_prob=prob,
         min_book_odds=odds,
         min_edge_vs_novig=s.min_edge_vs_novig,
@@ -140,6 +213,15 @@ def recommend_manual(
     )
     ranked = rank_value_bets(raw)[: s.top_bets]
     parlays = build_parlays(ranked, n_legs=filters.n_legs, top_n=filters.n_combos)
+
+    # Kickoff per event — already in hand from the fetch above, previously
+    # discarded on this path (the daily scan) while /recommend/agent-local
+    # returned it.
+    commence_by_id: dict[str, str] = {}
+    for _evs in events_by_sport.values():
+        for _e in _evs:
+            if _e.get("id"):
+                commence_by_id[_e["id"]] = _e.get("commence_time", "")
 
     def bet_to_dict(b):
         return {
@@ -156,8 +238,15 @@ def recommend_manual(
             "best_book": b.best_book,
             "value_edge": b.value_edge,
             "kelly_stake": b.kelly_stake,
+            # Expected goals per side. Dropped here until 2026-08-01, which is
+            # why all 310 production picks carry lambda NULL and the goals
+            # model could not be audited retroactively.
+            "lambda_home": b.lambda_home,
+            "lambda_away": b.lambda_away,
+            "commence_time": b.commence_time or commence_by_id.get(b.event_id, ""),
             "model_type": b.model_type,
             "reliability": b.reliability,
+            "market_prob": b.market_prob,
         }
 
     picks_out = [bet_to_dict(b) for b in ranked]
@@ -227,6 +316,7 @@ def recommend_parlay_target(
         kept = filter_upcoming_today(ev, s.min_before_kickoff) if filters.today_only else ev
         if kept:
             events_by_sport[sk] = kept
+    events_by_sport = _apply_kickoff_hour(events_by_sport, filters.kickoff_hour)
 
     n_events = sum(len(v) for v in events_by_sport.values())
     if n_events == 0:
@@ -248,9 +338,26 @@ def recommend_parlay_target(
         match_history_by_sport={},
         bankroll=s.bankroll,
         kelly_fraction=s.kelly_fraction,
-        min_value_edge=filters.min_edge,
-        min_model_prob=filters.min_prob,
-        min_book_odds=filters.min_leg_odds,
+        min_value_edge=max(filters.min_edge, s.min_value_edge),
+        max_value_edge=s.max_value_edge,
+        derive_dnb=s.derive_dnb,
+        allow_totals_over=s.allow_totals_over,
+        kelly_edge_cap=s.kelly_edge_cap,
+        # The odds ceiling was missing here alone. It is the strongest measured
+        # filter in the system — production picks above it returned -47.3% —
+        # so the lottery mode was free to build its legs out of precisely the
+        # population every other mode refuses. Stacking more legs is the
+        # documented way to reach a big ticket; stacking longer ones is not.
+        max_book_odds=s.max_book_odds,
+        underdog_odds=s.underdog_odds,
+        underdog_min_prob=s.underdog_min_prob,
+        novig_required=s.novig_required,
+        # Tighten-only, same as every other deterministic scan: the x1000
+        # slider went down to 0.30 and bypassed the confidence floor entirely.
+        # Stacking MORE legs that are each inside the calibrated zone is the
+        # documented design ("disciplined favorites"); legs below it are not.
+        min_model_prob=max(filters.min_prob, s.min_model_prob),
+        min_book_odds=max(filters.min_leg_odds, s.min_book_odds),
         min_edge_vs_novig=s.min_edge_vs_novig,   # re-armed adverse-selection guard
         require_positive_stake=True,             # only genuine, stake-worthy legs
         prebuilt_stats_by_sport=prebuilt,
@@ -282,7 +389,9 @@ def recommend_parlay_target(
             "selection_code": b.selection_code, "selection_label": b.selection_label,
             "model_prob": b.model_prob, "best_odds": b.best_odds, "best_book": b.best_book,
             "value_edge": b.value_edge, "kelly_stake": b.kelly_stake,
+            "lambda_home": b.lambda_home, "lambda_away": b.lambda_away,
             "model_type": b.model_type, "reliability": b.reliability,
+            "market_prob": b.market_prob,
         }
 
     parlays_out = [
@@ -351,10 +460,20 @@ def recommend_live(
     if events_by_sport:
         db = Database(s.database_url)
         prebuilt = load_team_stats_from_db(db, events_by_sport.keys())
+        # In-play picks are historised and auto-confirmed exactly like the
+        # others, so they must clear exactly the same discipline. The floor
+        # was plumbed into scan_live but never passed from here, leaving it
+        # at 0.0 — a half-finished fix reads as a finished one.
         picks = scan_live(
             events_by_sport, scores_by_sport, prebuilt,
             bankroll=s.bankroll, kelly_fraction=s.kelly_fraction,
-            min_value_edge=filters.min_edge, min_book_odds=filters.min_odds,
+            min_value_edge=max(filters.min_edge, s.min_value_edge),
+            max_value_edge=s.max_value_edge,
+            derive_dnb=s.derive_dnb, allow_totals_over=s.allow_totals_over,
+            kelly_edge_cap=s.kelly_edge_cap,
+            min_model_prob=s.min_model_prob,
+            min_book_odds=max(filters.min_odds, s.min_book_odds),
+            max_book_odds=s.max_book_odds,
             min_edge_vs_novig=s.min_edge_vs_novig,
         )
         if s.historize_scans:
@@ -400,9 +519,7 @@ def recommend_agent_local(
     s = load_settings()
     odds_client = OddsAPIClient(s.odds_api_key)
 
-    edge = filters.min_edge if filters.min_edge is not None else s.min_value_edge
-    prob = filters.min_prob if filters.min_prob is not None else s.min_model_prob
-    odds = filters.min_odds if filters.min_odds is not None else s.min_book_odds
+    edge, prob, odds = _tighten_only(filters, s)
 
     if filters.sport_key:
         all_events = {filters.sport_key: odds_client.get_events_with_odds(filters.sport_key)}
@@ -418,6 +535,7 @@ def recommend_agent_local(
             for e in kept:
                 if e.get("id"):
                     commence_by_id[e["id"]] = e.get("commence_time", "")
+    events_by_sport = _apply_kickoff_hour(events_by_sport, filters.kickoff_hour)
 
     if not events_by_sport:
         return LocalAgentResponse(
@@ -438,6 +556,10 @@ def recommend_agent_local(
         bankroll=s.bankroll,
         kelly_fraction=s.kelly_fraction,
         min_value_edge=edge,
+        max_value_edge=s.max_value_edge,
+        derive_dnb=s.derive_dnb,
+        allow_totals_over=s.allow_totals_over,
+        kelly_edge_cap=s.kelly_edge_cap,
         min_model_prob=prob,
         min_book_odds=odds,
         min_edge_vs_novig=s.min_edge_vs_novig,
@@ -464,9 +586,12 @@ def recommend_agent_local(
             "best_book": b.best_book,
             "value_edge": b.value_edge,
             "kelly_stake": b.kelly_stake,
+            "lambda_home": b.lambda_home,
+            "lambda_away": b.lambda_away,
             "model_type": b.model_type,
             "reliability": b.reliability,
-            "commence_time": commence_by_id.get(b.event_id, ""),
+            "market_prob": b.market_prob,
+            "commence_time": b.commence_time or commence_by_id.get(b.event_id, ""),
         }
 
     raw_picks = [bet_to_dict(b) for b in ranked]
@@ -475,12 +600,33 @@ def recommend_agent_local(
         raw_picks,
         fetch_news=filters.fetch_news,
         fetch_weather=filters.fetch_weather,
-        min_final_edge=filters.min_final_edge,
+        min_final_edge=max(filters.min_final_edge, s.min_value_edge),
         bankroll=s.bankroll,
         kelly_fraction=s.kelly_fraction,
         trigger="dashboard",
         filters=filters.model_dump(),
     )
+
+    # POST-MUTATION CONFIDENCE GATE. The local agent's rules MULTIPLY the
+    # probability (huge-edge x0.60, coach x0.80, ELO x0.75, cumulable) but its
+    # accept/reject decision only tested the final EDGE. A pick entering at
+    # 0.70 could leave at 0.42, stay accepted (0.46 x 2.22 - 1 >= 0.02), be
+    # historised with its mutated model_prob and counted as a placed bet —
+    # outside the calibrated zone that the 77% hit rate is built on. The floor
+    # must hold on the probability the pick CARRIES, not the one it entered with.
+    _floor = prob  # tighten-only clamp computed above
+    _demoted = [pk for pk in eval_result["picks"] if pk.get("model_prob", 0.0) < _floor]
+    if _demoted:
+        for pk in _demoted:
+            pk.setdefault("rationale", []).append(
+                f"Rejeté après mutation : proba {pk.get('model_prob', 0):.2f} "
+                f"sous le plancher {_floor:.2f}"
+            )
+        eval_result["rejected"] = list(eval_result.get("rejected", [])) + _demoted
+        eval_result["picks"] = [pk for pk in eval_result["picks"]
+                                if pk.get("model_prob", 0.0) >= _floor]
+        eval_result["n_accepted"] = len(eval_result["picks"])
+        eval_result["n_rejected"] = len(eval_result["rejected"])
 
     accepted_bets = [
         ValueBet(

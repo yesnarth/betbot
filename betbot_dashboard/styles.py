@@ -1,6 +1,9 @@
 """CSS injection and shared visual primitives."""
 from __future__ import annotations
 
+import html
+import re
+
 import streamlit as st
 
 _CSS = """
@@ -102,13 +105,28 @@ def inject_css() -> None:
     st.markdown(_CSS, unsafe_allow_html=True)
 
 
+def _md_bold_to_html(text: str) -> str:
+    """Convert `**bold**` to <strong>, escaping the rest.
+
+    `empty_state` renders raw HTML, so Streamlit's markdown never runs on it.
+    Every call site nonetheless writes `**Outils → Scan manuel**` out of habit,
+    and the asterisks were showing up literally on screen. Handling it here
+    fixes all of them at once rather than stripping markup string by string.
+    """
+    escaped = html.escape(text)
+    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped, flags=re.S)
+
+
 def empty_state(icon: str, title: str, hint: str = "") -> None:
-    """Render a polished empty state instead of a flat info alert."""
+    """Render a polished empty state instead of a flat info alert.
+
+    `title` and `hint` accept `**bold**`; everything else is escaped.
+    """
     st.markdown(
         f"""<div class="empty-state">
             <span class="icon">{icon}</span>
-            <div class="title">{title}</div>
-            <div class="hint">{hint}</div>
+            <div class="title">{_md_bold_to_html(title)}</div>
+            <div class="hint">{_md_bold_to_html(hint)}</div>
         </div>""",
         unsafe_allow_html=True,
     )

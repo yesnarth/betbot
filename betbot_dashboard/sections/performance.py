@@ -8,6 +8,52 @@ from betbot_dashboard.api_client import api_get, api_post
 from betbot_dashboard.styles import empty_state
 
 
+def _verdict_banner(brier: dict) -> None:
+    """The single hardest test: does the model beat the raw bookmaker price?
+
+    `1/best_odds` still contains the bookmaker's margin, so a model that cannot
+    beat it is not merely failing to beat the market — it is removing
+    information relative to just reading the odds. Showing this first stops the
+    ROI from being read in isolation.
+    """
+    if not brier or not brier.get("n"):
+        return
+    model, market = brier["model"], brier["market"]
+    n = brier["n"]
+    if brier.get("model_beats_market"):
+        st.success(
+            f"✅ **Le modèle bat la cote brute du bookmaker.** "
+            f"Brier modèle {model:.4f} contre {market:.4f} pour la cote "
+            f"(marge incluse), sur {n} paris tranchés. Plus bas = meilleur."
+        )
+    else:
+        st.error(
+            f"🔴 **Le modèle est battu par la cote brute du bookmaker.** "
+            f"Brier modèle {model:.4f} contre {market:.4f} pour la cote — "
+            f"et cette cote contient encore la marge du book. Sur {n} paris "
+            f"tranchés, le modèle n'apporte aucune information au-delà de la "
+            f"simple lecture des cotes. C'est le test le plus sévère qui existe."
+        )
+
+
+def _perf_table(rows: list[dict], key: str, label: str) -> None:
+    """Worst-ROI-first table for one grouping dimension."""
+    if not rows:
+        return
+    df = pd.DataFrame(rows)
+    df = df.rename(columns={
+        key: label, "n": "n", "wins": "V", "losses": "D",
+        "win_rate": "% réussite", "roi_pct": "ROI %",
+        "avg_model_prob": "proba prédite", "avg_implied_prob": "proba marché",
+    })
+    cols = [label, "n", "V", "D", "% réussite", "ROI %", "proba prédite", "proba marché"]
+    st.dataframe(
+        df[[c for c in cols if c in df.columns]],
+        hide_index=True,
+        use_container_width=True,
+    )
+
+
 def render_roi_tab() -> None:
     st.subheader("Performance globale")
     period = st.selectbox("Période (jours)", [7, 14, 30, 60, 90, 180, 365], index=2)
@@ -30,11 +76,82 @@ def render_roi_tab() -> None:
         return
 
     cols = st.columns(4)
-    cols[0].metric("Paris résolus", s["n_bets"])
+    cols[0].metric("Paris tranchés", s["n_bets"])
     cols[1].metric("Victoires", f"{s['n_wins']} ({s['hit_rate']}%)")
     cols[2].metric("ROI", f"{s['roi']:+.1f}%")
     cols[3].metric("Edge moyen", f"{s['avg_edge']:+.2f}%")
 
+    n_void = s.get("n_void", 0)
+    if n_void:
+        st.caption(
+            f"➕ {n_void} pari(s) annulé(s) (remboursés) — exclus du ROI et du "
+            "taux de réussite, comme il se doit : un remboursement n'est ni un "
+            "gain ni une perte."
+        )
+
+    # ---- Diagnostic ------------------------------------------------------
+    st.divider()
+    st.markdown("### 🔬 Diagnostic du modèle")
+    try:
+        perf = api_get("/stats/model-performance", days=period, only_placed=False)
+    except Exception as exc:  # noqa: BLE001 — diagnostic must never break the tab
+        st.caption(f"Diagnostic indisponible : {exc}")
+        perf = None
+
+    if perf:
+        cov = perf.get("coverage") or {}
+        if cov.get("total"):
+            pct = cov["pct"]
+            msg = (f"Couverture de notation : **{cov['graded']}/{cov['total']} "
+                   f"({pct:.1f} %)** des pronostics ont un résultat.")
+            if pct < 80:
+                st.warning(
+                    msg + " En dessous de 80 %, lis le ROI ci-dessus avec "
+                    "prudence : il ne porte pas sur toute la production."
+                )
+            else:
+                st.caption(msg)
+
+        _verdict_banner(perf.get("brier") or {})
+
+        by_market = perf.get("by_market") or []
+        if by_market:
+            st.markdown("#### Par marché — les pires en premier")
+            st.caption(
+                "C'est ici que se trouve l'argent perdu. Un marché dont la "
+                "proba prédite dépasse largement le taux de réussite réel est "
+                "un marché où le modèle est surconfiant."
+            )
+            _perf_table(by_market, "market", "Marché")
+
+        by_model = perf.get("by_model") or []
+        if len(by_model) > 1:
+            st.markdown("#### Par type de modèle")
+            st.caption(
+                "`blended` = Dixon-Coles + xG + ELO avec statistiques d'équipe. "
+                "`consensus` = repli quand la ligue n'a aucune statistique en base."
+            )
+            _perf_table(by_model, "model_type", "Modèle")
+
+        calib = perf.get("calibration") or []
+        if calib:
+            st.markdown("#### Calibration — les probabilités sont-elles honnêtes ?")
+            st.caption(
+                "Un modèle honnête qui annonce 60 % gagne ≈ 60 % du temps. "
+                "L'écart est la surconfiance, en points."
+            )
+            cdf = pd.DataFrame(calib).rename(columns={
+                "bucket": "Tranche", "n": "n",
+                "expected_win_rate": "Annoncé %", "actual_win_rate": "Réalisé %",
+                "gap": "Surconfiance (pts)",
+            })
+            # Column order follows how the sentence is read — "le modèle annonce
+            # X et réalise Y" — instead of the dict insertion order, which put
+            # Réalisé before Annoncé and forced the eye to jump backwards.
+            cdf = cdf[["Tranche", "n", "Annoncé %", "Réalisé %", "Surconfiance (pts)"]]
+            st.dataframe(cdf, hide_index=True, use_container_width=True)
+
+    st.divider()
     if s.get("n_with_clv", 0) > 0:
         st.divider()
         st.markdown("### Closing Line Value (CLV)")
@@ -47,10 +164,16 @@ def render_roi_tab() -> None:
         clv_cols[1].metric("CLV moyen", f"{s['avg_clv_pct']:+.2f}%")
         clv_cols[2].metric("% paris CLV > 0", f"{s['positive_clv_share']:.1f}%")
     else:
-        st.caption(
-            "Le CLV s'activera dès que le worker aura snappé les closing odds "
-            "(automatique toutes les 10 min pour les matchs qui démarrent dans "
-            "moins de 30 min)."
+        st.markdown("### Closing Line Value (CLV) — inactif")
+        st.warning(
+            "**Aucune cote de clôture n'est enregistrée.** Le CLV est la seule "
+            "mesure non circulaire d'un avantage réel : il compare ta cote à "
+            "celle du marché à la fermeture, et se prononce sur ~200-400 paris "
+            "là où le ROI en demande plusieurs milliers.\n\n"
+            "Tant qu'il reste à zéro, il est impossible de distinguer la chance "
+            "de la compétence. Le snapshot se pilote par `CLV_SNAPSHOT_ENABLED=1` "
+            "dans le `.env` — il consomme du quota Odds API, d'où sa "
+            "désactivation par défaut."
         )
 
     # CLV data-quality view — distinguishes 'pending snap window' from
@@ -197,13 +320,89 @@ def render_roi_tab() -> None:
         )
 
 
-def render_capital_tab() -> None:
+
+def _render_frozen_capital(bk_state: dict) -> None:
+    """Capital tiles that describe reality when the ledger no longer moves.
+
+    Replaces "Engagé sur paris 0,00 €" (while bets are open) and "P&L cumulé
+    +0,00 €" (while the flat ROI is negative) with the two numbers the system
+    can actually stand behind: how many bets are still running, and the flat
+    P&L over graded picks.
+    """
+    try:
+        pending = api_get("/predictions/pending")
+    except Exception:
+        pending = []
+    try:
+        # 365 is the endpoint's hard ceiling (Query(..., le=365)); asking for
+        # more returns a 422 and the tile silently fell back to "—".
+        perf = api_get("/stats/model-performance", days=365, only_placed=False)
+        overall = perf.get("overall") or {}
+    except Exception:
+        overall = {}
+
+    n_open = len(pending)
+    stake_theo = sum(float(p.get("kelly_stake") or 0.0) for p in pending)
+    n_graded = int(overall.get("n") or 0)
+    roi = float(overall.get("roi_pct") or 0.0)
+    pnl_u = roi / 100.0 * n_graded if n_graded else 0.0
+
+    c = st.columns(4)
+    c[0].metric("Capital de référence", f"{bk_state['balance']:.2f} €",
+                help="Sert au dimensionnement Kelly. Ne suit pas tes mises réelles.")
+    c[1].metric("Paris en cours", str(n_open),
+                help="Picks confirmés dont le résultat n'est pas encore connu.")
+    c[2].metric("Exposition théorique", f"{stake_theo:.2f} €",
+                help="Somme des mises Kelly suggérées sur les paris en cours. "
+                     "Tes mises réelles ne sont pas connues du système.")
+    if n_graded:
+        # Delta text must LEAD with the signed number: Streamlit parses the
+        # first token to pick the arrow direction, and "ROI -15.0 %" made it
+        # render an UP arrow on a loss.
+        c[3].metric("P&L modèle (à plat)", f"{pnl_u:+.1f} u",
+                    delta=f"{roi:+.1f} % de ROI à plat",
+                    delta_color="normal",
+                    help="Mise plate de 1 unité par pari, sur les picks notés, "
+                         "annulations comptées 0. Différent du ROI de l'onglet "
+                         "Performance, qui est pondéré par la mise Kelly et "
+                         "exclut les annulations.")
+        st.caption(
+            f"**{pnl_u:+.1f} u** sur **{n_graded}** paris notés — soit un "
+            f"**ROI à plat de {roi:+.1f} %**. 1 u = 1 pari, tes mises réelles "
+            "sont variables. ⚠️ Ce chiffre n'est pas celui de 📊 Performance : "
+            "là-bas le ROI est pondéré par la mise Kelly et exclut les paris "
+            "annulés."
+        )
+    else:
+        c[3].metric("P&L modèle", "—", help="Aucun pari noté sur la période.")
+
+
+def render_capital_tab(health: dict | None = None) -> None:
     st.subheader("💰 Gestion du capital")
-    st.caption(
-        "Toutes les mises consomment réellement le solde, tous les gains/pertes "
-        "le mettent à jour automatiquement. Source unique de vérité : la table "
-        "`bankroll_ledger` en DB."
-    )
+    frozen = bool((health or {}).get("auto_confirm_picks"))
+
+    if frozen:
+        # Every figure below comes from `bankroll_ledger`, which in this mode
+        # holds exactly one row: the initial deposit. `committed` joins on
+        # kind='bet_placed' — rows that no longer exist — so it reads 0.00
+        # while real bets are open at the bookmaker. `pnl` is
+        # balance − deposits + withdrawals, structurally 0.00 while the flat
+        # ROI is negative. Displaying those as money facts was the single most
+        # dangerous statement in the dashboard: it says "nothing is out, you
+        # are losing nothing" to someone with open positions.
+        st.warning(
+            "**Livre comptable GELÉ.** Tes mises sont placées à la main sur "
+            "Betclic avec des montants variables : rien ici n'est débité "
+            "ni crédité automatiquement. Ce solde est un **capital de "
+            "référence**, pas ton argent réel.\n\n"
+            "La performance se lit en **ROI à plat** dans 📊 **Performance**."
+        )
+    else:
+        st.caption(
+            "Toutes les mises consomment réellement le solde, tous les "
+            "gains/pertes le mettent à jour automatiquement. Source : la table "
+            "`bankroll_ledger`."
+        )
 
     try:
         bk_state = api_get("/bankroll/state")
@@ -214,22 +413,25 @@ def render_capital_tab() -> None:
     if not bk_state:
         return
 
-    c = st.columns(4)
-    c[0].metric("Solde courant", f"{bk_state['balance']:.2f} $")
-    c[1].metric("Capital libre", f"{bk_state['available']:.2f} $")
-    c[2].metric("Engagé sur paris", f"{bk_state['committed']:.2f} $")
-    pnl = bk_state['pnl']
-    c[3].metric("P&L cumulé", f"{pnl:+.2f} $",
-                delta=f"{pnl:+.2f} $" if pnl != 0 else None)
+    if frozen:
+        _render_frozen_capital(bk_state)
+    else:
+        c = st.columns(4)
+        c[0].metric("Solde courant", f"{bk_state['balance']:.2f} €")
+        c[1].metric("Capital libre", f"{bk_state['available']:.2f} €")
+        c[2].metric("Engagé sur paris", f"{bk_state['committed']:.2f} €")
+        pnl = bk_state['pnl']
+        c[3].metric("P&L cumulé", f"{pnl:+.2f} €",
+                    delta=f"{pnl:+.2f} €" if pnl != 0 else None)
 
     st.divider()
     c2 = st.columns(4)
-    c2[0].metric("Dépôts cumulés", f"{bk_state['total_deposits']:.2f} $")
-    c2[1].metric("Retraits cumulés", f"{bk_state['total_withdrawals']:.2f} $")
-    c2[2].metric("Gains cumulés", f"{bk_state['total_won']:.2f} $",
+    c2[0].metric("Dépôts cumulés", f"{bk_state['total_deposits']:.2f} €")
+    c2[1].metric("Retraits cumulés", f"{bk_state['total_withdrawals']:.2f} €")
+    c2[2].metric("Gains cumulés", f"{bk_state['total_won']:.2f} €",
                  help="Somme des stakes × cote des paris gagnants (avant déduction de la mise).")
     c2[3].metric("Pertes (mises sur paris perdus)",
-                 f"{bk_state['total_lost_stakes']:.2f} $",
+                 f"{bk_state['total_lost_stakes']:.2f} €",
                  help="Somme des stakes engagés sur les paris perdants.")
 
     # Evolution chart — guard against empty / single-point datasets to
@@ -282,7 +484,7 @@ def render_capital_tab() -> None:
 
     c3 = st.columns([1, 1, 2])
     with c3[0]:
-        dep_amt = st.number_input("Montant dépôt ($)", min_value=0.0,
+        dep_amt = st.number_input("Montant dépôt (€)", min_value=0.0,
                                   value=0.0, step=10.0, format="%.2f", key="dep_amt")
         dep_note = st.text_input("Note dépôt", placeholder="ex : recharge mensuelle")
         if st.button("➕ Déposer", width='stretch', disabled=(dep_amt <= 0)):
@@ -293,12 +495,12 @@ def render_capital_tab() -> None:
                     headers={"Idempotency-Key": _idem_key(
                         "bankroll/deposit", dep_amt, dep_note)},
                 )
-                st.toast(f"+{dep_amt:.2f} $ déposés.", icon="➕")
+                st.toast(f"+{dep_amt:.2f} € déposés.", icon="➕")
                 st.rerun()
             except Exception as exc:
                 st.error(f"Erreur : {exc}")
     with c3[1]:
-        wd_amt = st.number_input("Montant retrait ($)", min_value=0.0,
+        wd_amt = st.number_input("Montant retrait (€)", min_value=0.0,
                                  value=0.0, step=10.0, format="%.2f", key="wd_amt")
         wd_note = st.text_input("Note retrait", placeholder="ex : retrait gains")
         if st.button("➖ Retirer", width='stretch', disabled=(wd_amt <= 0)):
@@ -309,7 +511,7 @@ def render_capital_tab() -> None:
                     headers={"Idempotency-Key": _idem_key(
                         "bankroll/withdraw", wd_amt, wd_note)},
                 )
-                st.toast(f"-{wd_amt:.2f} $ retirés.", icon="➖")
+                st.toast(f"-{wd_amt:.2f} € retirés.", icon="➖")
                 st.rerun()
             except Exception as exc:
                 st.error(f"Erreur : {exc}")

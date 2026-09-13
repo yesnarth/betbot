@@ -53,7 +53,11 @@ def test_quota_updates_on_success(mocker):
     assert client.quota_remaining == 350
 
 
-def test_fetch_all_sports_skips_failed(mocker):
+def test_fetch_all_sports_skips_failed(mocker, monkeypatch):
+    # The free /events pre-filter is exercised in test_free_prefilter.py; here
+    # it would answer a raw HTTP mock designed for the odds endpoint and drop
+    # every league before the behaviour under test is reached.
+    monkeypatch.setenv("PREFILTER_UPCOMING", "0")
     sample = json.loads(FIXTURE.read_text())
     call_count = 0
 

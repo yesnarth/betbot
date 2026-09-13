@@ -17,8 +17,33 @@ class HealthResponse(BaseModel):
     odds_quota_remaining: int = -1    # The Odds API monthly quota left; -1 = unknown
     odds_quota_minimum: int = 20      # safety threshold below which scans are blocked
     odds_quota_exhausted: bool = False  # true when quota_remaining < odds_quota_minimum
+    # What the NEXT full scan will actually bill: leagues x regions x markets.
+    # Quota shown without this is misleading — with 46 leagues in "eu,uk" and
+    # h2h+totals, 150 credits looks healthy but buys zero scans.
+    odds_scan_cost: int = 0
+    odds_scans_affordable: int = -1   # -1 = unknown quota
+    # api-football: the OTHER subscription, renewed on the same monthly cycle.
+    # It was invisible until its daily allowance ran dry and every league
+    # silently refreshed to "0 teams" — a quota you cannot see is one you
+    # discover by accident.
+    apifootball: dict = {}
     active_sports: list[str] = []     # currently in-season sports from our wishlist
     db_latency_ms: int = -1           # SELECT 1 round-trip latency; -1 = unknown
+    # Every scanned pick is born 'confirmed' — the user places them all.
+    # The dashboard needs this to describe the right workflow.
+    auto_confirm_picks: bool = False
+    bookmaker_whitelist: list[str] = []  # operators the edge is computed on
+    clv_snapshot_enabled: bool = False
+    # Server-side selection constraints the UI must not contradict. Without
+    # these the dashboard offers modes and slider ranges that are guaranteed
+    # to return nothing, and blames the user's filters for the empty result.
+    allow_totals_over: bool = True
+    max_book_odds: float = 0.0
+    derive_dnb: bool = True
+    # Floors the dashboard sliders must initialise from (tighten-only policy).
+    min_model_prob: float = 0.40
+    min_value_edge: float = 0.04
+    min_book_odds: float = 1.50
 
 
 class EventBrief(BaseModel):
@@ -97,11 +122,12 @@ class PredictionRow(BaseModel):
 
 
 class ROIStats(BaseModel):
-    n_bets: int
+    n_bets: int          # settled only (win/loss) — voids are no-action
     n_wins: int
     hit_rate: float
     roi: float
     avg_edge: float
+    n_void: int = 0      # refunded pushes, excluded from n_bets / hit_rate / roi
     n_with_clv: int = 0
     avg_clv_pct: float = 0.0
     positive_clv_share: float = 0.0
@@ -148,7 +174,13 @@ class AgentResponse(BaseModel):
 
 class ManualScanFilters(BaseModel):
     """Filters for the no-AI manual scan — same surface as the AI agent's filters
-    but only the ones that make sense for the deterministic pipeline."""
+    but only the ones that make sense for the deterministic pipeline.
+
+    min_edge / min_prob / min_odds are CLAMPED server-side to the env floors
+    (tighten-only): a dashboard slider may demand MORE than the server
+    discipline, never less. Under AUTO_CONFIRM_PICKS every returned pick is a
+    counted bet, so a slider defaulting to 0.40 was silently bypassing the
+    0.70 confidence floor on every manual scan."""
     sport_key: str | None = Field(default=None)
     today_only: bool = Field(default=True)
     min_edge: float | None = Field(default=None, ge=-1.0, le=1.0)
@@ -156,6 +188,10 @@ class ManualScanFilters(BaseModel):
     min_odds: float | None = Field(default=None, ge=1.0)
     n_legs: int = Field(default=3, ge=1, le=6)
     n_combos: int = Field(default=3, ge=1, le=10)
+    # Paris-local hour slot (0-23). When set, only matches kicking off inside
+    # that hour are scanned — the user's batch-betting workflow: one slot, all
+    # matches start together, all resolve together.
+    kickoff_hour: int | None = Field(default=None, ge=0, le=23)
 
 
 class ManualScanResponse(BaseModel):
@@ -197,6 +233,8 @@ class TargetParlayFilters(BaseModel):
                                 description="Cote minimale acceptée par jambe")
     max_leg_odds: float | None = Field(default=2.5, ge=1.1, le=50.0,
                                        description="Cote MAX par jambe — plafonne pour atteindre la cible en empilant des favoris, pas des longshots")
+    # Same-hour batch workflow, identical to ManualScanFilters.kickoff_hour.
+    kickoff_hour: int | None = Field(default=None, ge=0, le=23)
     min_prob: float = Field(default=0.50, ge=0.0, le=1.0,
                             description="Proba modèle min/jambe — favoris (plus de chances de gagner que de perdre)")
     min_edge: float = Field(default=0.0, ge=-1.0, le=1.0,

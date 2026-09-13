@@ -59,11 +59,20 @@ def _friendly_status(resp: httpx.Response) -> str:
         404: "Ressource introuvable",
         409: "Conflit (l'état a peut-être changé entre-temps)",
         422: "Données invalides",
+        # 429 covers two very different things: the per-minute rate limiter
+        # (retrying works) and a refused scan for lack of Odds API quota
+        # (retrying changes nothing — the quota is monthly). The label is
+        # chosen below from the detail so the advice matches the cause.
         429: "Trop de requêtes — réessaie dans un instant",
         500: "Erreur interne du backend",
         503: "Backend indisponible — un service démarre peut-être encore",
     }.get(resp.status_code, f"Erreur HTTP {resp.status_code}")
     detail = _extract_detail(resp)
+    if resp.status_code == 429 and detail and "quota" in detail.lower():
+        # A refused scan, not a burst of clicks. Say so, and let the detail —
+        # which states the exact cost, the budget and the ways out — carry the
+        # message instead of burying it behind "retry in a moment".
+        return f"Quota Odds API insuffisant : {detail}"
     return f"{base} : {detail}" if detail else base
 
 

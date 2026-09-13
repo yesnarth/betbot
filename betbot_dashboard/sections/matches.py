@@ -78,8 +78,36 @@ def render_events_tab(filters: dict) -> None:
 
 
 def render_validate_tab(health: dict) -> None:
-    st.subheader("🔔 Picks à valider")
     scan_hours = health.get("scan_hours") or []
+
+    # Auto-confirm mode: the user places every scanned pick at their bookmaker,
+    # so picks are born 'confirmed' and there is no validation queue to work.
+    # Leaving the old copy up would be actively misleading — it claimed no money
+    # was at stake and that unconfirmed picks get archived after 36h, both false.
+    if health.get("auto_confirm_picks"):
+        st.subheader("🔔 Mes picks")
+        st.info(
+            "**Validation automatique activée.** Tout pronostic issu d'un scan "
+            "est compté comme un pari réellement placé dès sa création : il entre "
+            "immédiatement dans le track record et sera noté automatiquement.\n\n"
+            "Il n'y a donc plus de file d'attente à traiter ici, et plus "
+            "d'archivage à 36 h. Les résultats se lisent dans **📊 Performance**."
+        )
+        st.caption(
+            "Le solde de la bankroll n'est PAS débité automatiquement : tes mises "
+            "réelles sont variables, donc les statistiques se lisent en ROI à plat "
+            "(1 unité par pari)."
+        )
+        wl = health.get("bookmaker_whitelist") or []
+        if wl:
+            st.caption(
+                f"🎯 Edge calculé uniquement sur les cotes de **{', '.join(wl)}** — "
+                "les bookmakers où tu peux réellement placer."
+            )
+        _render_latest_picks()
+        return
+
+    st.subheader("🔔 Picks à valider")
     if scan_hours:
         scan_origin = (
             f"Le worker a proposé ces picks lors des scans automatiques "
@@ -216,6 +244,108 @@ def render_validate_tab(health: dict) -> None:
                     cols[1].caption(f"_{sk['result']}_")
 
 
+
+def _render_latest_picks(limit: int = 15, fresh_hours: int = 24) -> None:
+    """Picks recent enough to still be placeable — the daily worklist.
+
+    This slot used to hold prose explaining that there was nothing to do, which
+    wasted the landing page of the whole dashboard.
+
+    The `fresh_hours` window matters: `predictions/pending` returns everything
+    unresolved, including picks whose match was played days ago and is simply
+    awaiting grading. Listing those under "à placer" tells the user to bet on a
+    finished match. Kickoff time is not persisted on the row, so creation age is
+    the proxy — scans only ever produce picks for imminent fixtures
+    (`MIN_BEFORE_KICKOFF`), which makes a 24h-old pick reliably past kickoff.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    st.markdown("---")
+    st.markdown("#### 🎯 Derniers picks à placer")
+    try:
+        rows = api_get("/predictions/pending")
+    except Exception as exc:  # noqa: BLE001 — never break the landing tab
+        st.caption(f"Liste indisponible : {exc}")
+        return
+    if not rows:
+        empty_state(
+            "🎯",
+            "Aucun pick en attente",
+            "Lance un scan depuis **🛠️ Outils → 🎯 Scan manuel** pour en générer.",
+        )
+        return
+
+    # Newest first — created_at is an ISO string, so a plain sort is chronological.
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=fresh_hours)).isoformat()
+
+    def _still_placeable(r: dict) -> bool:
+        """Kickoff decides when known; creation age is only the fallback.
+
+        `commence_time` landed on 2026-08-01, so older rows have none and keep
+        the age heuristic. Once a row has a kickoff the answer is exact: the bet
+        is placeable until the match starts.
+        """
+        ko = r.get("commence_time")
+        if ko:
+            return str(ko) > now_iso
+        return (r.get("created_at") or "") >= cutoff
+
+    # Soonest kickoff first — that is the placement urgency order. Rows with no
+    # kickoff sort last.
+    rows = sorted(
+        rows,
+        key=lambda r: (r.get("commence_time") or "9999", r.get("created_at") or ""),
+    )
+    fresh = [r for r in rows if _still_placeable(r)]
+    stale = len(rows) - len(fresh)
+
+    if not fresh:
+        empty_state(
+            "🎯",
+            "Aucun pick récent à placer",
+            f"Les {len(rows)} pick(s) en attente ont plus de {fresh_hours} h : "
+            "leurs matchs sont joués, ils attendent seulement d'être notés. "
+            "Lance un scan depuis **🛠️ Outils → 🎯 Scan manuel** pour de "
+            "nouveaux paris.",
+        )
+        return
+
+    st.caption(
+        f"Émis dans les {fresh_hours} dernières heures — donc encore jouables. "
+        + (f"{stale} pick(s) plus ancien(s) attendent seulement leur résultat "
+           "et sont dans **⏳ En attente de résultat**." if stale else "")
+    )
+    rows = fresh
+    shown = rows[:limit]
+    df = pd.DataFrame(shown)
+    cols = [c for c in ["commence_time", "home_team", "away_team", "selection",
+                        "best_odds", "best_book", "model_prob", "value_edge",
+                        "reliability", "created_at"] if c in df.columns]
+    disp = df[cols].rename(columns={
+        "commence_time": "Coup d'envoi", "created_at": "Émis le",
+        "home_team": "Domicile", "away_team": "Extérieur",
+        "selection": "Pari", "best_odds": "Cote", "best_book": "Book",
+        "model_prob": "Proba", "value_edge": "Edge", "reliability": "Fiabilité",
+    })
+    for _c in ("Coup d'envoi", "Émis le"):
+        if _c in disp.columns:
+            disp[_c] = (disp[_c].fillna("").astype(str)
+                        .str[:16].str.replace("T", " ", regex=False))
+    cfg = {"Cote": st.column_config.NumberColumn(format="%.2f")}
+    for label, fmt in (("Proba", "%.1f%%"), ("Edge", "%+.1f%%"), ("Fiabilité", "%.2f")):
+        if label in disp.columns:
+            if label != "Fiabilité":
+                disp[label] = disp[label] * 100
+            cfg[label] = st.column_config.NumberColumn(format=fmt)
+    st.dataframe(disp, width="stretch", hide_index=True, column_config=cfg)
+    if len(rows) > limit:
+        st.caption(
+            f"Les {limit} plus récents sur {len(rows)} encore jouables — "
+            "la liste complète est dans **⏳ En attente de résultat**."
+        )
+
+
 def render_pending_tab() -> None:
     st.subheader("⏳ Paris confirmés en attente de résolution")
     st.caption(
@@ -229,8 +359,7 @@ def render_pending_tab() -> None:
             empty_state(
                 "⏳",
                 "Aucun pari confirmé en attente",
-                "Va dans « 🔔 Picks à valider » pour confirmer les "
-                "recommandations du worker que tu as réellement placées.",
+                "Lance un scan depuis **🛠️ Outils → 🎯 Scan manuel**.",
             )
         else:
             df = pd.DataFrame(rows)
@@ -248,7 +377,7 @@ def render_pending_tab() -> None:
             })
             cfg = {
                 "Cote": st.column_config.NumberColumn(format="%.2f"),
-                "Mise Kelly": st.column_config.NumberColumn(format="$%.2f"),
+                "Mise Kelly": st.column_config.NumberColumn(format="%.2f €"),
             }
             if "Proba modèle" in disp.columns:
                 disp["Proba modèle"] = disp["Proba modèle"] * 100

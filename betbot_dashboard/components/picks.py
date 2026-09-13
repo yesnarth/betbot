@@ -91,7 +91,14 @@ def _render_picks_df(picks: list[dict]) -> None:
         column_config["Edge"] = st.column_config.NumberColumn(format="%+.1f%%")
         display["Edge"] = display["Edge"] * 100
     if "Mise Kelly" in display.columns:
-        column_config["Mise Kelly"] = st.column_config.NumberColumn(format="$%.2f")
+        # Most-read money figure in the whole dashboard: it is what you look at
+        # when deciding how much to put on. It was labelled in dollars while the
+        # books are French, and it is only a suggestion — nothing debits it.
+        column_config["Mise Kelly"] = st.column_config.NumberColumn(
+            "Mise Kelly (indicative)", format="%.2f €",
+            help="Suggestion du dimensionnement Kelly. Elle n'est ni appliquée "
+                 "ni débitée : tes mises réelles sont les tiennes.",
+        )
     if "Fiabilité" in display.columns:
         column_config["Fiabilité"] = st.column_config.TextColumn(
             help="🟢 ≥0.70 = haute · 🟡 0.40–0.69 = moyenne · 🔴 <0.40 = faible. "

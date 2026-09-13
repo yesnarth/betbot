@@ -14,6 +14,9 @@ import logging
 import os
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
+
+from betbot.api import QuotaExhaustedError
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -53,6 +56,24 @@ app = FastAPI(
 # without creating a main↔routers circular dependency.
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.exception_handler(QuotaExhaustedError)
+async def _quota_exhausted_handler(request: Request, exc: QuotaExhaustedError):
+    """A refused scan is a DECISION, not a crash.
+
+    `fetch_all_sports` raises this deliberately, with a message stating the
+    exact cost, the available budget and the three ways out. Uncaught, FastAPI
+    turned it into a bare 500 and the dashboard showed "Erreur interne du
+    backend : Internal Server Error" — so the user saw a broken application
+    where the bot was in fact telling them something useful, and the carefully
+    written explanation never reached the screen.
+
+    429 is the honest status: the request is well-formed, the server simply has
+    no quota left to serve it. Registered globally so every scan mode
+    (manual, live, agent-local, target parlay) reports it the same way.
+    """
+    return JSONResponse(status_code=429, content={"detail": str(exc)})
 
 # CORS — strict in prod (BETBOT_DOMAIN), permissive only in local dev.
 _cors_origins: list[str] = []
@@ -142,6 +163,19 @@ def auth_login(request: Request,
             "expires_in_min": int(os.getenv("BETBOT_JWT_TTL_MIN", "60"))}
 
 
+def _apifootball_status() -> dict:
+    """Cached api-football account state for the health payload.
+
+    Never let a status probe break /health: an unreachable provider is a
+    reportable state, not a 503.
+    """
+    try:
+        from betbot.data_sources.api_football import account_status
+        return account_status()
+    except Exception:  # noqa: BLE001
+        return {"state": "unreachable"}
+
+
 @app.get("/health", response_model=HealthResponse)
 def health(db: Database = Depends(get_db)) -> HealthResponse:
     """
@@ -156,6 +190,7 @@ def health(db: Database = Depends(get_db)) -> HealthResponse:
     from betbot.bankroll import get_state
     from betbot.api import (
         OddsAPIClient, _quota_minimum, _enabled_sport_keys, _scan_all_soccer,
+        per_league_cost,
     )
     from betbot.database import session_scope
 
@@ -205,6 +240,8 @@ def health(db: Database = Depends(get_db)) -> HealthResponse:
     except Exception:
         pass
 
+    from betbot.bookmaker_filter import whitelist_tokens as _whitelist_tokens
+
     return HealthResponse(
         status="ok",
         teams_in_db=n_teams,
@@ -216,8 +253,24 @@ def health(db: Database = Depends(get_db)) -> HealthResponse:
         odds_quota_remaining=quota_remaining,
         odds_quota_minimum=quota_min,
         odds_quota_exhausted=quota_exhausted,
+        apifootball=_apifootball_status(),
+        odds_scan_cost=len(active_sports) * per_league_cost(),
+        odds_scans_affordable=(
+            -1 if quota_remaining < 0 or not active_sports
+            else max(0, (quota_remaining - quota_min)
+                     // (len(active_sports) * per_league_cost()))
+        ),
         active_sports=active_sports,
         db_latency_ms=db_latency_ms,
+        auto_confirm_picks=os.getenv("AUTO_CONFIRM_PICKS", "0") == "1",
+        bookmaker_whitelist=list(_whitelist_tokens()),
+        clv_snapshot_enabled=s.clv_snapshot_enabled,
+        allow_totals_over=s.allow_totals_over,
+        max_book_odds=s.max_book_odds,
+        derive_dnb=s.derive_dnb,
+        min_model_prob=s.min_model_prob,
+        min_value_edge=s.min_value_edge,
+        min_book_odds=s.min_book_odds,
     )
 
 

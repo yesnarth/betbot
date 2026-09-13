@@ -20,33 +20,68 @@ def _payload_from_filters(filters: dict, extras: dict | None = None) -> dict:
         "min_odds": filters["min_odds"],
         "n_legs": filters["n_legs"],
         "n_combos": filters["n_combos"],
+        "kickoff_hour": filters.get("kickoff_hour"),
     }
     if extras:
         base.update(extras)
     return base
 
 
+
+def recording_warning(auto_confirm: bool, extra: str = "") -> None:
+    """Say that this scan WRITES to the track record.
+
+    Five entry points historise their picks — Scan manuel, Sûr & rapide, Over,
+    Agent local and Live — and until now exactly one of them said so. The
+    asymmetry made it reasonable to conclude the others were read-only
+    previews. Under auto-confirm every written pick is immediately counted as a
+    placed bet, so an exploratory click silently fabricates a bet: a flat 1-unit
+    loss or win the user never took.
+    """
+    if not auto_confirm:
+        return
+    st.warning(
+        "⚠️ **Ce scan ENREGISTRE ses picks** — ils comptent aussitôt comme des "
+        "paris placés dans ton track record. Ne le relance pas pour essayer des "
+        "réglages." + (f" {extra}" if extra else "")
+    )
+
+
 def render_scan_tab(filters: dict, health: dict) -> None:
     st.subheader("Scan manuel — modèle Dixon-Coles + xG + ELO")
     scan_hours = health.get("scan_hours") or []
+    auto_confirm = bool(health.get("auto_confirm_picks"))
+
+    # This used to claim the scan was a "read-only preview" that "saves nothing
+    # by default". Both were false: HISTORIZE_SCANS defaults to 1, so every
+    # scan — including every filter tweak — writes rows to `predictions`. Under
+    # auto-confirm those rows count in the track record immediately. Saying so
+    # is the difference between an exploratory click and a recorded bet.
     if scan_hours:
         scan_caption = (
-            f"Aperçu **read-only** du modèle Poisson. Le worker auto fait la même chose "
-            f"à **{' et '.join(scan_hours)}** (Europe/Paris) et **sauvegarde** les picks "
-            f"comme « proposés » dans la file de validation. "
+            f"Le worker scanne automatiquement à **{' et '.join(scan_hours)}** "
+            f"(Europe/Paris). Ce bouton lance le même modèle à la demande. "
         )
     else:
         scan_caption = (
-            "Aperçu **read-only** du modèle Poisson. Auto-scan désactivé "
-            "(`SCAN_HOURS=` dans `.env`) → c'est **toi** qui contrôles quand "
-            "l'Odds API est appelé. "
+            "Auto-scan désactivé (`SCAN_HOURS=` dans `.env`) → **c'est ce bouton "
+            "qui déclenche tout**. Il appelle l'Odds API, applique le modèle "
+            "Dixon-Coles + xG + ELO et te rend les paris de valeur. "
         )
-    st.caption(
-        scan_caption +
-        "Ce bouton-ci ne sauvegarde rien par défaut — utilise « 💾 Sauvegarder » "
-        "sous le tableau si tu veux pousser les picks vers la file de validation "
-        "**Mes picks → Picks à valider**."
-    )
+    if auto_confirm:
+        st.warning(
+            scan_caption +
+            "\n\n⚠️ **Chaque scan ENREGISTRE ses picks**, et la validation "
+            "automatique les compte aussitôt comme des paris placés dans ton "
+            "track record. Ce n'est pas un aperçu : ne relance pas le scan pour "
+            "essayer des réglages, tu polluerais tes statistiques."
+        )
+    else:
+        st.caption(
+            scan_caption +
+            "Les picks sont enregistrés comme « proposés » (`HISTORIZE_SCANS=1`) "
+            "et attendent ta validation dans **Mes picks**."
+        )
 
     if st.button("▶️ Lancer le scan", type="primary", width='stretch'):
         payload = _payload_from_filters(filters)
@@ -92,20 +127,23 @@ def render_scan_tab(filters: dict, health: dict) -> None:
                         st.markdown("### Combinés")
                         render_parlays(res["parlays"])
 
-                    # Save-to-validation-queue : same effect as a worker scan
-                    # but on demand. Useful when the worker had no eligible
-                    # matches at 09h/20h (e.g. mid-afternoon scan after the
-                    # MIN_BEFORE_KICKOFF window has filtered everything out).
                     st.markdown("---")
-                    st.markdown(
-                        "**💾 Pousser ces picks vers la file de validation ?** "
-                        "Ils apparaîtront dans **Matchs → 🔔 Picks à valider** "
-                        "comme s'ils venaient d'un scan worker. Le bankroll "
-                        "n'est pas débité — la confirmation reste à faire "
-                        "click-by-click sur chaque pick."
-                    )
-                    if st.button("💾 Sauvegarder ces picks comme proposés",
-                                 width='stretch'):
+                    if auto_confirm:
+                        # The old block offered to "push these picks to the
+                        # validation queue". Under auto-confirm that queue does
+                        # not exist, and the picks were already written to the
+                        # database before this table even rendered. Clicking
+                        # returned "N pick(s) déjà en DB (skipped)", which reads
+                        # as "they were ignored" — the exact opposite of the
+                        # truth: they are already counted as placed bets.
+                        st.success(
+                            f"✅ **Ces {len(res['picks'])} picks sont déjà "
+                            "enregistrés et comptés dans ton track record.** "
+                            "Va les placer sur Betclic, puis reviens "
+                            "suivre les résultats dans 📊 **Performance**."
+                        )
+                    elif st.button("💾 Sauvegarder ces picks comme proposés",
+                                   width='stretch'):
                         saved = 0
                         already = 0
                         errors = 0
@@ -130,12 +168,12 @@ def render_scan_tab(filters: dict, health: dict) -> None:
                             st.error(f"❌ {errors} erreur(s) — voir logs API.")
 
 
-def render_safe_fast_tab(filters: dict) -> None:
+def render_safe_fast_tab(filters: dict, health: dict | None = None) -> None:
     st.subheader("🟢 Sûr & rapide — forte probabilité, validation précoce")
+    recording_warning(bool((health or {}).get("auto_confirm_picks")))
     st.caption(
         "Ne retient que les paris à **forte probabilité** (seuil réglable, défaut "
-        "≥ 72 %) et **+EV**, petites cotes autorisées. Priorité aux marchés **⚡ précoces** (Plus de "
-        "0.5 / 1.5 but) — gagnés dès qu'assez de buts tombent, **avant la fin**."
+        "≥ 72 %) et **+EV**, petites cotes autorisées."
     )
     st.info(
         "⚠️ **Forte proba ≠ profit garanti.** Ces paris sont bien pricés par le "
@@ -166,6 +204,7 @@ def render_safe_fast_tab(filters: dict) -> None:
         payload = {
             "sport_key": None if league == "Toutes" else league,
             "today_only": today_only,
+            "kickoff_hour": filters.get("kickoff_hour"),
             "min_edge": round(min_edge, 4),
             "min_prob": min_prob,
             "min_odds": 1.05,
@@ -212,12 +251,60 @@ def render_safe_fast_tab(filters: dict) -> None:
     render_safe_picks(picks)
 
 
-def render_over_tab(filters: dict) -> None:
+def render_over_tab(filters: dict, health: dict | None = None) -> None:
     st.subheader("⚽ Over — spécial buts (jamais Under)")
+
+    # Hard block when the server refuses Over selections.
+    #
+    # This tab posted to /recommend/manual with NO market restriction — the Over
+    # filter was purely cosmetic, applied when rendering. With ALLOW_TOTALS_OVER=0
+    # the Over outcomes are removed at the source in `detect_value_bets`, so the
+    # tab can never return one. It would still burn Odds API quota AND historise
+    # the 1/X/2 picks it got back — picks born 'confirmed', i.e. counted as real
+    # bets in the track record — while its empty state invited a relaunch.
+    # Blocking here is the only way to stop a loop that fabricates bets.
+    if health is not None and not health.get("allow_totals_over", True):
+        st.info(
+            "**Marché totals en OBSERVATION** — pas recommandé, mais mesuré.\n\n"
+            "Ce scan dédié reste fermé : **rien à lancer ici.**"
+        )
+        st.caption(
+            "**Pourquoi.** Les Over avaient été coupés sur un ROI de −52 % "
+            "(n=42). Or ce chiffre a été mesuré **pendant que le modèle de buts "
+            "était cassé** : il annonçait 4,61 buts sur un match de favori "
+            "contre ~2,9 réels, donc il surpariait les Over par construction. "
+            "Ce bug est corrigé, ce qui rend la preuve à charge périmée — et "
+            "aucun pick totals n'est sorti depuis, donc la coupe était devenue "
+            "**intestable**."
+        )
+        st.caption(
+            "**Ce qui se passe maintenant.** Le bot reproduit des picks totals, "
+            "mais en **observation** : enregistrés et notés, jamais recommandés, "
+            "jamais comptés comme paris placés, jamais dans le ROI. Ils "
+            "n'apparaissent pas dans l'e-mail. Aucune mise n'est engagée — on "
+            "reconstruit la preuve, pas le risque."
+        )
+        st.caption(
+            "**Deux garde-fous.** Seules les ligues à modèle Poisson y ont "
+            "droit : depuis la correction du modèle de buts, le consensus "
+            "recopie le prix du marché et n'a rien à dire sur les buts (71 des "
+            "97 picks totals historiques venaient de là, et les pertes avec). "
+            "Et les totals ont leur **propre plancher de confiance** (0,55) : "
+            "un Plus de 2.5 buts vaut ~0,57 en moyenne, lui appliquer le "
+            "plancher 1X2 de 0,70 ne le protège pas, il le supprime."
+        )
+        st.caption(
+            "Dans une cinquantaine de résultats notés, on saura si le modèle "
+            "corrigé prédit correctement les Over. Si oui, on rouvre pour de "
+            "bon ; sinon la coupe reposera enfin sur des preuves à jour."
+        )
+        return
+
     st.caption(
-        "Scanne **uniquement** les paris **Plus de X buts** (total du match). Le "
-        "signal clé = les **buts attendus** (λ) du modèle. On ne garde que les Over "
-        "à **valeur réelle** (+EV). Meilleure ligne par match, triée par valeur."
+        "Scanne les paris **Plus de X buts** (total du match). Le signal clé = les "
+        "**buts attendus** (λ) du modèle. Le filtre Over est appliqué à "
+        "l'affichage : le scan sous-jacent est le scan manuel complet, et **il "
+        "enregistre tous les picks retournés**, Over ou non."
     )
     choice = st.radio("Ligne minimale", ["Toutes", "≥ 1.5", "≥ 2.5", "≥ 3.5"],
                       horizontal=True, index=0, key="over_line_choice")
@@ -245,6 +332,7 @@ def render_over_tab(filters: dict) -> None:
         payload = {
             "sport_key": None if league == "Toutes" else league,
             "today_only": today_only,
+            "kickoff_hour": filters.get("kickoff_hour"),
             "min_edge": round(min_edge, 4),
             "min_prob": min_prob,
             "min_odds": 1.05,
@@ -302,7 +390,9 @@ def render_local_agent_tab(filters: dict, health: dict) -> None:
     st.caption(
         "Prend les picks du scan, croise avec les news Tavily + blessures + météo + ELO, "
         "applique des règles explicites pour calibrer les edges fictifs. "
-        "**Zéro coût** au-delà des quotas Tavily/Odds API. Reproductible et auditable."
+        "**Zéro coût en euros** au-delà des quotas Tavily/Odds API — mais "
+        "chaque lancement **enregistre ses picks** dans ton track record. "
+        "Reproductible et auditable."
     )
 
     col1, col2 = st.columns(2)
@@ -413,13 +503,26 @@ def render_local_agent_tab(filters: dict, health: dict) -> None:
                 render_parlays(res["parlays"])
 
 
-def render_ai_agent_tab(filters: dict, agent_enabled: bool) -> None:
+def render_ai_agent_tab(filters: dict, agent_enabled: bool,
+                        health: dict | None = None) -> None:
     st.subheader("Agent IA — Claude Sonnet 4.6")
     st.caption(
         "L'agent appelle les MÊMES outils que le scan manuel + en plus : recherche "
         "de news live (Tavily), blessures (API-Football), météo (Open-Meteo). "
         "Il raisonne en plusieurs étapes et justifie chaque pick."
     )
+    # The one path out of four that never calls `_historize_picks`. A bet taken
+    # from here and actually placed at the bookmaker exists in no statistic:
+    # not in the pick count, not in the ROI, not in the calibration data. The
+    # user had no way to know.
+    if bool((health or {}).get("auto_confirm_picks")):
+        st.error(
+            "⚠️ **Les picks de cet onglet ne sont PAS enregistrés** — ils ne "
+            "comptent dans aucune statistique : ni dans le nombre de "
+            "pronostics, ni dans le ROI, ni dans la calibration.\n\n"
+            "Si tu décides d'en placer un, retrouve-le via 🎯 **Scan manuel** "
+            "pour qu'il entre dans ton track record."
+        )
 
     if not agent_enabled:
         empty_state(
@@ -518,6 +621,7 @@ def render_target_parlay_tab(filters: dict) -> None:
         payload = {
             "sport_key": sport,
             "today_only": today_only,
+            "kickoff_hour": filters.get("kickoff_hour"),
             "target_odds": float(target),
             "max_legs": int(max_legs),
             "n_combos": int(n_combos),
@@ -555,10 +659,17 @@ def render_target_parlay_tab(filters: dict) -> None:
             )
 
 
-def render_live_tab(filters: dict) -> None:
+def render_live_tab(filters: dict, health: dict | None = None) -> None:
     import pandas as pd
 
     st.subheader("🔴 Scanner live (in-play)")
+    # The only tab whose copy actively pushes to re-scan ("relance pour
+    # rafraîchir") — and it historises. Ten refreshes are ten batches of bets
+    # counted at a flat 1 unit, none of them ever placed.
+    recording_warning(
+        bool((health or {}).get("auto_confirm_picks")),
+        extra="Chaque rafraîchissement crée un nouveau lot de paris comptés.",
+    )
     st.warning(
         "**Données à ~30 s + tu places à la main → place vite.** Le scanner compare "
         "les cotes **live** au modèle in-play (score courant + temps restant). La minute "
