@@ -209,11 +209,14 @@ with section_model:
 with section_tools:
     if _auto_confirm:
         st.caption(
-            "**C'est ici que commence ta journée.** L'auto-scan étant désactivé, "
-            "🎯 **Scan manuel** est le point de départ : il appelle l'Odds API, "
-            "applique le modèle et **enregistre** les picks, qui comptent "
-            "immédiatement dans ton track record. Les autres onglets sont du "
-            "diagnostic et de l'exploration."
+            "**Le worker scanne tout seul** à 10:00, 16:00, 19:00 et 21:30 "
+            "(Europe/Paris) : tes pronostics arrivent sans rien lancer. "
+            "🎯 **Scan manuel** est un scan EN PLUS, à la demande — il appelle "
+            "l'Odds API, applique le modèle et **enregistre** les picks, qui "
+            "comptent immédiatement dans ton track record. Ne le relance pas "
+            "pour essayer des réglages : chaque passage ajoute des paris "
+            "comptés. Les autres onglets sont du diagnostic et de "
+            "l'exploration."
         )
     else:
         st.caption(

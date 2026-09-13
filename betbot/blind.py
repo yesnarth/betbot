@@ -46,6 +46,18 @@ logger = logging.getLogger("betbot.blind")
 CHANNEL = "modele"
 _H2H = "h2h"
 
+# ORDRE ÉDITORIAL DES FAMILLES — et non l'ordre des probabilités.
+#
+# Classer par probabilité fait toujours gagner les marchés les plus larges :
+# double chance et draw-no-bet dépassent mécaniquement le 1X2 dont ils sont
+# tirés, et l'avis sur le vainqueur disparaissait du bulletin. Or ce ne sont
+# pas des prédictions indépendantes — ce sont des réécritures de la même
+# distribution 1X2, avec un coussin.
+#
+# Les questions réellement distinctes passent devant : qui gagne, combien de
+# buts, les deux marquent-elles. Les coussins ferment la marche.
+_FAMILY_ORDER = ("h2h", "totals", "btts", "double_chance", "draw_no_bet")
+
 
 def _h2h_options(p: MatchProbs, home: str, away: str) -> list[tuple]:
     """(code, libellé, marché, point, probabilité) — 1X2 et dérivés.
@@ -75,7 +87,7 @@ def _h2h_options(p: MatchProbs, home: str, away: str) -> list[tuple]:
     return opts
 
 
-def _totals_options(p: MatchProbs) -> list[tuple]:
+def _totals_options(p: MatchProbs, include_half_line: bool = False) -> list[tuple]:
     """Over/Under sur les quatre lignes que le modèle calcule.
 
     Toutes sont proposées, y compris celles qu'AUCUN book ne cote (la ligne 1,5
@@ -84,7 +96,7 @@ def _totals_options(p: MatchProbs) -> list[tuple]:
     probabilité que l'événement se produise.
     """
     out = []
-    for code, lab, pt, attr in (
+    rows = (
         ("O05", "Plus de 0.5 but", 0.5, "over_05"),
         ("U05", "Moins de 0.5 but", 0.5, "under_05"),
         ("O15", "Plus de 1.5 buts", 1.5, "over_15"),
@@ -93,7 +105,21 @@ def _totals_options(p: MatchProbs) -> list[tuple]:
         ("U25", "Moins de 2.5 buts", 2.5, "under_25"),
         ("O35", "Plus de 3.5 buts", 3.5, "over_35"),
         ("U35", "Moins de 3.5 buts", 3.5, "under_35"),
-    ):
+    )
+    # LA LIGNE 0,5 EST ÉCARTÉE PAR DÉFAUT — jugement, et il peut le renverser
+    # avec BLIND_INCLUDE_HALF_LINE=1.
+    #
+    # « Plus de 0,5 but » vaut ~0,91 dans PRESQUE TOUS les matchs. Ce n'est pas
+    # une prédiction sur ce match-ci, c'est une propriété du football : elle ne
+    # distingue rien. Mesuré au premier scan réel, elle remportait la quasi-
+    # totalité des pronostics émis et le vainqueur n'apparaissait jamais.
+    #
+    # C'est bien l'événement le plus probable, donc au sens strict de sa
+    # consigne elle a sa place. Mais un bulletin qui répète la même évidence
+    # sur chaque match ne lui apprend rien, et il ne peut pas la jouer non plus.
+    if not include_half_line:
+        rows = tuple(r for r in rows if r[2] != 0.5)
+    for code, lab, pt, attr in rows:
         v = getattr(p, attr, 0.0) or 0.0
         if v > 0:
             out.append((code, lab, "totals", pt, v))
@@ -115,7 +141,8 @@ def detect_blind_picks(
     events_by_sport: dict[str, list[dict]],
     prebuilt_stats_by_sport: dict[str, dict] | None = None,
     min_prob: float = 0.70,
-    max_per_match: int = 1,
+    max_per_match: int = 3,
+    include_half_line: bool = False,
 ) -> list[ValueBet]:
     """
     Pronostics purement statistiques, un par match par défaut.
@@ -158,10 +185,33 @@ def detect_blind_picks(
             options = _h2h_options(probs, home, away)
             if not (sport_key.startswith("tennis_")
                     or sport_key.startswith("basketball_")):
-                options += _totals_options(probs) + _btts_options(probs)
+                options += (_totals_options(probs, include_half_line)
+                            + _btts_options(probs))
 
-            options = [o for o in options if o[4] >= min_prob]
-            options.sort(key=lambda o: o[4], reverse=True)
+            options = [o for o in options if float(o[4]) >= min_prob]
+
+            # UN PRONOSTIC PAR FAMILLE DE MARCHÉ, pas un par match.
+            #
+            # Classer toutes les options d'un match par probabilité brute fait
+            # gagner « Plus de 0,5 but » partout : il vaut ~0,91 dans TOUS les
+            # matchs. Ce n'est pas une prédiction sur ce match-ci, c'est un fait
+            # sur le football — et il écrasait 1X2, BTTS et le reste. Mesuré au
+            # premier scan réel : la quasi-totalité des picks émis étaient O05.
+            #
+            # Chaque famille concourt donc contre elle-même. On obtient un avis
+            # sur le vainqueur, un sur les buts, un sur le BTTS — un vrai
+            # bulletin — au lieu de la même évidence répétée.
+            best_per_family: dict[str, tuple] = {}
+            for o in options:
+                fam = o[2]
+                if fam not in best_per_family or float(o[4]) > float(best_per_family[fam][4]):
+                    best_per_family[fam] = o
+            options = sorted(
+                best_per_family.values(),
+                key=lambda o: (_FAMILY_ORDER.index(o[2])
+                               if o[2] in _FAMILY_ORDER else len(_FAMILY_ORDER),
+                               -float(o[4])),
+            )
 
             for code, label, market, point, prob in options[:max_per_match]:
                 picks.append(ValueBet(
@@ -173,7 +223,16 @@ def detect_blind_picks(
                     market=market if point is None else market + "_" + str(point),
                     selection_code=code,
                     selection_label=label,
-                    model_prob=round(min(prob, 1.0), 4),
+                    # float() EXPLICITE, et ce n'est pas de la cosmétique : le
+                    # modèle rend des numpy.float64, que psycopg2 ne sait pas
+                    # adapter. Il les sérialise en « np.float64(0.91) » dans le
+                    # SQL, Postgres y lit un schéma nommé « np » et REFUSE
+                    # l'insertion. Mesuré en production le 2026-09-13 : le canal
+                    # a tourné et n'a rien enregistré, chaque écriture perdue
+                    # dans un log d'erreur. Les autres canaux y échappent parce
+                    # que leurs probabilités traversent le calibrateur, qui les
+                    # repasse en float Python — celui-ci ne le traverse pas.
+                    model_prob=round(min(float(prob), 1.0), 4),
                     # Aucune cote n'est consultée. 0.0 n'est pas un prix
                     # manquant à compléter plus tard : c'est la déclaration que
                     # ce canal n'en dépend pas. Toute statistique de ce canal se
@@ -182,8 +241,8 @@ def detect_blind_picks(
                     best_book="",
                     value_edge=0.0,
                     kelly_stake=0.0,
-                    lambda_home=probs.lambda_home,
-                    lambda_away=probs.lambda_away,
+                    lambda_home=float(probs.lambda_home),
+                    lambda_away=float(probs.lambda_away),
                     model_type=probs.model,
                     reliability=1.0,
                     commence_time=event.get("commence_time", "") or "",

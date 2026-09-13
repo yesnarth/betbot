@@ -513,6 +513,7 @@ def run_daily_scan(
             prebuilt_stats_by_sport=prebuilt_stats,
             min_prob=settings.blind_min_prob,
             max_per_match=settings.blind_max_per_match,
+            include_half_line=settings.blind_include_half_line,
         )
         if settings.blind_top_n > 0:
             blind_picks = blind_picks[:settings.blind_top_n]
