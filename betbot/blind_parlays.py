@@ -46,6 +46,21 @@ logger = logging.getLogger("betbot.blind_parlays")
 MIN_LEG_PROB = 0.60      # sous ce seuil le modèle s'effondre (43,7 % réalisés)
 MAX_LEGS = 20
 MIN_LEGS = 2
+# Nombre de jambes VISÉ, qui détermine la cote juste recherchée par jambe :
+# target_odds ** (1/TARGET_LEGS). Pour ×100 en 12 jambes, chaque jambe doit
+# valoir ~1,47, soit une probabilité de ~68 %.
+#
+# Sans ce ciblage, le constructeur prenait l'option la PLUS PROBABLE de chaque
+# match — donc la cote juste la plus BASSE, donc la plus difficile à empiler.
+# Mesuré sur le vivier réel : des jambes à 1,15 exigeraient 33 jambes pour
+# atteindre ×100, un ticket impossible à placer. Viser une probabilité par
+# jambe plutôt que le maximum est ce qui rend la cible atteignable.
+#
+# Ce n'est pas un relâchement de discipline : le plancher MIN_LEG_PROB reste
+# absolu, et le produit des probabilités vaut 1/target quelle que soit la
+# répartition — vingt jambes sûres ou dix moyennes donnent la même chance de
+# gain. Seul change le nombre de lignes à écrire sur le ticket.
+TARGET_LEGS = 12
 
 
 @dataclass
@@ -62,6 +77,7 @@ def build_blind_parlays(
     n_combos: int = 3,
     max_legs: int = MAX_LEGS,
     min_leg_prob: float = MIN_LEG_PROB,
+    target_legs: int = TARGET_LEGS,
 ) -> list[BlindParlay]:
     """Assemble `n_combos` tickets disjoints visant `target_odds` en cote juste.
 
@@ -70,17 +86,27 @@ def build_blind_parlays(
     jambe : c'est exactement ce qu'avait fait l'ancienne échelle de relâchement
     des combinés, et elle a coûté de l'argent réel pendant la trêve de septembre.
     """
-    # Une seule option par match, la plus probable : deux options d'un même
-    # match se recouvrent et ne sont pas deux paris.
-    meilleure: dict[str, ValueBet] = {}
+    # Probabilité recherchée par jambe pour atteindre la cible en `target_legs`.
+    # Bornée par le plancher : on ne descend jamais sous MIN_LEG_PROB pour
+    # gonfler un multiplicateur.
+    cible_p = max(min_leg_prob, target_odds ** (-1.0 / max(target_legs, 1)))
+
+    # Une seule option par match — deux options d'un même match se recouvrent et
+    # ne sont pas deux paris. Parmi les options éligibles, on retient celle dont
+    # la probabilité est la PLUS PROCHE de `cible_p`, pas la plus haute : viser
+    # le maximum rend la cible inatteignable (cf. TARGET_LEGS), et descendre
+    # sous le plancher est interdit.
+    retenue: dict[str, ValueBet] = {}
     for b in picks:
         if b.model_prob < min_leg_prob:
             continue
-        cur = meilleure.get(b.event_id)
-        if cur is None or b.model_prob > cur.model_prob:
-            meilleure[b.event_id] = b
+        cur = retenue.get(b.event_id)
+        if cur is None or abs(b.model_prob - cible_p) < abs(cur.model_prob - cible_p):
+            retenue[b.event_id] = b
 
-    vivier = sorted(meilleure.values(), key=lambda b: b.model_prob, reverse=True)
+    # Les jambes les plus sûres d'abord : à produit de probabilités égal, c'est
+    # la zone où le modèle est calibré qui rend le ticket fiable.
+    vivier = sorted(retenue.values(), key=lambda b: b.model_prob, reverse=True)
     combos: list[BlindParlay] = []
     utilises: set[str] = set()
 

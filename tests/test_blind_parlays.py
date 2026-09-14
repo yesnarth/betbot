@@ -95,3 +95,38 @@ def test_the_most_trustworthy_legs_are_used_first():
 def test_an_unreachable_target_is_reported_not_hidden():
     combos = build_blind_parlays(_pool(3, 0.90), target_odds=1000.0, n_combos=1)
     assert combos and combos[0].reached_target is False
+
+
+def test_the_target_is_actually_reachable_on_a_realistic_pool():
+    """Le constructeur prenait l'option la PLUS PROBABLE de chaque match — donc
+    la cote juste la plus BASSE, donc la plus dure à empiler. Mesuré sur le
+    vivier réel : des jambes à 1,15 auraient exigé 33 jambes pour ×100, un
+    ticket impossible à placer. Viser une probabilité PAR JAMBE est ce qui rend
+    la cible atteignable.
+
+    Le vivier imite le vrai : chaque match offre un double chance très probable,
+    un Over, un vainqueur sec et un BTTS."""
+    pool = []
+    for i in range(60):
+        for p, code in ((0.90, "1X"), (0.78, "O15"), (0.68, "1"), (0.62, "BTTS_O")):
+            b = _leg(f"e{i}", p)
+            b.selection_code = code
+            pool.append(b)
+    combos = build_blind_parlays(pool, target_odds=100.0, n_combos=3)
+    assert len(combos) == 3
+    for c in combos:
+        assert c.reached_target, f"×{c.fair_odds} sur {c.n_legs if hasattr(c,'n_legs') else len(c.legs)} jambes"
+        assert len(c.legs) <= 20, "un ticket de plus de 20 lignes ne se place pas"
+        assert c.win_prob == pytest.approx(1.0 / c.fair_odds, rel=1e-3)
+
+
+def test_the_floor_still_wins_over_the_target():
+    """Viser une probabilité par jambe ne doit jamais servir de prétexte à
+    descendre sous le plancher : une cible très haute demanderait des jambes
+    très incertaines, et c'est le plancher qui tranche."""
+    pool = []
+    for i in range(40):
+        for p in (0.95, 0.75, 0.61):
+            pool.append(_leg(f"e{i}", p))
+    for c in build_blind_parlays(pool, target_odds=100000.0, n_combos=1):
+        assert all(b.model_prob >= MIN_LEG_PROB for b in c.legs)
