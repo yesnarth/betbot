@@ -196,3 +196,77 @@ def resolve(
         "stale_resolved": stale.get("resolved", 0),
         "proposed_graded": graded_fd.get("resolved", 0) + graded_af.get("resolved", 0),
     }
+
+
+@router.get("/predictions/blind-parlays")
+@limiter.limit("30/minute")
+def blind_parlays(
+    request: Request,
+    target_odds: float = Query(default=100.0, ge=2.0, le=100_000.0),
+    n_combos: int = Query(default=3, ge=1, le=10),
+    db: Database = Depends(get_db),
+    _: str = Depends(require_auth),
+) -> dict:
+    """
+    Trois combinés visant ×`target_odds`, assemblés dans le vivier du canal
+    aveugle sur les COTES JUSTES DU MODÈLE (1/p). Aucun prix de bookmaker
+    n'intervient — ni pour choisir les jambes, ni pour mesurer le multiplicateur.
+
+    Le multiplicateur renvoyé est donc « juste » : celui réellement payé sur le
+    ticket sera INFÉRIEUR, le bookmaker prenant sa marge sur chaque jambe.
+
+    `win_prob` vaut exactement 1/`fair_odds` par construction — ce n'est pas une
+    coïncidence mais la définition du multiplicateur. Le champ est renvoyé quand
+    même : un ×100 présenté sans sa contrepartie (une chance sur cent) serait
+    une demi-vérité.
+    """
+    from betbot.analysis import ValueBet, _sport_key_to_label
+    from betbot.blind_parlays import build_blind_parlays
+
+    lignes = [r for r in db.get_proposed_predictions()
+              if (r.get("channel") or "") == "modele"]
+    picks = [
+        ValueBet(
+            event_id=r.get("event_id") or "",
+            sport_key=r.get("sport_key") or "",
+            home_team=r.get("home_team") or "",
+            away_team=r.get("away_team") or "",
+            league_label=_sport_key_to_label(r.get("sport_key") or ""),
+            market=r.get("market") or "",
+            selection_code=r.get("selection") or "",
+            # Le libellé n'est pas stocké en base (seul le code l'est) : on
+            # renvoie le code plutôt que d'inventer un libellé qui pourrait
+            # diverger de celui qu'a vu l'utilisateur au moment du pick.
+            selection_label=r.get("selection") or "",
+            model_prob=float(r.get("model_prob") or 0.0),
+            best_odds=0.0, best_book="", value_edge=0.0, kelly_stake=0.0,
+            lambda_home=r.get("lambda_home"), lambda_away=r.get("lambda_away"),
+            model_type=r.get("model_type") or "blended",
+            commence_time=r.get("commence_time") or "",
+            channel="modele",
+        )
+        for r in lignes
+    ]
+    combos = build_blind_parlays(picks, target_odds=target_odds, n_combos=n_combos)
+    return {
+        "target_odds": target_odds,
+        "n_matches_available": len({p.event_id for p in picks}),
+        "parlays": [
+            {
+                "n_legs": len(c.legs),
+                "fair_odds": c.fair_odds,
+                "win_prob": c.win_prob,
+                "reached_target": c.reached_target,
+                "legs": [
+                    {
+                        "home_team": b.home_team, "away_team": b.away_team,
+                        "league": b.league_label, "market": b.market,
+                        "selection": b.selection_code,
+                        "model_prob": b.model_prob,
+                        "fair_odds": round(1.0 / b.model_prob, 2) if b.model_prob else None,
+                        "commence_time": b.commence_time,
+                    } for b in c.legs
+                ],
+            } for c in combos
+        ],
+    }

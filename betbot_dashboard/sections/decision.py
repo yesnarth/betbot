@@ -892,3 +892,62 @@ def render_blind_tab(filters: dict) -> None:
         "se lisent en **taux de réussite**, jamais en ROI — un ROI calculé sur "
         "une cote absente serait un chiffre inventé."
     )
+
+    _render_blind_parlays()
+
+
+def _render_blind_parlays() -> None:
+    """Trois combinés ×100 tirés du même vivier, sur les cotes JUSTES du modèle.
+
+    Le multiplicateur et la probabilité de gain sont affichés ENSEMBLE et jamais
+    l'un sans l'autre : ce sont deux faces du même nombre (win_prob = 1/cote), et
+    montrer « ×100 » seul laisserait croire à une opportunité là où il n'y a
+    qu'une définition.
+    """
+    st.divider()
+    st.subheader("🎫 Trois combinés ×100")
+    try:
+        res = api_get("/predictions/blind-parlays", target_odds=100.0, n_combos=3) or {}
+    except Exception as exc:
+        st.error(f"Erreur : {exc}")
+        return
+
+    combos = res.get("parlays") or []
+    if not combos:
+        empty_state(
+            "🎫",
+            "Pas assez de matchs pour trois tickets honnêtes",
+            f"{res.get('n_matches_available', 0)} match(s) au-dessus du plancher "
+            "de 60 % par jambe. Le vivier n'est jamais complété en abaissant ce "
+            "plancher : c'est ce qu'avait fait l'ancienne échelle de relâchement, "
+            "et ça a coûté de l'argent réel.",
+        )
+        return
+
+    st.warning(
+        "**Un ×100 gagne une fois sur cent — c'est sa définition, pas un défaut.** "
+        "Les cotes affichées sont celles **justes du modèle** (1/probabilité) : "
+        "aucun prix de bookmaker n'entre ici. Le multiplicateur réellement payé "
+        "sur ton ticket sera **plus faible**, le book prenant sa marge sur chaque "
+        "jambe. Un match n'apparaît que dans un seul combiné.",
+        icon="🎫",
+    )
+
+    for i, c in enumerate(combos, 1):
+        cible = "" if c.get("reached_target") else "  ·  cible non atteinte"
+        st.markdown(
+            f"**Combiné {i}** — {c.get('n_legs')} jambes  ·  cote juste "
+            f"**×{c.get('fair_odds')}**  ·  chance de gain "
+            f"**{100 * (c.get('win_prob') or 0):.2f} %**{cible}"
+        )
+        st.dataframe(
+            [{
+                "Proba": f"{100 * (l.get('model_prob') or 0):.1f} %",
+                "Cote juste": l.get("fair_odds"),
+                "Match": f"{l.get('home_team')} – {l.get('away_team')}",
+                "Pari": l.get("selection"),
+                "Marché": l.get("market"),
+                "Coup d'envoi": (l.get("commence_time") or "")[:16].replace("T", " "),
+            } for l in (c.get("legs") or [])],
+            width="stretch", hide_index=True,
+        )
